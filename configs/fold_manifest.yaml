@@ -1,0 +1,30 @@
+# Fold calendar, proposal §3. DO NOT EDIT the dates (AGENTS.md §3.3).
+#
+# anchor      = first day of the label week. Inputs use t_dat < anchor.
+# label_end   = last day of the label week, INCLUSIVE. Labels use anchor <= t_dat <= label_end.
+#
+# The `checks` block lists the invariants that hmrec.data.folds validates.
+
+checks:
+  week_length_days: 7          # every label week covers exactly 7 days
+  folds_per_phase: 4
+  phase_order: [D, F, V, T]    # D = recall HPO, F = ranker train, V = validation, T = test
+  last_label_date: 2020-09-22  # last day of transactions_train.csv
+
+folds:
+  - {name: D1, phase: D, anchor: 2020-06-03, label_end: 2020-06-09}
+  - {name: D2, phase: D, anchor: 2020-06-10, label_end: 2020-06-16}
+  - {name: D3, phase: D, anchor: 2020-06-17, label_end: 2020-06-23}
+  - {name: D4, phase: D, anchor: 2020-06-24, label_end: 2020-06-30}
+  - {name: F1, phase: F, anchor: 2020-07-01, label_end: 2020-07-07}
+  - {name: F2, phase: F, anchor: 2020-07-08, label_end: 2020-07-14}
+  - {name: F3, phase: F, anchor: 2020-07-15, label_end: 2020-07-21}
+  - {name: F4, phase: F, anchor: 2020-07-22, label_end: 2020-07-28}
+  - {name: V1, phase: V, anchor: 2020-07-29, label_end: 2020-08-04}
+  - {name: V2, phase: V, anchor: 2020-08-05, label_end: 2020-08-11}
+  - {name: V3, phase: V, anchor: 2020-08-12, label_end: 2020-08-18}
+  - {name: V4, phase: V, anchor: 2020-08-19, label_end: 2020-08-25}
+  - {name: T1, phase: T, anchor: 2020-08-26, label_end: 2020-09-01}
+  - {name: T2, phase: T, anchor: 2020-09-02, label_end: 2020-09-08}
+  - {name: T3, phase: T, anchor: 2020-09-09, label_end: 2020-09-15}
+  - {name: T4, phase: T, anchor: 2020-09-16, label_end: 2020-09-22}

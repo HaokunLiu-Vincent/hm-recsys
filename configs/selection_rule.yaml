@@ -1,0 +1,32 @@
+# Selection rule for every HPO and ablation, proposal §4.1-4.2.
+# Committed BEFORE any score is seen. DO NOT EDIT (AGENTS.md §3.3).
+
+aggregation:
+  # Primary score: pool the queries of all 4 folds and average per-query scores.
+  primary: query_weighted
+  # Always reported next to the primary score, never used for selection.
+  also_report: [equal_fold, per_fold]
+
+acceptance:
+  # A candidate replaces the current default only if BOTH conditions hold:
+  #   1. (candidate - default) / default >= min_relative_improvement,
+  #      computed on the primary (query-weighted) score;
+  #   2. the candidate is strictly better than the default on at least
+  #      min_folds_better of the n_folds folds.
+  # Otherwise the default is kept.
+  min_relative_improvement: 0.01
+  min_folds_better: 3
+  n_folds: 4
+  # When two candidates are about equal, prefer the simpler and cheaper one.
+  tie_breaker: prefer_simpler_cheaper
+
+# Metric used for selection, per component (proposal §4.1). Other metrics are
+# reported but never used to select.
+selection_metric:
+  r1_popularity: recall@100
+  r2_repurchase: recall@30
+  r3_sibling: recall@50
+  r4_itemcf: recall@100
+  r5_wals: recall@100
+  r6_twotower: recall@100
+  ranker: map@12

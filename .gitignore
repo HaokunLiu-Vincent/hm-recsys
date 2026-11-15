@@ -1,0 +1,22 @@
+# Data and generated artifacts are never committed (AGENTS.md §10).
+# The leading "/" anchors these to the repo root. Without it, "data/" would
+# also ignore the source package src/hmrec/data/.
+/data/
+/artifacts/
+
+# results/ IS committed (small summary tables), so it is not listed here.
+
+# Python environment and caches
+.venv/
+__pycache__/
+*.py[cod]
+*.egg-info/
+.mypy_cache/
+.ruff_cache/
+.pytest_cache/
+.ipynb_checkpoints/
+
+# OS / editor
+.DS_Store
+.idea/
+.vscode/
