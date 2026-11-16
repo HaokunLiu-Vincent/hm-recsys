@@ -246,6 +246,10 @@
 
 统一输出格式（每路一张表）：`query_id, article_idx, channel, rank, score`。每个 query 内 `article_idx` 不重复；按 `score DESC, article_idx ASC` 排序；`rank` 从 1 开始连续编号；不足 quota 时不补齐。
 
+**每路的输出规格**（`src/hmrec/recall/base.py` 的 `OutputSpec`）：每一路声明自己的额外列（列名必须以该路前缀开头，如 `pop_`，不允许 null）和排序键（默认 `score DESC, article_idx ASC`）。写盘前的校验是双向的：多了未声明的列、缺少已声明的列、dtype 不一致都报错；并检查 `rank` 与声明的排序键一致。
+
+**R1 的排序例外**：R1 有额外列 `pop_is_fallback`（int8），排序键为 `pop_is_fallback ASC, score DESC, article_idx ASC`。原因：年龄桶内的行用桶内分数 `S(g, i)`，补齐行用全局分数 `S(i)`，两者量级不同，补齐行的分数可能比桶内行大；按 `score DESC` 排会把补齐行排到桶内行前面。所以 R1 的 `score`（即 `pop_score` 特征）混合两种量级，由 `pop_is_fallback` 区分；B 组的 `pop_bucket_score`（§8.3）为所有候选提供统一的 `S(g, i)` 量级。
+
 `article_idx`（int32）是把 `articles.csv` 中全部 `article_id` 按字符串排序后的编号（0..N−1，见 `src/hmrec/data/id_maps.py`），所以按 `article_idx ASC` 排序与按 `article_id ASC` 排序完全等价，tie-break 的结果不变。
 
 ### R1 — 分年龄桶的时间衰减热度（Age-Bucketed Decayed Popularity）
@@ -263,7 +267,8 @@
 | `AGE_INVALID` | 年龄 < 18 或 > 99（18 岁以下和异常值单独一个桶） |
 | `AGE_UNKNOWN` | 年龄缺失 |
 
-- 每个用户拿自己年龄桶的 Top-100；不足 100 时，用全局衰减热度按顺序补齐，跳过已选商品，并标记 `pop_is_fallback=1`。
+- 每个用户拿自己年龄桶的 Top-100；不足 100 时，用全局衰减热度按顺序补齐，跳过已选商品，并标记 `pop_is_fallback=1`。全局衰减热度 `S(i) = Σ exp(−age_days / τ)`，对 `[a−7d, a)` 内**所有**用户买 `i` 的购买行求和，τ 与桶内相同；补齐行排在桶内行之后（见本节开头的排序例外）。每个 fold、每个年龄桶的补齐行数作为诊断写进日志和结果。
+- **G0**：所有用户同一个全局列表，分数是 `[a−7d, a)` 内的原始购买行数（不衰减、不分桶），没有补齐行。
 - 默认：τ = 3 天，quota 100，限制在活跃池 `A(a)` 内。
 
 | 类型 | 内容 | 配置数 |
@@ -284,6 +289,8 @@
 | 类型 | 内容 | 配置数 |
 |---|---|---|
 | Ablation | **Recency-only**（按最近一次购买时间排序）vs **Decayed frequency**（τ=30） | 2 |
+
+Recency-only 的分数 = `1 / age_days`，`age_days` 取用户最近一次购买该商品的年龄（昨天 = 1.0，前天 = 0.5）；更早的购买和购买次数都不参与。同一天买的多件商品同分，只按 `article_idx ASC` 排序，不用其他信息打破平局，保持它是纯粹的对照组。
 | HPO | `τ ∈ {14, 30, 60}` | +2 |
 
 **合计 4 个配置。**
