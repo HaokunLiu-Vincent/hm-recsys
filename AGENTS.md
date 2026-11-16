@@ -251,6 +251,7 @@ make test         # uv run pytest tests（单元 + 集成）
   2. 每个 commit 的 commit message（格式见下一条）。
 
   由用户自己 commit。用户在对话中明确要求 agent commit 时才可以 commit。
+- **分支**：每个 milestone 一个分支，命名为 `m<编号>-<内容>`，例如 `m1-recall-r1-r3`。agent 可以创建、切换分支，但**不 commit、不合并**。milestone 完成后由用户 fast-forward 合并到 main（`git merge --ff-only <分支>`）。
 - 每次 commit 只做一件事，commit message 用英文，格式：`<scope>: <what changed>`，例如 `recall/r2: add decayed-frequency scoring`。
 - 锁定配置（M5、M7 等节点）时打 tag，例如 `lock-channels-v1`（由用户打，agent 只给出建议的 tag 名）。
 - 不要提交 `data/`、`artifacts/` 下的文件。
