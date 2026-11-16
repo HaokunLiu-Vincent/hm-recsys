@@ -256,7 +256,7 @@ def run_d_phase(
         raise ValueError(f"channels {unknown} are not in configs/hpo/d_phase.yaml")
     folds = [context.fold.name for context in contexts]
     columns = result_columns(folds, list(grid.fold_groups), grid.extra_metrics)
-    commit, dirty = git_state(paths.project_root)
+    commit, dirty = git_state(paths.project_root, paths.results_root)
     if dirty:
         warn_uncommitted_changes(commit)
     run = RunContext(paths, tuple(contexts), grid, rule, base, tuple(columns), commit, dirty)

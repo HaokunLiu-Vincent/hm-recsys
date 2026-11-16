@@ -1,6 +1,7 @@
 """Tests for the HPO runner: T-fold guard, trial ids, step flow, resume, records, diagnostics."""
 
 import dataclasses
+import subprocess
 from datetime import date
 from pathlib import Path
 
@@ -27,6 +28,7 @@ from hmrec.hpo.runner import (
     check_tuning_folds,
     evaluate_trial,
     fold_diagnostics,
+    git_state,
     make_evaluate_fn,
     make_trial_id,
     run_channel,
@@ -353,3 +355,58 @@ def test_uncommitted_changes_warning_is_loud(caplog: pytest.LogCaptureFixture) -
     assert "UNCOMMITTED CHANGES" in caplog.text
     assert "d9ede739b9e4" in caplog.text
     assert "git_dirty=True" in caplog.text
+
+
+# ---------------------------------------------------------------- git_state
+
+
+def _git(repo: Path, *args: str) -> str:
+    """Run git in a throw-away test repo (identity and signing set per call)."""
+    command = ["git", "-c", "user.name=test", "-c", "user.email=test@example.com"]
+    command += ["-c", "commit.gpgsign=false", *args]
+    return subprocess.run(command, cwd=repo, capture_output=True, text=True, check=True).stdout
+
+
+def _make_repo(tmp_path: Path) -> Path:
+    """A committed repo with src/, configs/ and results/, like the project layout."""
+    repo = tmp_path / "repo"
+    for relative in ("src/model.py", "configs/model.yaml", "results/d_phase.csv"):
+        (repo / relative).parent.mkdir(parents=True, exist_ok=True)
+        (repo / relative).write_text("original\n")
+    _git(repo, "init", "--quiet")
+    _git(repo, "add", ".")
+    _git(repo, "commit", "--quiet", "-m", "initial")
+    return repo
+
+
+def test_git_state_clean_repo(tmp_path: Path) -> None:
+    repo = _make_repo(tmp_path)
+    commit, dirty = git_state(repo, repo / "results")
+    assert commit == _git(repo, "rev-parse", "HEAD").strip()
+    assert dirty is False
+
+
+def test_git_state_ignores_results(tmp_path: Path) -> None:
+    # This is what happens between two channels: the first channel modified
+    # results/d_phase.csv and wrote a new, untracked step report.
+    repo = _make_repo(tmp_path)
+    (repo / "results" / "d_phase.csv").write_text("original\nnew trial\n")
+    (repo / "results" / "d_phase_steps").mkdir()
+    (repo / "results" / "d_phase_steps" / "r1_popularity.csv").write_text("step\n")
+    assert git_state(repo, repo / "results")[1] is False
+
+
+@pytest.mark.parametrize(
+    ("relative", "tracked"),
+    [("src/model.py", True), ("configs/model.yaml", True), ("src/new_module.py", False)],
+)
+def test_git_state_code_or_config_change_is_dirty(
+    tmp_path: Path, relative: str, tracked: bool
+) -> None:
+    # tracked=True: an edit to a committed file; False: a new, untracked file.
+    repo = _make_repo(tmp_path)
+    assert (repo / relative).exists() is tracked
+    (repo / relative).write_text("edited\n")
+    # A change under results/ at the same time must not hide the code change.
+    (repo / "results" / "d_phase.csv").write_text("new trial\n")
+    assert git_state(repo, repo / "results")[1] is True

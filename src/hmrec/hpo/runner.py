@@ -169,13 +169,31 @@ def warn_uncommitted_changes(commit: str) -> None:
     LOGGER.warning(UNCOMMITTED_BANNER)
 
 
-def git_state(repo_root: Path) -> tuple[str, bool]:
-    """(HEAD commit, True if the working tree has uncommitted changes)."""
+def git_state(repo_root: Path, results_root: Path) -> tuple[str, bool]:
+    """HEAD commit, and whether the code or configs differ from HEAD.
+
+    "Dirty" means any tracked change or untracked file in the working tree,
+    EXCEPT under results_root. results/ holds this runner's own output: after
+    one channel finishes, results/d_phase.csv is new or modified, and that must
+    not mark the next channel's trials as git_dirty (the code is still HEAD).
+    data/ and artifacts/ are in .gitignore, so git never reports them anyway.
+    Everything else (src/, configs/, scripts/, docs/, pyproject.toml, ...) counts.
+
+    Args:
+        repo_root: Root of the git repository.
+        results_root: Folder of committed result tables; must be inside repo_root.
+
+    Returns:
+        (HEAD commit hash, True if there are changes outside results_root).
+    """
     commit = subprocess.run(
         ["git", "rev-parse", "HEAD"], cwd=repo_root, capture_output=True, text=True, check=True
     ).stdout.strip()
+    # A git "exclude" pathspec: list changes in the whole tree ("."), minus results_root.
+    results_relative = results_root.resolve().relative_to(repo_root.resolve()).as_posix()
+    status_command = ["git", "status", "--porcelain", "--", ".", f":(exclude){results_relative}"]
     status = subprocess.run(
-        ["git", "status", "--porcelain"], cwd=repo_root, capture_output=True, text=True, check=True
+        status_command, cwd=repo_root, capture_output=True, text=True, check=True
     ).stdout
     return commit, bool(status.strip())
 
