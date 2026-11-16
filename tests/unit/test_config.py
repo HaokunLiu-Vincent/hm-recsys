@@ -9,15 +9,20 @@ from hmrec.config import (
     ActivePoolConfig,
     load_base_config,
     load_catalog_config,
+    load_popularity_config,
     load_preprocess_config,
     load_queries_config,
+    load_repurchase_config,
     load_selection_rule,
+    load_sibling_config,
     load_yaml,
     parse_base_config,
     parse_catalog_config,
+    parse_popularity_config,
     parse_preprocess_config,
     parse_queries_config,
     parse_selection_rule,
+    parse_sibling_config,
     preprocess_config_hash,
 )
 
@@ -263,3 +268,44 @@ def test_queries_config_rejects_offset_outside_int32() -> None:
         parse_queries_config({"query_id_fold_offset": 2**31})
     with pytest.raises(ValueError, match="must be > 0"):
         parse_queries_config({"query_id_fold_offset": 0})
+
+
+# ---------------------------------------------------------------- recall/r1..r3
+
+
+def test_repo_recall_configs_match_proposal_defaults() -> None:
+    r1 = load_popularity_config(REPO_CONFIGS / "recall" / "r1_popularity.yaml")
+    assert (r1.variant, r1.window_days, r1.tau_days, r1.quota) == ("A1", 7, 3.0, 100)
+    r2 = load_repurchase_config(REPO_CONFIGS / "recall" / "r2_repurchase.yaml")
+    assert (r2.variant, r2.lookback_days, r2.tau_days, r2.quota) == (
+        "decayed_frequency",
+        180,
+        30.0,
+        30,
+    )
+    r3 = load_sibling_config(REPO_CONFIGS / "recall" / "r3_sibling.yaml")
+    assert (r3.style_lookback_days, r3.market_window_days, r3.tau_days, r3.gamma, r3.quota) == (
+        180,
+        7,
+        30.0,
+        0.5,
+        50,
+    )
+
+
+def test_recall_config_rejects_unknown_variant() -> None:
+    with pytest.raises(ValueError, match="expected one of"):
+        parse_popularity_config({"variant": "A2", "window_days": 7, "tau_days": 3, "quota": 100})
+
+
+def test_sibling_gamma_zero_allowed_negative_rejected() -> None:
+    raw = {
+        "style_lookback_days": 180,
+        "market_window_days": 7,
+        "tau_days": 30,
+        "gamma": 0,
+        "quota": 50,
+    }
+    assert parse_sibling_config(raw).gamma == 0.0
+    with pytest.raises(ValueError, match="gamma must be >= 0"):
+        parse_sibling_config({**raw, "gamma": -0.5})

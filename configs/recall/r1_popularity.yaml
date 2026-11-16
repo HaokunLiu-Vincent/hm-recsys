@@ -1,0 +1,9 @@
+# R1 age-bucketed decayed popularity, proposal §5 R1. Read by hmrec.config.load_popularity_config.
+# Default = the A1 variant. The age buckets themselves are frozen and live in
+# configs/preprocess.yaml (customers.age_bucket); they are not tuned here.
+# Output is always limited to the active pool A(a) (proposal §2.4, not a setting).
+
+variant: A1          # A1 = per age bucket, decayed (tau); G0 = global, no buckets, raw 7-day count
+window_days: 7       # history window [anchor - 7d, anchor)
+tau_days: 3.0        # decay time constant: weight = exp(-age_days / tau); ignored by G0. HPO: 1..7
+quota: 100           # max candidates per query; short bucket lists are filled from global popularity

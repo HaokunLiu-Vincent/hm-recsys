@@ -93,6 +93,10 @@ class ProjectPaths:
         """configs/queries.yaml."""
         return self.configs_dir / "queries.yaml"
 
+    def recall_config_file(self, channel_file_stem: str) -> Path:
+        """configs/recall/{channel_file_stem}.yaml, e.g. "r1_popularity"."""
+        return self.configs_dir / "recall" / f"{channel_file_stem}.yaml"
+
     @property
     def locks_dir(self) -> Path:
         """configs/locks/ (append-only)."""

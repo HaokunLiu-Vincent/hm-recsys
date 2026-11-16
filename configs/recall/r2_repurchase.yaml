@@ -1,0 +1,9 @@
+# R2 repurchase, proposal §5 R2. Read by hmrec.config.load_repurchase_config.
+# Only articles the customer bought in [anchor - lookback_days, anchor) are recommended.
+# Not limited to the active pool (proposal §2.4).
+
+variant: decayed_frequency  # decayed_frequency: score = sum of exp(-age_days / tau) over purchase lines
+                            # recency_only: score = 1 / age_days of the most recent purchase (tau unused)
+lookback_days: 180
+tau_days: 30.0              # HPO: {14, 30, 60}
+quota: 30                   # soft quota: at most 30, never padded

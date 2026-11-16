@@ -8,6 +8,8 @@ Loaders in this module:
     - load_preprocess_config: configs/preprocess.yaml -> PreprocessConfig
     - load_catalog_config: configs/catalog.yaml -> CatalogConfig
     - load_queries_config: configs/queries.yaml -> QueriesConfig
+    - load_popularity_config / load_repurchase_config / load_sibling_config:
+      configs/recall/r{1,2,3}_*.yaml -> PopularityConfig / RepurchaseConfig / SiblingConfig
 
 The fold manifest is parsed in hmrec.data.folds, which reuses load_yaml and the
 small field helpers defined here.
@@ -658,3 +660,141 @@ def parse_queries_config(raw: Mapping[str, Any]) -> QueriesConfig:
 def load_queries_config(path: Path) -> QueriesConfig:
     """Read and validate configs/queries.yaml."""
     return parse_queries_config(load_yaml(path))
+
+
+# ---------------------------------------------------------------- recall/r1..r3
+
+POPULARITY_VARIANTS = ("A1", "G0")
+REPURCHASE_VARIANTS = ("decayed_frequency", "recency_only")
+
+
+def _get_choice(raw: Mapping[str, Any], key: str, where: str, choices: tuple[str, ...]) -> str:
+    """Return raw[key] and check that it is one of `choices`."""
+    value = get_str(raw, key, where)
+    if value not in choices:
+        raise ValueError(f"{where}.{key}: expected one of {list(choices)}, got {value!r}")
+    return value
+
+
+@dataclass(frozen=True)
+class PopularityConfig:
+    """R1 settings from configs/recall/r1_popularity.yaml (proposal §5 R1).
+
+    Attributes:
+        variant: "A1" (per age bucket, decayed) or "G0" (global raw count, no buckets).
+        window_days: History window [anchor - window_days, anchor).
+        tau_days: Decay time constant (not half-life); unused by G0.
+        quota: Maximum candidates per query.
+    """
+
+    variant: str
+    window_days: int
+    tau_days: float
+    quota: int
+
+
+@dataclass(frozen=True)
+class RepurchaseConfig:
+    """R2 settings from configs/recall/r2_repurchase.yaml (proposal §5 R2).
+
+    Attributes:
+        variant: "decayed_frequency" or "recency_only".
+        lookback_days: History window [anchor - lookback_days, anchor).
+        tau_days: Decay time constant; unused by recency_only.
+        quota: Maximum candidates per query (soft, never padded).
+    """
+
+    variant: str
+    lookback_days: int
+    tau_days: float
+    quota: int
+
+
+@dataclass(frozen=True)
+class SiblingConfig:
+    """R3 settings from configs/recall/r3_sibling.yaml (proposal §5 R3, formula S2).
+
+    Attributes:
+        style_lookback_days: Window for P(u, c) and the exclusion of bought articles.
+        market_window_days: Window for the market count M(j).
+        tau_days: Decay time constant of P(u, c).
+        gamma: Exponent of (1 + M(j)); 0 means style preference only.
+        quota: Maximum candidates per query (never padded).
+    """
+
+    style_lookback_days: int
+    market_window_days: int
+    tau_days: float
+    gamma: float
+    quota: int
+
+
+def parse_popularity_config(raw: Mapping[str, Any]) -> PopularityConfig:
+    """Build a PopularityConfig from the parsed r1_popularity.yaml."""
+    where = "r1_popularity"
+    check_keys(raw, {"variant", "window_days", "tau_days", "quota"}, where)
+    config = PopularityConfig(
+        variant=_get_choice(raw, "variant", where, POPULARITY_VARIANTS),
+        window_days=get_int(raw, "window_days", where),
+        tau_days=get_float(raw, "tau_days", where),
+        quota=get_int(raw, "quota", where),
+    )
+    require_positive(config.window_days, f"{where}.window_days")
+    require_positive(config.tau_days, f"{where}.tau_days")
+    require_positive(config.quota, f"{where}.quota")
+    return config
+
+
+def parse_repurchase_config(raw: Mapping[str, Any]) -> RepurchaseConfig:
+    """Build a RepurchaseConfig from the parsed r2_repurchase.yaml."""
+    where = "r2_repurchase"
+    check_keys(raw, {"variant", "lookback_days", "tau_days", "quota"}, where)
+    config = RepurchaseConfig(
+        variant=_get_choice(raw, "variant", where, REPURCHASE_VARIANTS),
+        lookback_days=get_int(raw, "lookback_days", where),
+        tau_days=get_float(raw, "tau_days", where),
+        quota=get_int(raw, "quota", where),
+    )
+    require_positive(config.lookback_days, f"{where}.lookback_days")
+    require_positive(config.tau_days, f"{where}.tau_days")
+    require_positive(config.quota, f"{where}.quota")
+    return config
+
+
+def parse_sibling_config(raw: Mapping[str, Any]) -> SiblingConfig:
+    """Build a SiblingConfig from the parsed r3_sibling.yaml.
+
+    gamma may be 0 (style preference only) but not negative.
+    """
+    where = "r3_sibling"
+    expected = {"style_lookback_days", "market_window_days", "tau_days", "gamma", "quota"}
+    check_keys(raw, expected, where)
+    config = SiblingConfig(
+        style_lookback_days=get_int(raw, "style_lookback_days", where),
+        market_window_days=get_int(raw, "market_window_days", where),
+        tau_days=get_float(raw, "tau_days", where),
+        gamma=get_float(raw, "gamma", where),
+        quota=get_int(raw, "quota", where),
+    )
+    require_positive(config.style_lookback_days, f"{where}.style_lookback_days")
+    require_positive(config.market_window_days, f"{where}.market_window_days")
+    require_positive(config.tau_days, f"{where}.tau_days")
+    require_positive(config.quota, f"{where}.quota")
+    if config.gamma < 0:
+        raise ValueError(f"{where}.gamma must be >= 0, got {config.gamma}")
+    return config
+
+
+def load_popularity_config(path: Path) -> PopularityConfig:
+    """Read and validate configs/recall/r1_popularity.yaml."""
+    return parse_popularity_config(load_yaml(path))
+
+
+def load_repurchase_config(path: Path) -> RepurchaseConfig:
+    """Read and validate configs/recall/r2_repurchase.yaml."""
+    return parse_repurchase_config(load_yaml(path))
+
+
+def load_sibling_config(path: Path) -> SiblingConfig:
+    """Read and validate configs/recall/r3_sibling.yaml."""
+    return parse_sibling_config(load_yaml(path))
