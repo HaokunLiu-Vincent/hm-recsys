@@ -1,0 +1,157 @@
+# D-phase experiments of R1-R5 (proposal §5), read by hmrec.hpo.grid.load_phase_grid.
+# Written strictly from the tables in proposal §5; do not add configurations.
+# The ORDER of the candidates is part of the selection rule (proposal §4.2,
+# docs/decisions.md 2026-11-17) and is committed before any run. DO NOT reorder after a run.
+#
+# Each channel starts from its configs/recall/*.yaml (the default) and runs its
+# steps in order (proposal §4.3: ablation first, then one parameter at a time).
+# The winner of a step is the default of the next step.
+#
+# Step fields:
+#   kind:       select            -> the §4.2 multi-candidate rule (hpo/selection.py)
+#               convergence_check -> R5 iterations only (proposal §4.2 point 5, §5 R5)
+#   order:      listed            -> candidates in priority order as written
+#                                    (simpler / cheaper / closer to the default first)
+#               nearest_to_current-> one numeric parameter; priority = distance to the
+#                                    CURRENT default, ties -> smaller value first
+#   candidates: overrides applied to the current default. A candidate equal to the
+#               current default is the default itself (not a new trial).
+#   requires:   the step runs only if the current config has one of these values;
+#               e.g. tau is meaningless for G0 (no decay).
+#   stop_at_boundary: (one numeric parameter only) if the selected value is the smallest
+#               or largest value of the step, the channel stops after this step and a
+#               human decides whether to widen the range; the grid is never extended
+#               automatically (R4, R5; docs/decisions.md 2026-11-17).
+
+report:
+  # Diagnostics only, never used for selection (proposal §4.1): query-weighted
+  # score of each group of folds, next to the 4-week score.
+  fold_groups:
+    D1_D2: [D1, D2]
+    D3_D4: [D3, D4]
+  # Reported next to the selection metric (proposal §4.1), pooled over the 4 folds.
+  extra_metrics: [recall@12, recall@20, ndcg@12, ndcg@20, map@12]
+
+channels:
+  r1_popularity:                 # proposal §5 R1: 2 + 6 = 8 configurations
+    - name: variant
+      kind: select
+      order: listed
+      candidates:
+        - {variant: G0}          # simpler: global raw 7-day count
+        - {variant: A1}          # default
+    - name: tau_days
+      kind: select
+      order: nearest_to_current
+      requires: {variant: [A1]}
+      candidates:
+        - {tau_days: 1.0}
+        - {tau_days: 2.0}
+        - {tau_days: 3.0}
+        - {tau_days: 4.0}
+        - {tau_days: 5.0}
+        - {tau_days: 6.0}
+        - {tau_days: 7.0}
+
+  r2_repurchase:                 # proposal §5 R2: 2 + 2 + 1 = 5 configurations
+    - name: variant
+      kind: select
+      order: listed
+      candidates:
+        - {variant: recency_only}       # simpler
+        - {variant: decayed_frequency}  # default
+    - name: tau_days
+      kind: select
+      order: nearest_to_current
+      requires: {variant: [decayed_frequency]}
+      candidates:
+        - {tau_days: 14.0}
+        - {tau_days: 30.0}
+        - {tau_days: 60.0}
+    - name: lookback_days        # added after the R1-R3 D-phase run (docs/decisions.md 2026-11-17)
+      kind: select
+      order: listed
+      candidates:
+        - {lookback_days: 180}   # default; shorter = simpler
+        - {lookback_days: 365}
+
+  r3_sibling:                    # proposal §5 R3: 5 + 2 = 7 configurations
+    - name: gamma                # ablation: gamma = 0 means style preference only
+      kind: select               # 1.5 and 2.0 added after the R1-R3 D-phase run (decisions.md)
+      order: nearest_to_current
+      candidates:
+        - {gamma: 0.0}
+        - {gamma: 0.5}
+        - {gamma: 1.0}
+        - {gamma: 1.5}
+        - {gamma: 2.0}
+    - name: tau_days
+      kind: select
+      order: nearest_to_current
+      candidates:
+        - {tau_days: 14.0}
+        - {tau_days: 30.0}
+        - {tau_days: 60.0}
+
+  r4_itemcf:                     # proposal §5 R4: 2 + 2 + 5 = 9 configurations
+    - name: variant
+      kind: select
+      order: listed
+      candidates:
+        - {variant: CF0, alpha: 0.5}    # simpler: no IUF, plain cosine
+        - {variant: CF3, alpha: 0.7}    # default
+    - name: alpha
+      kind: select
+      order: nearest_to_current
+      stop_at_boundary: true
+      candidates:
+        - {alpha: 0.5}
+        - {alpha: 0.7}
+        - {alpha: 0.9}
+    - name: seed_window_x_decay  # 3 x 2 grid; (90, off) is the default
+      kind: select
+      order: listed
+      candidates:
+        - {seed_window_days: 90, seed_decay: false}
+        - {seed_window_days: 90, seed_decay: true}
+        - {seed_window_days: 180, seed_decay: false}
+        - {seed_window_days: 180, seed_decay: true}
+        - {seed_window_days: 365, seed_decay: false}
+        - {seed_window_days: 365, seed_decay: true}
+
+  r5_wals:                       # proposal §5 R5: 2 + 2 + 2 + 1 + 2 = 9 configurations
+    - name: variant
+      kind: select
+      order: listed
+      candidates:
+        - {variant: W0}          # simpler: r_ui = 1
+        - {variant: W2}          # default
+    - name: alpha_conf
+      kind: select
+      order: nearest_to_current
+      stop_at_boundary: true
+      candidates:
+        - {alpha_conf: 10.0}
+        - {alpha_conf: 20.0}
+        - {alpha_conf: 40.0}
+    - name: regularization
+      kind: select
+      order: nearest_to_current
+      stop_at_boundary: true
+      candidates:
+        - {regularization: 0.01}
+        - {regularization: 0.1}
+        - {regularization: 1.0}
+    - name: factors
+      kind: select
+      order: listed
+      candidates:
+        - {factors: 64}          # cheaper
+        - {factors: 128}
+    - name: iterations           # only checks that 15 is on the plateau (proposal §5 R5)
+      kind: convergence_check
+      order: listed
+      candidates:
+        - {iterations: 10}
+        - {iterations: 15}
+        - {iterations: 25}

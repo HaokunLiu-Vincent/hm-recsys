@@ -79,6 +79,11 @@ class ProjectPaths:
         return self.configs_dir / "selection_rule.yaml"
 
     @property
+    def d_phase_grid_file(self) -> Path:
+        """configs/hpo/d_phase.yaml: the D-phase experiments (proposal §5)."""
+        return self.configs_dir / "hpo" / "d_phase.yaml"
+
+    @property
     def preprocess_config_file(self) -> Path:
         """configs/preprocess.yaml."""
         return self.configs_dir / "preprocess.yaml"
@@ -261,12 +266,20 @@ class ProjectPaths:
         """artifacts/runs/{run_id}/: config snapshot, logs, metrics."""
         return self.artifacts_root / "runs" / run_id
 
+    def hpo_trial_dir(self, phase: str, channel: str, trial_id: str) -> Path:
+        """artifacts/hpo/{phase}/{channel}/{trial_id}/: per-trial side files (pool flags)."""
+        return self.artifacts_root / "hpo" / phase / channel / trial_id
+
     # ------------------------------------------------------------ results (committed)
 
     @property
     def d_phase_results_file(self) -> Path:
         """results/d_phase.csv."""
         return self.results_root / "d_phase.csv"
+
+    def d_phase_steps_file(self, channel: str) -> Path:
+        """results/d_phase_steps/{channel}.csv: every step's candidates and decision."""
+        return self.results_root / "d_phase_steps" / f"{channel}.csv"
 
     @property
     def v_phase_results_file(self) -> Path:

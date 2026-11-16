@@ -17,5 +17,7 @@ memory:
 chunking:
   query_chunk_size: 10000    # queries per chunk for fusion / features / ranker scoring (proposal §1.3)
   item_chunk_size: 2000      # seed items per chunk for R4 ItemCF co-occurrence (proposal §1.3)
+  dense_score_query_chunk_size: 5000  # queries per chunk when scoring all active articles with
+                                      # vectors (R5; later R6): 5,000 x ~21k articles x 4 B = 0.4 GB
   pair_chunk_size: 500000    # (customer, article) pairs per chunk for vector dot products
                              # (hmrec.vectors.dot_pairs; 500k x 64 dims x 4 B x 2 sides = 256 MB per chunk)

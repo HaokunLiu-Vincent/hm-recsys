@@ -37,7 +37,12 @@ VALID_BASE: dict[str, Any] = {
     "seed": 7,
     "num_threads": 6,
     "memory": {"limit_gb": 6, "sample_interval_seconds": 0.5},
-    "chunking": {"query_chunk_size": 10, "item_chunk_size": 3, "pair_chunk_size": 5},
+    "chunking": {
+        "query_chunk_size": 10,
+        "item_chunk_size": 3,
+        "dense_score_query_chunk_size": 4,
+        "pair_chunk_size": 5,
+    },
 }
 
 VALID_RULE: dict[str, Any] = {

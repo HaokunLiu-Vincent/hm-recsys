@@ -103,11 +103,12 @@ H&M 个性化时尚推荐（Kaggle H&M 数据集）。目标：预测每个用�
 完整目录见 `docs/proposal.md` §14。关键规则：
 
 ```
-scripts/  →  src/hmrec/{recall, fusion, features, ranker, hpo}  →  src/hmrec/{data, eval}  →  config / paths
+scripts/  →  src/hmrec/{recall, fusion, features, ranker, hpo}  →  src/hmrec/{data, eval, vectors}  →  config / paths
 ```
 
 - 上层可以 import 下层，**下层不能 import 上层**。
 - `recall/`、`features/`、`ranker/` 之间**互不 import**，通过 `artifacts/` 里的文件交接。
+- `src/hmrec/vectors.py`（用户 / 商品向量、批量点积、保存 / 读取）属于底层，`recall/` 和 `features/` 都可以 import 它（见 proposal §14.1）。R5 / R6 的召回分数和 §8.3 的 `wals_dot` / `tt_dot` 都只通过它计算。
 - `scripts/` 只做三件事：解析命令行参数、调用 `src/` 里的函数、写结果。**不在 scripts 里写业务逻辑。**
 - `notebooks/` 只做探索和画图，`src/` 不能依赖 notebook 中的任何代码。
 - 所有文件路径都从 `src/hmrec/paths.py` 获取，不要在代码里手写路径字符串。

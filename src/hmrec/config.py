@@ -66,12 +66,15 @@ class ChunkingConfig:
     Attributes:
         query_chunk_size: Number of queries per chunk (fusion, features, ranker scoring).
         item_chunk_size: Number of seed items per chunk (R4 ItemCF co-occurrence).
+        dense_score_query_chunk_size: Number of queries per chunk when every active
+            article is scored with a matrix product (R5 WALS; later R6).
         pair_chunk_size: Number of (customer, article) pairs per chunk when
             computing vector dot products (hmrec.vectors.dot_pairs).
     """
 
     query_chunk_size: int
     item_chunk_size: int
+    dense_score_query_chunk_size: int
     pair_chunk_size: int
 
 
@@ -273,12 +276,15 @@ def parse_base_config(raw: Mapping[str, Any]) -> BaseConfig:
     raw_chunking = get_mapping(raw, "chunking", "base")
     check_keys(
         raw_chunking,
-        {"query_chunk_size", "item_chunk_size", "pair_chunk_size"},
+        {"query_chunk_size", "item_chunk_size", "dense_score_query_chunk_size", "pair_chunk_size"},
         "base.chunking",
     )
     chunking = ChunkingConfig(
         query_chunk_size=get_int(raw_chunking, "query_chunk_size", "base.chunking"),
         item_chunk_size=get_int(raw_chunking, "item_chunk_size", "base.chunking"),
+        dense_score_query_chunk_size=get_int(
+            raw_chunking, "dense_score_query_chunk_size", "base.chunking"
+        ),
         pair_chunk_size=get_int(raw_chunking, "pair_chunk_size", "base.chunking"),
     )
 
@@ -302,6 +308,9 @@ def _validate_base_config(config: BaseConfig) -> None:
     require_positive(config.memory.sample_interval_seconds, "base.memory.sample_interval_seconds")
     require_positive(config.chunking.query_chunk_size, "base.chunking.query_chunk_size")
     require_positive(config.chunking.item_chunk_size, "base.chunking.item_chunk_size")
+    require_positive(
+        config.chunking.dense_score_query_chunk_size, "base.chunking.dense_score_query_chunk_size"
+    )
     require_positive(config.chunking.pair_chunk_size, "base.chunking.pair_chunk_size")
 
 

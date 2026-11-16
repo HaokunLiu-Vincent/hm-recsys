@@ -14,7 +14,9 @@ def make_config(data_root: str, artifacts_root: str, results_root: str = "result
         seed=0,
         num_threads=1,
         memory=MemoryConfig(limit_gb=1.0, sample_interval_seconds=0.1),
-        chunking=ChunkingConfig(query_chunk_size=1, item_chunk_size=1, pair_chunk_size=1),
+        chunking=ChunkingConfig(
+            query_chunk_size=1, item_chunk_size=1, dense_score_query_chunk_size=1, pair_chunk_size=1
+        ),
     )
 
 
