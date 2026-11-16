@@ -6,6 +6,8 @@ Loaders in this module:
     - load_base_config: configs/base.yaml -> BaseConfig
     - load_selection_rule: configs/selection_rule.yaml -> SelectionRule
     - load_preprocess_config: configs/preprocess.yaml -> PreprocessConfig
+    - load_catalog_config: configs/catalog.yaml -> CatalogConfig
+    - load_queries_config: configs/queries.yaml -> QueriesConfig
 
 The fold manifest is parsed in hmrec.data.folds, which reuses load_yaml and the
 small field helpers defined here.
@@ -563,3 +565,96 @@ def preprocess_config_hash(config: PreprocessConfig) -> str:
     # default=str turns the day_zero date into "YYYY-MM-DD".
     canonical_json = json.dumps(asdict(config), sort_keys=True, default=str)
     return hashlib.sha256(canonical_json.encode("utf-8")).hexdigest()
+
+
+# ---------------------------------------------------------------- catalog.yaml
+
+# Largest value of an int32 column. query_id and the *_idx columns are int32.
+INT32_MAX = 2**31 - 1
+
+
+@dataclass(frozen=True)
+class ActivePoolConfig:
+    """Rule for the active pool A(a) (proposal §2.4). Frozen in M0, not a hyperparameter.
+
+    Attributes:
+        window_days: Length of the history window [anchor - window_days, anchor).
+        min_purchase_lines: Minimum number of purchase lines in the window.
+            Duplicate lines count separately.
+    """
+
+    window_days: int
+    min_purchase_lines: int
+
+
+@dataclass(frozen=True)
+class CatalogConfig:
+    """Settings from configs/catalog.yaml.
+
+    Attributes:
+        active_pool: Rule for A(a).
+    """
+
+    active_pool: ActivePoolConfig
+
+
+def parse_catalog_config(raw: Mapping[str, Any]) -> CatalogConfig:
+    """Build a CatalogConfig from the parsed content of configs/catalog.yaml.
+
+    Raises:
+        ValueError: If a key is missing or unknown, or a value is not a positive integer.
+    """
+    check_keys(raw, {"active_pool"}, "catalog")
+    raw_pool = get_mapping(raw, "active_pool", "catalog")
+    where = "catalog.active_pool"
+    check_keys(raw_pool, {"window_days", "min_purchase_lines"}, where)
+    active_pool = ActivePoolConfig(
+        window_days=get_int(raw_pool, "window_days", where),
+        min_purchase_lines=get_int(raw_pool, "min_purchase_lines", where),
+    )
+    require_positive(active_pool.window_days, f"{where}.window_days")
+    require_positive(active_pool.min_purchase_lines, f"{where}.min_purchase_lines")
+    return CatalogConfig(active_pool=active_pool)
+
+
+def load_catalog_config(path: Path) -> CatalogConfig:
+    """Read and validate configs/catalog.yaml."""
+    return parse_catalog_config(load_yaml(path))
+
+
+# ---------------------------------------------------------------- queries.yaml
+
+
+@dataclass(frozen=True)
+class QueriesConfig:
+    """Settings from configs/queries.yaml.
+
+    Attributes:
+        query_id_fold_offset: query_id = fold_ordinal * offset + position.
+            Every fold must have fewer queries than this value.
+    """
+
+    query_id_fold_offset: int
+
+
+def parse_queries_config(raw: Mapping[str, Any]) -> QueriesConfig:
+    """Build a QueriesConfig from the parsed content of configs/queries.yaml.
+
+    The check that (number of folds) * offset fits in int32 needs the fold
+    manifest, so it is done in hmrec.data.queries, not here.
+
+    Raises:
+        ValueError: If the key is missing or unknown, or the offset is not a
+            positive integer that fits in int32.
+    """
+    check_keys(raw, {"query_id_fold_offset"}, "queries")
+    offset = get_int(raw, "query_id_fold_offset", "queries")
+    require_positive(offset, "queries.query_id_fold_offset")
+    if offset > INT32_MAX:
+        raise ValueError(f"queries.query_id_fold_offset={offset} does not fit in int32")
+    return QueriesConfig(query_id_fold_offset=offset)
+
+
+def load_queries_config(path: Path) -> QueriesConfig:
+    """Read and validate configs/queries.yaml."""
+    return parse_queries_config(load_yaml(path))

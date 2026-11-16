@@ -84,6 +84,16 @@ class ProjectPaths:
         return self.configs_dir / "preprocess.yaml"
 
     @property
+    def catalog_config_file(self) -> Path:
+        """configs/catalog.yaml."""
+        return self.configs_dir / "catalog.yaml"
+
+    @property
+    def queries_config_file(self) -> Path:
+        """configs/queries.yaml."""
+        return self.configs_dir / "queries.yaml"
+
+    @property
     def locks_dir(self) -> Path:
         """configs/locks/ (append-only)."""
         return self.configs_dir / "locks"

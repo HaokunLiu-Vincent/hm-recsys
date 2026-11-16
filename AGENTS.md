@@ -34,8 +34,10 @@ H&M 个性化时尚推荐（Kaggle H&M 数据集）。目标：预测每个用�
 ### 3.1 防止时间泄漏
 
 - 对 anchor `a` 的任何计算（recall、特征、模型训练），**只能使用 `t_dat < a` 的数据**。anchor 当天属于 label 周。
-- 按时间截取历史数据，**只能通过 `src/hmrec/data/asof.py`**，不要在别处自己写日期过滤。
-- 每个 as-of 函数都要用断言检查输入的最大日期小于 anchor。
+- 按日期过滤交易，**只能通过 `src/hmrec/data/asof.py`**，包括 history（`history_window`，`[anchor − N, anchor)`）和 label 周（`label_week_transactions`，`[anchor, label_end]`）。不要在别处自己写日期过滤。
+- **唯一例外**：`scripts/checks/` 下的独立核对脚本为了不重复被检查代码的 bug，自己用 `datetime` 推导日期窗口，不使用 asof / queries / day_index（见 `scripts/checks/README.md`）。这些代码不能复制到 `src/`。
+- `label_week_transactions` 读的是答案，**只能由 `src/hmrec/data/queries.py` 调用**。`tests/unit/test_asof.py` 会扫描 `src/hmrec/` 和 `scripts/`，其他文件引用它测试就失败。
+- 每个 as-of 函数都要检查返回数据的日期在窗口内（history 的最大日期小于 anchor），超出就报错（用 `raise`，不用会被 `python -O` 去掉的 `assert`）。
 - 读取 `data/processed/` 下的表，**必须通过 `hmrec.data.metadata.scan_processed_parquet`**。它先用 `data/processed/metadata.json` 核对 `day_zero`、年龄桶和预处理配置 hash，不一致就报错。不要直接对 processed 文件调用 `pl.scan_parquet` / `pl.read_parquet`。
 - processed 数据中的日期是 int16 列 `t_dat_day`（距 `day_zero` 的天数）。日期与天数的换算**必须调用 `src/hmrec/data/day_index.py`**，不能自己写 `(d - day_zero).days` 之类的公式。
 - **Recall 和特征代码永远不读 label。** Label 只在 `src/hmrec/eval/` 和 `src/hmrec/ranker/sampling.py` 中读取。
@@ -86,7 +88,8 @@ H&M 个性化时尚推荐（Kaggle H&M 数据集）。目标：预测每个用�
 
 写代码时：
 
-- **ID 一律用 int32**，浮点数一律用 **float32**（MPS 不支持 float64）。
+- **ID 一律用 int32**，浮点数一律用 **float32**（MPS 不支持 float64）。float32 适用于特征、模型输入、embedding 等大数组。
+  - **例外：指标值和聚合结果用 float64**（`src/hmrec/eval/metrics.py`）。原因：数据量小、只在 CPU 上算、§4.2 的"严格更好"比较对舍入敏感。
 - 可能超过 1 GB 的数据**必须分块处理**，分块大小从 `configs/base.yaml` 读取。
 - 优先使用 Polars 的 lazy API（`scan_parquet`），只读取需要的列。
 - 大的中间结果写到磁盘（Parquet），不要都留在内存里。

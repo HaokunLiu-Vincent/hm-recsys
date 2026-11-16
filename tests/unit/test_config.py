@@ -6,12 +6,17 @@ from typing import Any
 import pytest
 
 from hmrec.config import (
+    ActivePoolConfig,
     load_base_config,
+    load_catalog_config,
     load_preprocess_config,
+    load_queries_config,
     load_selection_rule,
     load_yaml,
     parse_base_config,
+    parse_catalog_config,
     parse_preprocess_config,
+    parse_queries_config,
     parse_selection_rule,
     preprocess_config_hash,
 )
@@ -233,3 +238,28 @@ def test_preprocess_hash_is_stable_and_value_sensitive() -> None:
     raw = copy.deepcopy(VALID_PREPROCESS)
     raw["transactions_row_group_size"] = 11
     assert preprocess_config_hash(parse_preprocess_config(raw)) != first
+
+
+# ---------------------------------------------------------------- catalog.yaml / queries.yaml
+
+
+def test_repo_catalog_and_queries_yaml() -> None:
+    catalog = load_catalog_config(REPO_CONFIGS / "catalog.yaml")
+    assert catalog.active_pool == ActivePoolConfig(window_days=28, min_purchase_lines=3)
+    queries = load_queries_config(REPO_CONFIGS / "queries.yaml")
+    assert queries.query_id_fold_offset == 10_000_000
+
+
+def test_catalog_config_rejects_typo_and_non_positive() -> None:
+    # A typo shows up as a missing key (checked before unknown keys).
+    with pytest.raises(ValueError, match=r"missing keys \['window_days'\]"):
+        parse_catalog_config({"active_pool": {"window_day": 28, "min_purchase_lines": 3}})
+    with pytest.raises(ValueError, match="must be > 0"):
+        parse_catalog_config({"active_pool": {"window_days": 28, "min_purchase_lines": 0}})
+
+
+def test_queries_config_rejects_offset_outside_int32() -> None:
+    with pytest.raises(ValueError, match="int32"):
+        parse_queries_config({"query_id_fold_offset": 2**31})
+    with pytest.raises(ValueError, match="must be > 0"):
+        parse_queries_config({"query_id_fold_offset": 0})

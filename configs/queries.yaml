@@ -1,0 +1,13 @@
+# Query IDs, proposal §2.3 / §14.2. Read by hmrec.data.queries.
+#
+#   query_id = fold_ordinal * query_id_fold_offset + position
+#
+#   fold_ordinal: position of the fold in configs/fold_manifest.yaml (D1 = 0 ... T4 = 15)
+#   position:     0-based rank of customer_idx (ascending) among the fold's queries
+#
+# This makes query_id unique across ALL folds, so tables from several folds can be
+# joined on query_id alone without silently matching rows from different folds.
+# Checks: every fold has fewer queries than the offset, and
+# (number of folds) * offset fits in int32.
+
+query_id_fold_offset: 10000000

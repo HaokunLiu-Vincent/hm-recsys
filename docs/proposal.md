@@ -82,14 +82,21 @@
 |---|---|---|---|
 | 交易表常驻内存 | ~0.5 GB | **0.44 GB**（454.7 MB，31,788,324 行；Parquet 文件 160 MB） | ID 全部映射成 int32；日期存 int16（距起始日天数）；price 用 float32；channel 用 int8 |
 | M0 预处理（CSV 流式转 Parquet、对齐 embedding） | — | **峰值 2.25 GB**（其中交易表一步峰值 2.10 GB）；全程约 6 秒 | Polars lazy 扫描 + streaming `sink_parquet`；字符串 ID 先换成 int32 再排序 |
+| M0 query / label 生成（16 个 fold） | — | **峰值 0.36 GB**（MemoryTracker 采样；`/usr/bin/time` 最大 RSS 0.38 GB）；16 个 fold 共约 1.9 秒（每个 fold 约 0.1 秒） | 每个 fold 只读 label 周的两列（`customer_idx, article_idx`）；每周约 6.9 万–12.0 万个 query，约 21 万–49 万条 label |
 | R4 ItemCF 共现矩阵（365 天） | 不分块可能远超 8 GB | 待测 | **按 seed item 分块**（每块约 2,000 个 item），每块算完只保留 Top-`K_n` 邻居就释放 |
 | R5 WALS（180 天） | ~0.5–1 GB | 待测 | 稀疏 CSR，没问题 |
 | R6 Two-Tower 训练 | ~1.5–2 GB | 待测 | 用户历史预先存成 int32 数组 `[N, 20]`；商品特征表（~10.5 万 × 896 维，约 380 MB）整块放进 MPS 显存；batch 直接按下标取，不用 DataLoader |
-| 候选生成（每周） | 每周约 7 万 query × 最多 480 条 | 待测 | 每个 channel 单独写 Parquet，再按 query 分块合并去重 |
-| Ranker 训练（4 周） | 负采样 1:40 约 900 万行，1:80 约 1,800 万行；原始 float32 特征 2–4 GB | 待测 | **流式加载（stream loading）**：每周特征按 row group 存 Parquet，用 LightGBM 的 `lgb.Sequence` 分批读入构建 `Dataset`，原始特征不必一次性放进内存；构建后的分箱数据（每个值 1 字节）约 0.5–1 GB，存成 LightGBM binary 文件复用 |
-| Ranker 推理（每周，不采样） | 约 7 万 × 250 × 56 × 4 B ≈ 4 GB | 待测 | **按 query 分块打分**（每块 1 万个 query） |
+| 候选生成（每周） | 合并前最多约 3,940 万行，全部放在内存约 0.73 GB（D3 约 1.07 GB）；单个 channel 最多约 0.15 GB；合并去重后约 2,050 万行（计算见表下 ①） | 待测 | 每个 channel 单独写 Parquet，再按 query 分块合并去重 |
+| Ranker 训练（4 周） | 负采样 1:40 约 1,100 万行，1:80 约 2,170 万行（上限）；原始 float32 特征约 2.3–4.5 GB，分箱后约 0.6–1.1 GB（计算见表下 ②） | 待测 | **流式加载（stream loading）**：每周特征按 row group 存 Parquet，用 LightGBM 的 `lgb.Sequence` 分批读入构建 `Dataset`，原始特征不必一次性放进内存；构建后的分箱数据（每个值 1 字节）约 0.5–1 GB，存成 LightGBM binary 文件复用 |
+| Ranker 推理（每周，不采样） | 一次全放进内存约 4.3 GB；按 1 万 query 分块后每块约 0.52 GB（计算见表下 ③） | 待测 | **按 query 分块打分**（每块 1 万个 query） |
 
-以上除"实测"列外都是估算值，后续各阶段实测后继续填写"实测"列。M0 实测（2026-11-15）：常驻内存是读回 Parquet 后的 Polars `estimated_size()`；峰值是 `MemoryTracker` 的采样 RSS（间隔 0.5 秒，是下限，见下一段）。其他 M0 产物的常驻内存：customers 37 MB，articles 3 MB，customer ID 映射 89 MB，按 `article_idx` 对齐的图像 / 文本 embedding 206 MB / 155 MB。
+**候选生成、Ranker 训练、Ranker 推理三行的估算过程**（2026-11-16 按实测 query 数重算；1 GB = 1024³ B）。共同输入：每周平均 **8.2 万** query（D3 最多 12.0 万；F、V、T 周 6.9–8.6 万），每个 query 平均约 **3.4** 个 label（去重后；F、V 周 3.2–3.6）；6 路 quota 合计 100 + 30 + 50 + 100 + 100 + 100 = **480**；合并去重后每个 query 平均约 **250** 个候选（假设，待 §5.7 实测）；特征 **56** 个。
+
+- ① **候选生成**：合并前最多 8.2 万 × 480 ≈ 3,940 万行（D3：12.0 万 × 480 ≈ 5,760 万行）。每行约 20 B（`query_id`、`article_idx`、`rank` 各 int32 4 B，`score` float32 4 B，`channel` 用 Categorical 约 4 B）→ 3,940 万 × 20 B ≈ 0.73 GB（D3 ≈ 1.07 GB）。每个 channel 单独写盘，单个 channel 最多 8.2 万 × 100 × 20 B ≈ 0.15 GB。合并去重后 8.2 万 × 250 ≈ 2,050 万行。
+- ② **Ranker 训练**：每周正样本 ≈ 8.2 万 query × 3.4 label × 24%（G2 的 union recall 目标）≈ 6.7 万。每个正样本配 r 个负样本：r = 40 时 6.7 万 × 41 ≈ 274 万行/周，4 周 ≈ **1,100 万行**；r = 80 时 6.7 万 × 81 ≈ 542 万行/周，4 周 ≈ **2,170 万行**（候选不够时负样本全取，所以这是上限）。原始特征 56 × 4 B = 224 B/行 → 1,100 万 × 224 B ≈ 2.3 GB，2,170 万 × 224 B ≈ 4.5 GB；分箱后每个值 1 B → 1,100 万 × 56 B ≈ 0.57 GB，2,170 万 × 56 B ≈ 1.1 GB。r = 80 时原始特征接近 6 GB 上限，所以必须流式加载。
+- ③ **Ranker 推理**：每周 8.2 万 × 250 = 2,050 万行 × 224 B ≈ 4.3 GB（V、T 周最多 8.3 万 query，差不多）。按 1 万 query 分块：1 万 × 250 × 224 B ≈ 0.52 GB/块。
+
+以上除"实测"列外都是估算值，后续各阶段实测后继续填写"实测"列。M0 query / label 生成实测于 2026-11-16（`scripts/m0_build_queries.py`）。M0 预处理实测（2026-11-15）：常驻内存是读回 Parquet 后的 Polars `estimated_size()`；峰值是 `MemoryTracker` 的采样 RSS（间隔 0.5 秒，是下限，见下一段）。其他 M0 产物的常驻内存：customers 37 MB，articles 3 MB，customer ID 映射 89 MB，按 `article_idx` 对齐的图像 / 文本 embedding 206 MB / 155 MB。
 
 **内存峰值怎么测**：macOS 上 psutil 拿不到进程的历史峰值，所以 `src/hmrec/memory.py` 用后台线程定时采样 RSS（间隔见 `configs/base.yaml` 的 `memory.sample_interval_seconds`），峰值取所有采样值和开始、结束读数中的最大值。比采样间隔还短的瞬时峰值可能测不到；MPS 张量占用的统一内存也不一定全部计入 RSS。因此实测峰值是**下限**，6 GB 上限要留余量：实测峰值接近 6 GB 时就应该当作超限处理。
 
@@ -99,7 +106,7 @@
 |---|---|
 | Base 1 个 epoch（26 周，约 700–800 万样本，batch 512） | 约 2–5 分钟 |
 | 每周 fine-tune（约 30 万样本） | 约 10 秒 – 1 分钟 |
-| 每周推理（约 7 万 query × 约 10 万商品，取 Top-100） | 几秒到十几秒（分块矩阵乘法 + `torch.topk`） |
+| 每周推理（平均约 8.2 万 query，最多 12.0 万（D3）× 约 10 万商品，取 Top-100） | 几秒到十几秒（分块矩阵乘法 + `torch.topk`） |
 
 **开工前的 benchmark**：在 `mps` 和 `cpu` 上各跑 200 步，分别记录取数据的时间和 forward + backward 的时间（计时前后调用 `torch.mps.synchronize()`）。如果取数据占一半以上时间，先优化数据管道。
 
@@ -141,7 +148,8 @@
 
 ### 2.3 Query 和 Label
 
-- **Query** = `(customer_id, anchor)`，前提是该用户在 label 周至少买了一件商品目录中的商品。每周约 7 万个 query（估计值）。
+- **Query** = `(customer_id, anchor)`，前提是该用户在 label 周至少买了一件商品目录中的商品。每周 **6.9–12.0 万**个 query，平均 **8.2 万**（2026-11-16 在 16 个 fold 上实测，见 §1.3；D3、D4 偏多，见 §12）。
+- **query_id**（int32，全部 fold 内唯一）= `fold_ordinal × query_id_fold_offset + position`。`fold_ordinal` 是 fold 在 `fold_manifest.yaml` 中的位置（D1 = 0 … T4 = 15），`position` 是该 fold 的 query 按 `customer_idx` 升序的序号（从 0 开始），`query_id_fold_offset = 10,000,000`（`configs/queries.yaml`）。多个 fold 的表可以只按 `query_id` join，不会接错。反向解析用 `hmrec.data.queries.decode_query_id`。
 - **Label 集合 `G_q`** = 该用户在 label 周买过的**去重后**的 `article_id` 集合。
 - 某一路没有给某个 query 输出结果，算这一路的漏召回（miss），**query 不能从分母里删掉**。
 
@@ -200,6 +208,7 @@
 
 - 主指标：**query-weighted**（把 4 周的 query 放在一起平均）。
 - 同时报告 equal-fold（4 个周分数直接平均）和每周分数。
+- **D 阶段分组诊断**：D 阶段的报告中，除 4 周合并分数外，再分别报告 **D1–D2** 和 **D3–D4** 的分数（各自两周的 query 放在一起平均，即 query-weighted）。**只作诊断，不参与选择**，选择规则仍是 §4.2 和 `configs/selection_rule.yaml`。原因：D3、D4 疑似促销周，在 4 周合并分数中约占 60% 权重（见 §12）；分组分数用来发现"只在促销周更好"或"只在普通周更好"的配置。
 
 各组件的选择指标：
 
@@ -562,7 +571,7 @@ WALS 和 Two-Tower 的原始分数放在 B 组，因为 B 组对所有候选都�
 - 负采样只用于训练。**V 和 T 的评估使用全部候选，不采样。**
 - 采样 seed 固定，写进 config。
 
-估算：每周约 5 万个命中的正样本 × 41 ≈ 每周 200 万行，4 周约 900 万行。内存处理见 §1.3。
+估算（与 §1.3 ② 一致）：每周正样本 ≈ 8.2 万 query × 3.4 label × 24%（G2 的 union recall 目标）≈ 6.7 万；r = 40 时 6.7 万 × 41 ≈ 每周 274 万行，4 周约 1,100 万行；r = 80 时 6.7 万 × 81 ≈ 每周 542 万行，4 周约 2,170 万行（候选不够时负样本全取，所以是上限）。计算过程和内存处理见 §1.3。
 
 ### 9.2 滚动重训：固定 4 周窗口
 
@@ -661,6 +670,7 @@ M2 中计算量小的 R1–R3 可以和 M3 的 Two-Tower 训练同时跑；R4 �
 5. **V 周的分数偏乐观**：它们参与了 Ranker 的选择。系统表现以 T 阶段为准。
 6. **T 阶段不是完全没见过的数据**：旧项目曾经看过 T3、T4 附近的周。T 阶段的结果按 retrospective test 报告。
 7. **活跃池不是真实库存**：只是近期销量的近似。
+8. **D3、D4 疑似促销周**：D3、D4（2020-06-17 至 06-30）的买家数（即 query 数）比 16 周平均多 40% 以上（D3 +46.9%，D4 +41.8%），每个 query 的 label 数也更多（4.0–4.1，其他周 3.1–3.6），疑似促销周（未核实）。在 D 阶段的 query-weighted 合并中，D3、D4 约占 **60%** 权重（236,182 / 391,681 = 60.3%），所以 D 阶段选出的 recall 配置会偏向促销周的购买模式。处理方式：不改选择规则，只在 D 阶段报告中增加 D1–D2 / D3–D4 分组诊断（见 §4.1）。
 
 ---
 
@@ -699,6 +709,8 @@ hm-recsys/
 │   ├── fold_manifest.yaml       # D1–T4 共 16 个 fold 的 anchor 和日期
 │   ├── selection_rule.yaml      # §4 的选择规则（看分数之前提交）
 │   ├── preprocess.yaml          # M0：day_zero、年龄桶边界、embedding 维数、交易表 row group 大小
+│   ├── catalog.yaml             # 活跃池 A(a)：window_days=28、min_purchase_lines=3（§2.4，冻结，不调）
+│   ├── queries.yaml             # query_id_fold_offset（§2.3 query_id 的编号规则）
 │   ├── recall/                  # 每路的默认配置
 │   │   ├── r1_popularity.yaml
 │   │   ├── r2_repurchase.yaml
@@ -723,6 +735,7 @@ hm-recsys/
 │   ├── paths.py                 # 所有文件路径都从这里拿，不在别处拼路径
 │   ├── logging_utils.py         # 统一的 logger 设置
 │   ├── memory.py                # 内存监控、分块迭代工具
+│   ├── threads.py               # 在 import polars 之前按 base.yaml 设置 POLARS_MAX_THREADS（只依赖标准库和 yaml）
 │   │
 │   ├── data/
 │   │   ├── preprocess.py        # 原始 CSV → Parquet；ID 映射成 int32；压缩 dtype
@@ -730,7 +743,7 @@ hm-recsys/
 │   │   ├── day_index.py         # 日期 ↔ t_dat_day（距 day_zero 的天数）换算的唯一实现
 │   │   ├── metadata.py          # 读写 data/processed/metadata.json；scan_processed_parquet 先校验再读表
 │   │   ├── folds.py             # Fold dataclass；读取并校验 fold_manifest
-│   │   ├── asof.py              # 按 anchor 截取历史数据（防泄漏的唯一入口）
+│   │   ├── asof.py              # 唯一做日期过滤的地方：history 窗口和 label 周（防泄漏的唯一入口）
 │   │   ├── catalog.py           # 商品目录 C、活跃池 A(a)
 │   │   └── queries.py           # 每周的 query 名单和 label 集合 G_q
 │   │
@@ -779,6 +792,7 @@ hm-recsys/
 │
 ├── scripts/                     # 命令行入口，只做"读参数 → 调用 src → 写结果"
 │   ├── m0_preprocess.py
+│   ├── m0_build_queries.py      # 每个 fold 的 query 名单和 label → artifacts/queries/、artifacts/labels/
 │   ├── m0_check_folds.py
 │   ├── m0_benchmark_twotower.py
 │   ├── m2_recall_hpo.py         # --channel r1 ... r5
@@ -824,6 +838,8 @@ hm-recsys/
 │           └── text_faiss.index               # FAISS IndexFlatIP，本项目不使用
 │
 ├── artifacts/                   # 不进 git，全部可以由代码重新生成
+│   ├── queries/{fold}.parquet   # query_id, fold, customer_idx, anchor（M0 生成，生成后冻结）
+│   ├── labels/{fold}.parquet    # query_id, fold, article_idx（只有 eval/ 和 ranker/sampling.py 能读）
 │   ├── candidates/{fold}/{channel}.parquet
 │   ├── features/{fold}/part-*.parquet
 │   ├── lgb_datasets/{run_id}/   # LightGBM binary dataset
@@ -850,8 +866,8 @@ scripts/  →  src/hmrec/{recall, fusion, features, ranker, hpo}  →  src/hmrec
 
 | 产出方 | 文件 | 主要列 | 使用方 |
 |---|---|---|---|
-| `data/queries.py` | `artifacts/queries/{fold}.parquet` | `query_id, customer_idx, anchor` | 全部 |
-| `data/queries.py` | `artifacts/labels/{fold}.parquet` | `query_id, article_idx` | `eval/`、`ranker/sampling.py` |
+| `data/queries.py` | `artifacts/queries/{fold}.parquet` | `query_id, fold, customer_idx, anchor` | 全部 |
+| `data/queries.py` | `artifacts/labels/{fold}.parquet` | `query_id, fold, article_idx` | `eval/`、`ranker/sampling.py` |
 | `recall/*` | `artifacts/candidates/{fold}/{channel}.parquet` | `query_id, article_idx, channel, rank, score` | `fusion/union.py` |
 | `fusion/union.py` + `features/build.py` | `artifacts/features/{fold}/part-*.parquet` | `query_id, article_idx`，§8 的全部特征列 | `ranker/` |
 | `ranker/predict.py` | `artifacts/predictions/{run_id}/{fold}.parquet` | `query_id, article_idx, score, rank` | `eval/` |

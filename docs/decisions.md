@@ -72,3 +72,30 @@
   4. §14 目录树：补上 `configs/preprocess.yaml`、`src/hmrec/data/day_index.py`、`src/hmrec/data/metadata.py`，以及 M0 在 `data/processed/` 下生成的文件（交易 / 用户 / 商品 Parquet、两张 ID 映射表、`embeddings/`、`metadata.json`）。
   5. AGENTS.md §3.1 新增两条硬性规则：读取 `data/processed/` 下的表必须通过 `hmrec.data.metadata.scan_processed_parquet`；日期与天数的换算必须调用 `day_index.py`。
 - **原因**：M0 实现（见 2026-11-15 "M0 预处理的数据格式"）已经确定了 int32 索引、int16 天数和 metadata 校验。设计文档和 agent 规则要和实现一致，否则后续 recall / asof 代码可能按旧文档用字符串 ID 或自己写日期换算。processed 表的天数依赖 `day_zero`，绕过 metadata 校验或自写换算公式，一旦配置变化会让所有天数错位，破坏 §3.1 的时间截断。
+
+## 2026-11-16 通用组件：asof、活跃池、query_id、指标精度
+
+- **决定**：
+  1. **活跃池配置**：新建 `configs/catalog.yaml`（`window_days: 28`、`min_purchase_lines: 3`），由 `hmrec.data.catalog` 读取，R1/R4/R5/R6 共用。不放进 `preprocess.yaml`：活跃池按每个 anchor 现场计算，不影响 processed 数据，也不应改变 processed 数据的配置 hash。按 §2.4 这两个值已冻结，不是超参数，修改必须记入本文件。购买记录按行数计，重复行分别计数。
+  2. **query_id 全局唯一**：`query_id = fold_ordinal × 10,000,000 + position`（int32）。`fold_ordinal` 按 `fold_manifest.yaml` 顺序（D1 = 0 … T4 = 15），`position` 是 fold 内按 `customer_idx` 升序的序号。偏移量写在新增的 `configs/queries.yaml`，断言每个 fold 的 query 数小于偏移量、`fold 数 × 偏移量 − 1` 不超过 int32 上限。提供反向解析函数 `decode_query_id`。queries 和 labels 表保留 `fold` 列。
+  3. **日期过滤全部在 `asof.py`**：包括 history 窗口和 label 周。`label_week_transactions` 只能由 `data/queries.py` 调用，由 `tests/unit/test_asof.py` 扫描 `src/hmrec/` 和 `scripts/` 强制检查。窗口检查用 `raise`，不用 `assert`（`python -O` 会去掉 assert）。AGENTS.md §3.1 已同步。
+  4. **指标用 float64**：特征、模型输入、embedding 等大数组仍用 float32；指标值和聚合结果用 float64。AGENTS.md §4 写明了这个例外。指标结果完全可复现：每个 query 内按 rank 顺序求和；跨 query 先按 `query_id` 排序，再用 `math.fsum`（精确舍入，与顺序无关）求和；打乱输入行序后结果逐位相同（有测试）。
+  5. **selection 的相等阈值**：两个分数之差的绝对值 < 1e-12 视为相同，只为消除浮点误差，不改变 §4.2"严格更好"的含义。`configs/selection_rule.yaml` 已提交、不能修改，所以这个阈值是 `src/hmrec/hpo/selection.py` 中带注释的常量 `SCORE_EQUALITY_TOLERANCE`。
+  6. **queries / labels 生成后冻结**：`scripts/m0_build_queries.py` 默认不覆盖已有文件，需要显式 `--overwrite`。
+  7. **线程设置抽成 `hmrec.threads`**：只依赖标准库和 yaml，脚本在 import polars 之前调用 `configure_polars_threads()`；`m0_preprocess.py` 同步改用它。
+- **原因**：
+  - 多个 fold 合并（D 阶段 4 周合并、Ranker 用 F1–F4 训练）时，per-fold 编号会重复，只按 `query_id` join 会静默接错；全局唯一编号从根上避免这个问题。
+  - label 周的过滤也是日期过滤，放在 `asof.py` 才能保证"日期过滤只有一个地方"；但它读的是答案，所以用测试而不是只靠文档限制调用方。
+  - §4.2 要求"严格更好"，float32 的舍入误差（约 1e-7）可能让相同的分数看起来不同；float64 加固定求和顺序让同样的输入一定得到同样的分数。
+
+## 2026-11-16 D3、D4 疑似促销周：不改选择规则，增加分组诊断
+
+- **背景**：16 个 fold 的 query 实测（`scripts/m0_build_queries.py`，由 `scripts/checks/check_queries.py` 独立核对）：每周 6.9–12.0 万个 query，平均 8.2 万；D3（+46.9%）、D4（+41.8%）明显偏多，每个 query 的 label 数也更多（4.0–4.1，其他周 3.1–3.6），疑似促销周。D 阶段 query-weighted 合并中 D3、D4 占 236,182 / 391,681 = **60.3%** 的权重（此前对话中口头报告的"约 54%"算错了，以 60.3% 为准）。
+- **决定**：
+  1. **不修改 `configs/selection_rule.yaml`**（它在看到任何分数之前已提交，AGENTS.md §3.3 也不允许改）。
+  2. D 阶段报告中，除 4 周合并分数外，额外分别报告 **D1–D2** 和 **D3–D4** 的 query-weighted 分数，**只作诊断，不参与选择**（写入 proposal §4.1）。
+  3. proposal §12 新增已知局限第 8 条（D3、D4 疑似促销周）；§2.3 的每周 query 数改为实测值；§1.3 候选生成、Ranker 训练、Ranker 推理三行按每周 8.2 万 query、每个 query 约 3.4 个 label 重新估算，并写出计算过程。
+  4. 独立核对脚本放在 `scripts/checks/`。为了核对有意义，它们**不使用** `hmrec.data.asof`、`hmrec.data.queries`、`hmrec.data.day_index`，自己用 `datetime` 重新推导日期窗口。这是 AGENTS.md"日期过滤只在 asof.py""日期换算只用 day_index.py"两条规则的唯一例外，只适用于 `scripts/checks/`，AGENTS.md §3.1 已注明。
+- **原因**：
+  - §4.2 的第二个条件"4 周中至少 3 周严格更好"是**按周计票**的，每周一票，与该周 query 数无关。只在 D3、D4 两周更好的配置最多拿到 2 票，无法通过；所以 D3、D4 虽然在合并分数（第一个条件）中占 60% 权重，也不能单独决定选择结果。规则本身已经能防止"只适合促销周"的配置被选中，没有必要改规则。
+  - 反过来，规则无法告诉我们一个被接受的配置的提升主要来自哪两周；分组诊断补上这一点，便于解释 D 阶段的结果和 §6.7 / §12 第 1、2 条的季节性讨论。

@@ -9,26 +9,12 @@ data/processed/metadata.json. Each step logs its duration and peak memory.
 The log is also written to artifacts/runs/{run_id}/run.log.
 """
 
-# ---------------------------------------------------------------------------
-# Thread setup. This block MUST run before polars (or any hmrec module, which
-# imports polars) is imported: polars reads POLARS_MAX_THREADS only once, at
-# import time. That is also why the base.yaml path is built by hand here
-# instead of with hmrec.paths, and why the imports below come after code.
-# ---------------------------------------------------------------------------
-import os
-from pathlib import Path
+# Thread setup. This MUST run before polars (or any hmrec module that imports
+# polars) is imported: polars reads POLARS_MAX_THREADS only once, at import time.
+# hmrec.threads imports only the standard library and yaml. See its docstring.
+from hmrec.threads import check_polars_thread_pool, configure_polars_threads
 
-import yaml
-
-_BASE_CONFIG_FILE = Path(__file__).resolve().parents[1] / "configs" / "base.yaml"
-_NUM_THREADS = str(yaml.safe_load(_BASE_CONFIG_FILE.read_text(encoding="utf-8"))["num_threads"])
-_preset_threads = os.environ.get("POLARS_MAX_THREADS")
-if _preset_threads is not None and _preset_threads != _NUM_THREADS:
-    raise RuntimeError(
-        f"POLARS_MAX_THREADS={_preset_threads} is set in the environment, but base.yaml "
-        f"num_threads={_NUM_THREADS}; unset it or make them equal"
-    )
-os.environ["POLARS_MAX_THREADS"] = _NUM_THREADS
+configure_polars_threads()
 
 import argparse  # noqa: E402  (after the thread setup above, see comment)
 import logging  # noqa: E402
@@ -58,16 +44,6 @@ def parse_args() -> argparse.Namespace:
         "--run-id", default="m0_preprocess", help="log goes to artifacts/runs/{run_id}/run.log"
     )
     return parser.parse_args()
-
-
-def check_thread_pool(base_config: BaseConfig) -> None:
-    """Fail if polars did not pick up num_threads from base.yaml."""
-    pool_size = pl.thread_pool_size()
-    LOGGER.info("polars thread pool size = %d", pool_size)
-    if pool_size != base_config.num_threads:
-        raise RuntimeError(
-            f"polars uses {pool_size} threads, expected num_threads={base_config.num_threads}"
-        )
 
 
 def run_step[StepResult](
@@ -223,7 +199,7 @@ def main() -> None:
     setup_logging(logging.INFO, log_file=paths.run_dir(args.run_id) / "run.log")
     base_config = load_base_config(paths.base_config_file)
     config = load_preprocess_config(paths.preprocess_config_file)
-    check_thread_pool(base_config)
+    LOGGER.info("polars thread pool size = %d", check_polars_thread_pool(base_config.num_threads))
 
     peaks: dict[str, float] = {}
     with MemoryTracker(

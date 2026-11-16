@@ -1,0 +1,13 @@
+# Article catalog C and active pool A(a), proposal §2.4. Read by hmrec.data.catalog.
+#
+# FROZEN (proposal §2.4): these two values were fixed in M0 and are NOT
+# hyperparameters. Do not tune them. Any change must be recorded in
+# docs/decisions.md together with the reason.
+#
+# The active pool is computed on the fly for each anchor from the as-of history,
+# so it does not affect data/processed/ (that is why it is not in preprocess.yaml).
+# Shared by R1, R4, R5 and R6, whose outputs are limited to A(a).
+
+active_pool:
+  window_days: 28          # history window [anchor - 28d, anchor); the anchor day is excluded
+  min_purchase_lines: 3    # an article needs >= 3 purchase lines in the window (duplicate lines count)
