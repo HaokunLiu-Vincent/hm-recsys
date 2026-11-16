@@ -1,0 +1,16 @@
+# R5 WALS (time-decayed implicit ALS), proposal §5 R5. Read by hmrec.config.load_wals_config.
+#   r_ui = sum of exp(-age_days / decay_tau_days) over u's purchase lines of i   (W2)
+#        = 1 if u bought i at least once                                     (W0)
+#   c_ui = 1 + alpha_conf * r_ui   (passed to implicit as the CSR values; library alpha = 1.0)
+# Output limited to the active pool A(a) (proposal §2.4); already-bought articles are NOT excluded.
+# Threads: num_threads in configs/base.yaml.
+
+variant: W2              # ablation: {W0, W2}
+window_days: 180         # fit window [anchor - 180d, anchor)
+decay_tau_days: 60.0     # fixed (not tuned); unused by W0
+alpha_conf: 20.0         # HPO step 1: {10, 20, 40}
+regularization: 0.1      # lambda, HPO step 2: {0.01, 0.1, 1.0}
+factors: 64              # HPO step 3: {64, 128}
+iterations: 15           # convergence check only: {10, 15, 25}
+random_seed: 42          # initial factors (implicit random_state)
+quota: 100               # Top-100, never padded

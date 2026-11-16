@@ -66,10 +66,13 @@ class ChunkingConfig:
     Attributes:
         query_chunk_size: Number of queries per chunk (fusion, features, ranker scoring).
         item_chunk_size: Number of seed items per chunk (R4 ItemCF co-occurrence).
+        pair_chunk_size: Number of (customer, article) pairs per chunk when
+            computing vector dot products (hmrec.vectors.dot_pairs).
     """
 
     query_chunk_size: int
     item_chunk_size: int
+    pair_chunk_size: int
 
 
 @dataclass(frozen=True)
@@ -194,6 +197,14 @@ def get_int(raw: Mapping[str, Any], key: str, where: str) -> int:
     return value
 
 
+def get_bool(raw: Mapping[str, Any], key: str, where: str) -> bool:
+    """Return raw[key] and check that it is a bool (YAML true / false, not 0 / 1)."""
+    value = raw[key]
+    if not isinstance(value, bool):
+        raise ValueError(f"{where}.{key}: expected true or false, got {value!r}")
+    return value
+
+
 def get_float(raw: Mapping[str, Any], key: str, where: str) -> float:
     """Return raw[key] as a float. Integers such as `6` are accepted."""
     value = raw[key]
@@ -260,10 +271,15 @@ def parse_base_config(raw: Mapping[str, Any]) -> BaseConfig:
     )
 
     raw_chunking = get_mapping(raw, "chunking", "base")
-    check_keys(raw_chunking, {"query_chunk_size", "item_chunk_size"}, "base.chunking")
+    check_keys(
+        raw_chunking,
+        {"query_chunk_size", "item_chunk_size", "pair_chunk_size"},
+        "base.chunking",
+    )
     chunking = ChunkingConfig(
         query_chunk_size=get_int(raw_chunking, "query_chunk_size", "base.chunking"),
         item_chunk_size=get_int(raw_chunking, "item_chunk_size", "base.chunking"),
+        pair_chunk_size=get_int(raw_chunking, "pair_chunk_size", "base.chunking"),
     )
 
     config = BaseConfig(
@@ -286,6 +302,7 @@ def _validate_base_config(config: BaseConfig) -> None:
     require_positive(config.memory.sample_interval_seconds, "base.memory.sample_interval_seconds")
     require_positive(config.chunking.query_chunk_size, "base.chunking.query_chunk_size")
     require_positive(config.chunking.item_chunk_size, "base.chunking.item_chunk_size")
+    require_positive(config.chunking.pair_chunk_size, "base.chunking.pair_chunk_size")
 
 
 def load_base_config(path: Path) -> BaseConfig:
@@ -662,10 +679,14 @@ def load_queries_config(path: Path) -> QueriesConfig:
     return parse_queries_config(load_yaml(path))
 
 
-# ---------------------------------------------------------------- recall/r1..r3
+# ---------------------------------------------------------------- recall/r1..r4
 
 POPULARITY_VARIANTS = ("A1", "G0")
 REPURCHASE_VARIANTS = ("decayed_frequency", "recency_only")
+# CF0 = every user has weight 1; CF3 = IUF weight 1 / ln(1 + d_u) (proposal §5 R4).
+ITEMCF_VARIANTS = ("CF0", "CF3")
+# W0 = r_ui is 1 (bought or not); W2 = r_ui is the decayed number of purchase lines (§5 R5).
+WALS_VARIANTS = ("W0", "W2")
 
 
 def _get_choice(raw: Mapping[str, Any], key: str, where: str, choices: tuple[str, ...]) -> str:
@@ -729,6 +750,61 @@ class SiblingConfig:
     quota: int
 
 
+@dataclass(frozen=True)
+class ItemCFConfig:
+    """R4 settings from configs/recall/r4_itemcf.yaml (proposal §5 R4).
+
+    Attributes:
+        variant: "CF0" (user weight 1) or "CF3" (IUF user weight 1 / ln(1 + d_u)).
+        fit_window_days: Window [anchor - fit_window_days, anchor) for C_w and n_w.
+        seed_window_days: Window [anchor - seed_window_days, anchor) for a user's seeds.
+        alpha: Exponent in s(i -> j) = C_w(i, j) / (n_w(i)^alpha * n_w(j)^(1 - alpha)),
+            in [0, 1]. CF0 with alpha 0.5 is the plain cosine C / sqrt(n(i) n(j)).
+        neighbors_per_seed: K_n, neighbours kept per seed item.
+        seed_decay: False -> seed weight q_ui = 1; True -> q_ui = exp(-age_ui / seed_tau_days),
+            age_ui = days since u last bought seed i.
+        seed_tau_days: Time constant of the seed decay. Fixed at 30 (not tuned);
+            unused when seed_decay is False.
+        quota: Maximum candidates per query (never padded).
+    """
+
+    variant: str
+    fit_window_days: int
+    seed_window_days: int
+    alpha: float
+    neighbors_per_seed: int
+    seed_decay: bool
+    seed_tau_days: float
+    quota: int
+
+
+@dataclass(frozen=True)
+class WalsConfig:
+    """R5 settings from configs/recall/r5_wals.yaml (proposal §5 R5).
+
+    Attributes:
+        variant: "W0" (r_ui = 1) or "W2" (r_ui = sum of exp(-age_days / decay_tau_days)).
+        window_days: Fit window [anchor - window_days, anchor).
+        decay_tau_days: Decay time constant of r_ui (fixed at 60); unused by W0.
+        alpha_conf: Confidence c_ui = 1 + alpha_conf * r_ui.
+        regularization: ALS L2 regularization (lambda).
+        factors: Vector length.
+        iterations: Number of ALS iterations (no early stopping).
+        random_seed: Seed of the random initial factors.
+        quota: Maximum candidates per query (never padded).
+    """
+
+    variant: str
+    window_days: int
+    decay_tau_days: float
+    alpha_conf: float
+    regularization: float
+    factors: int
+    iterations: int
+    random_seed: int
+    quota: int
+
+
 def parse_popularity_config(raw: Mapping[str, Any]) -> PopularityConfig:
     """Build a PopularityConfig from the parsed r1_popularity.yaml."""
     where = "r1_popularity"
@@ -785,6 +861,49 @@ def parse_sibling_config(raw: Mapping[str, Any]) -> SiblingConfig:
     return config
 
 
+def parse_itemcf_config(raw: Mapping[str, Any]) -> ItemCFConfig:
+    """Build an ItemCFConfig from the parsed r4_itemcf.yaml.
+
+    The seed window must fit inside the fit window: every seed must be a node
+    of the co-occurrence graph, otherwise it would have no neighbours.
+    """
+    where = "r4_itemcf"
+    expected = {
+        "variant",
+        "fit_window_days",
+        "seed_window_days",
+        "alpha",
+        "neighbors_per_seed",
+        "seed_decay",
+        "seed_tau_days",
+        "quota",
+    }
+    check_keys(raw, expected, where)
+    config = ItemCFConfig(
+        variant=_get_choice(raw, "variant", where, ITEMCF_VARIANTS),
+        fit_window_days=get_int(raw, "fit_window_days", where),
+        seed_window_days=get_int(raw, "seed_window_days", where),
+        alpha=get_float(raw, "alpha", where),
+        neighbors_per_seed=get_int(raw, "neighbors_per_seed", where),
+        seed_decay=get_bool(raw, "seed_decay", where),
+        seed_tau_days=get_float(raw, "seed_tau_days", where),
+        quota=get_int(raw, "quota", where),
+    )
+    require_positive(config.fit_window_days, f"{where}.fit_window_days")
+    require_positive(config.seed_window_days, f"{where}.seed_window_days")
+    require_positive(config.neighbors_per_seed, f"{where}.neighbors_per_seed")
+    require_positive(config.seed_tau_days, f"{where}.seed_tau_days")
+    require_positive(config.quota, f"{where}.quota")
+    if not 0.0 <= config.alpha <= 1.0:
+        raise ValueError(f"{where}.alpha must be in [0, 1], got {config.alpha}")
+    if config.seed_window_days > config.fit_window_days:
+        raise ValueError(
+            f"{where}.seed_window_days ({config.seed_window_days}) must be <= "
+            f"fit_window_days ({config.fit_window_days})"
+        )
+    return config
+
+
 def load_popularity_config(path: Path) -> PopularityConfig:
     """Read and validate configs/recall/r1_popularity.yaml."""
     return parse_popularity_config(load_yaml(path))
@@ -798,3 +917,51 @@ def load_repurchase_config(path: Path) -> RepurchaseConfig:
 def load_sibling_config(path: Path) -> SiblingConfig:
     """Read and validate configs/recall/r3_sibling.yaml."""
     return parse_sibling_config(load_yaml(path))
+
+
+def load_itemcf_config(path: Path) -> ItemCFConfig:
+    """Read and validate configs/recall/r4_itemcf.yaml."""
+    return parse_itemcf_config(load_yaml(path))
+
+
+def parse_wals_config(raw: Mapping[str, Any]) -> WalsConfig:
+    """Build a WalsConfig from the parsed r5_wals.yaml."""
+    where = "r5_wals"
+    expected = {
+        "variant",
+        "window_days",
+        "decay_tau_days",
+        "alpha_conf",
+        "regularization",
+        "factors",
+        "iterations",
+        "random_seed",
+        "quota",
+    }
+    check_keys(raw, expected, where)
+    config = WalsConfig(
+        variant=_get_choice(raw, "variant", where, WALS_VARIANTS),
+        window_days=get_int(raw, "window_days", where),
+        decay_tau_days=get_float(raw, "decay_tau_days", where),
+        alpha_conf=get_float(raw, "alpha_conf", where),
+        regularization=get_float(raw, "regularization", where),
+        factors=get_int(raw, "factors", where),
+        iterations=get_int(raw, "iterations", where),
+        random_seed=get_int(raw, "random_seed", where),
+        quota=get_int(raw, "quota", where),
+    )
+    require_positive(config.window_days, f"{where}.window_days")
+    require_positive(config.decay_tau_days, f"{where}.decay_tau_days")
+    require_positive(config.alpha_conf, f"{where}.alpha_conf")
+    require_positive(config.regularization, f"{where}.regularization")
+    require_positive(config.factors, f"{where}.factors")
+    require_positive(config.iterations, f"{where}.iterations")
+    require_positive(config.quota, f"{where}.quota")
+    if config.random_seed < 0:
+        raise ValueError(f"{where}.random_seed must be >= 0, got {config.random_seed}")
+    return config
+
+
+def load_wals_config(path: Path) -> WalsConfig:
+    """Read and validate configs/recall/r5_wals.yaml."""
+    return parse_wals_config(load_yaml(path))

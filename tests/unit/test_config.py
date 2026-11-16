@@ -9,20 +9,24 @@ from hmrec.config import (
     ActivePoolConfig,
     load_base_config,
     load_catalog_config,
+    load_itemcf_config,
     load_popularity_config,
     load_preprocess_config,
     load_queries_config,
     load_repurchase_config,
     load_selection_rule,
     load_sibling_config,
+    load_wals_config,
     load_yaml,
     parse_base_config,
     parse_catalog_config,
+    parse_itemcf_config,
     parse_popularity_config,
     parse_preprocess_config,
     parse_queries_config,
     parse_selection_rule,
     parse_sibling_config,
+    parse_wals_config,
     preprocess_config_hash,
 )
 
@@ -33,7 +37,7 @@ VALID_BASE: dict[str, Any] = {
     "seed": 7,
     "num_threads": 6,
     "memory": {"limit_gb": 6, "sample_interval_seconds": 0.5},
-    "chunking": {"query_chunk_size": 10, "item_chunk_size": 3},
+    "chunking": {"query_chunk_size": 10, "item_chunk_size": 3, "pair_chunk_size": 5},
 }
 
 VALID_RULE: dict[str, Any] = {
@@ -270,7 +274,7 @@ def test_queries_config_rejects_offset_outside_int32() -> None:
         parse_queries_config({"query_id_fold_offset": 0})
 
 
-# ---------------------------------------------------------------- recall/r1..r3
+# ---------------------------------------------------------------- recall/r1..r4
 
 
 def test_repo_recall_configs_match_proposal_defaults() -> None:
@@ -309,3 +313,71 @@ def test_sibling_gamma_zero_allowed_negative_rejected() -> None:
     assert parse_sibling_config(raw).gamma == 0.0
     with pytest.raises(ValueError, match="gamma must be >= 0"):
         parse_sibling_config({**raw, "gamma": -0.5})
+
+
+VALID_ITEMCF: dict[str, Any] = {
+    "variant": "CF3",
+    "fit_window_days": 365,
+    "seed_window_days": 90,
+    "alpha": 0.7,
+    "neighbors_per_seed": 100,
+    "seed_decay": False,
+    "seed_tau_days": 30.0,
+    "quota": 100,
+}
+
+
+def test_repo_itemcf_config_matches_proposal_defaults() -> None:
+    r4 = load_itemcf_config(REPO_CONFIGS / "recall" / "r4_itemcf.yaml")
+    assert r4 == parse_itemcf_config(VALID_ITEMCF)
+
+
+def test_itemcf_alpha_must_be_in_unit_interval() -> None:
+    assert parse_itemcf_config({**VALID_ITEMCF, "alpha": 0}).alpha == 0.0
+    assert parse_itemcf_config({**VALID_ITEMCF, "alpha": 1}).alpha == 1.0
+    with pytest.raises(ValueError, match=r"alpha must be in \[0, 1\]"):
+        parse_itemcf_config({**VALID_ITEMCF, "alpha": 1.2})
+
+
+def test_itemcf_seed_window_must_fit_in_fit_window() -> None:
+    with pytest.raises(ValueError, match="seed_window_days"):
+        parse_itemcf_config({**VALID_ITEMCF, "seed_window_days": 400})
+
+
+def test_itemcf_rejects_unknown_variant() -> None:
+    with pytest.raises(ValueError, match="expected one of"):
+        parse_itemcf_config({**VALID_ITEMCF, "variant": "CF1"})
+
+
+def test_itemcf_seed_decay_must_be_a_bool() -> None:
+    assert parse_itemcf_config({**VALID_ITEMCF, "seed_decay": True}).seed_decay is True
+    with pytest.raises(ValueError, match="expected true or false"):
+        parse_itemcf_config({**VALID_ITEMCF, "seed_decay": 1})
+
+
+VALID_WALS: dict[str, Any] = {
+    "variant": "W2",
+    "window_days": 180,
+    "decay_tau_days": 60.0,
+    "alpha_conf": 20.0,
+    "regularization": 0.1,
+    "factors": 64,
+    "iterations": 15,
+    "random_seed": 42,
+    "quota": 100,
+}
+
+
+def test_repo_wals_config_matches_proposal_defaults() -> None:
+    assert load_wals_config(REPO_CONFIGS / "recall" / "r5_wals.yaml") == parse_wals_config(
+        VALID_WALS
+    )
+
+
+def test_wals_config_rejects_bad_values() -> None:
+    with pytest.raises(ValueError, match="expected one of"):
+        parse_wals_config({**VALID_WALS, "variant": "W1"})
+    with pytest.raises(ValueError, match="alpha_conf"):
+        parse_wals_config({**VALID_WALS, "alpha_conf": 0})
+    with pytest.raises(ValueError, match="random_seed"):
+        parse_wals_config({**VALID_WALS, "random_seed": -1})

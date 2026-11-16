@@ -83,8 +83,9 @@
 | 交易表常驻内存 | ~0.5 GB | **0.44 GB**（454.7 MB，31,788,324 行；Parquet 文件 160 MB） | ID 全部映射成 int32；日期存 int16（距起始日天数）；price 用 float32；channel 用 int8 |
 | M0 预处理（CSV 流式转 Parquet、对齐 embedding） | — | **峰值 2.25 GB**（其中交易表一步峰值 2.10 GB）；全程约 6 秒 | Polars lazy 扫描 + streaming `sink_parquet`；字符串 ID 先换成 int32 再排序 |
 | M0 query / label 生成（16 个 fold） | — | **峰值 0.36 GB**（MemoryTracker 采样；`/usr/bin/time` 最大 RSS 0.38 GB）；16 个 fold 共约 1.9 秒（每个 fold 约 0.1 秒） | 每个 fold 只读 label 周的两列（`customer_idx, article_idx`）；每周约 6.9 万–12.0 万个 query，约 21 万–49 万条 label |
-| R4 ItemCF 共现矩阵（365 天） | 不分块可能远超 8 GB | 待测 | **按 seed item 分块**（每块约 2,000 个 item），每块算完只保留 Top-`K_n` 邻居就释放 |
-| R5 WALS（180 天） | ~0.5–1 GB | 待测 | 稀疏 CSR，没问题 |
+| R1–R3 候选生成（D1，默认配置） | — | **整体峰值 1.77 GB**（`/usr/bin/time` 最大 RSS，整个脚本：读 queries / labels、算活跃池、跑 3 路、评估）；耗时 R1 0.6 秒、R2 0.2 秒、R3 0.5 秒，全程 2.2 秒。单个 channel 的运行时间短于 0.5 秒的采样间隔，**单路峰值不可靠**，不单独列出 | 每路只读需要的列；R2 / R3 的历史先按 query 用户 semi-join |
+| R4 ItemCF 共现矩阵（365 天） | 不分块可能远超 8 GB | **D1（CF3，α=0.7）：整体峰值 2.95 GB**（`/usr/bin/time` 最大 RSS，含读数据；MemoryTracker 采样 2.62 GB）；耗时 17.2 秒（建图 + 邻居 15.5 秒，打分 1.8 秒）。图规模：1,540 万条购买行 → 1,325 万个 (用户, 商品) 对，98.8 万用户，7.2 万商品，`Σ d_u²` ≈ 5.1 亿；28,110 个 seed，分 15 块 | **按 seed item 分块**（每块约 2,000 个 item），每块算完只保留 Top-`K_n` 邻居就释放 |
+| R5 WALS（180 天） | ~0.5–1 GB | **D1（W2，默认配置）：整体峰值 4.05 GB**（`/usr/bin/time` 最大 RSS；MemoryTracker 采样：拟合 0.95 GB，打分 3.30 GB）；耗时 66.4 秒（拟合 54.6 秒，打分 11.7 秒）。矩阵 71.1 万用户 × 5.2 万商品，590 万个非零值。**峰值来自打分**而不是拟合：每块 1 万个 query × 20,764 个活跃商品的 float32 分数矩阵约 0.83 GB，再加 `np.partition` 的副本。当前 `implicit` 的 macOS wheel 没有链接 OpenMP，拟合实际是**单线程**（`num_threads=6` 不起作用） | 稀疏 CSR，没问题 |
 | R6 Two-Tower 训练 | ~1.5–2 GB | 待测 | 用户历史预先存成 int32 数组 `[N, 20]`；商品特征表（~10.5 万 × 896 维，约 380 MB）整块放进 MPS 显存；batch 直接按下标取，不用 DataLoader |
 | 候选生成（每周） | 合并前最多约 3,940 万行，全部放在内存约 0.73 GB（D3 约 1.07 GB）；单个 channel 最多约 0.15 GB；合并去重后约 2,050 万行（计算见表下 ①） | 待测 | 每个 channel 单独写 Parquet，再按 query 分块合并去重 |
 | Ranker 训练（4 周） | 负采样 1:40 约 1,100 万行，1:80 约 2,170 万行（上限）；原始 float32 特征约 2.3–4.5 GB，分箱后约 0.6–1.1 GB（计算见表下 ②） | 待测 | **流式加载（stream loading）**：每周特征按 row group 存 Parquet，用 LightGBM 的 `lgb.Sequence` 分批读入构建 `Dataset`，原始特征不必一次性放进内存；构建后的分箱数据（每个值 1 字节）约 0.5–1 GB，存成 LightGBM binary 文件复用 |
@@ -157,7 +158,7 @@
 
 - **商品目录 `C`**：`articles.csv` 中所有商品。Label 不按任何商品池过滤。
 - **活跃池 `A(a)`**：在 `[a−28d, a)` 内至少有 3 条购买记录的商品。这是"近期在卖"的近似，不是真实库存。
-- **哪些 channel 用活跃池过滤**：R1、R4、R5、R6 的输出限制在 `A(a)` 内；R2（复购）和 R3（同款不同色）不过滤，因为它们本来就基于用户自己的历史。这个设定在 M0 冻结，**不当作超参数调**。
+- **哪些 channel 用活跃池过滤**：R1、R4、R5、R6 的输出限制在 `A(a)` 内；R2（复购）和 R3（同款不同色）不过滤，因为它们本来就基于用户自己的历史。这个设定在 M0 冻结，**不当作超参数调**。唯一的例外：R3 是否改为只输出 `A(a)` 内的商品，在 M4 按 §5.7 第 4 项预先登记的标准决定一次（系统层面的决定，不是 D 阶段 HPO）。
 - 用户以前买过的商品**允许再推荐**（复购在 H&M 很常见）。
 
 ### 2.5 指标
@@ -317,18 +318,24 @@ Recency-only 的分数 = `1 / age_days`，`age_days` 取用户最近一次购买
 - 用户权重（IUF）：`w_u = 1 / ln(1 + d_u)`，`d_u` = 用户在窗口内买过的不同商品数。
 - 加权共现：`C_w(i, j) = Σ_u w_u · R_ui · R_uj`；加权边际：`n_w(i) = Σ_u w_u · R_ui`。
 - 相似度（从 seed `i` 到候选 `j`）：`s(i→j) = C_w(i, j) / (n_w(i)^α · n_w(j)^(1−α))`。去掉 `i = j`。
-- 每个 seed 只保留 Top-`K_n`（=100）个邻居。
-- 用户分数：`S(u, j) = Σ s(i→j)`，对用户在 `[a−90d, a)` 内买过的每个不同 seed 求和。
-- 默认：CF3（IUF + α=0.7），quota 100，不排除用户已买的商品。
+- 每个 seed 只保留 Top-`K_n`（=100）个邻居。**邻居 `j` 限定在 `A(a)` 内，过滤在取 Top-`K_n` 之前**：每个 seed 保留的是它最好的 `K_n` 个**活跃**邻居。`C_w`、`n_w`、`d_u` 用拟合窗口内的全部商品计算，不受 `A(a)` 影响；seed 本身不要求在 `A(a)` 内（不活跃的 seed 照样贡献分数）。原因：D1 上拟合窗口的图有 71,713 个商品，其中只有 20,764 个（29%）在 `A(a)` 内；如果先取 Top-100 再过滤，实测 **45.4%** 的邻居名额会落在不活跃商品上被浪费（D1，CF3，α=0.7）。
+- 用户分数：`S(u, j) = Σ_i q_ui · s(i→j)`，对用户在 seed 窗口 `[a−L_seed, a)` 内买过的每个不同 seed `i` 求和。
+- **Seed 权重** `q_ui`：衰减关闭时 `q_ui = 1`；打开时 `q_ui = exp(−age_ui / τ_seed)`，`age_ui` 是用户**最近一次**购买 seed `i` 距 anchor 的天数（昨天 = 1；同一个 seed 买多次只取最近一次，不累加）。`τ_seed` 固定为 30 天（与 R2、R3 的 τ 默认值一致），**不调**。建图（`C_w`、`n_w`、`d_u`）保持不衰减。
+- 默认：CF3（IUF + α=0.7），`L_seed` = 90 天，seed 衰减关闭，quota 100，不排除用户已买的商品。
 
 | 类型 | 内容 | 配置数 |
 |---|---|---|
-| Ablation | **CF0**（不加权，`s = C / sqrt(n(i)·n(j))`）vs **CF3** | 2 |
-| HPO | `α ∈ {0.5, 0.7, 0.9}` | +2 |
+| Ablation | **CF0**（不加权，α = 0.5，即普通 cosine `s = C / sqrt(n(i)·n(j))`）vs **CF3** | 2 |
+| HPO 第 1 步 | `α ∈ {0.5, 0.7, 0.9}` | +2 |
+| HPO 第 2 步 | 3×2 小网格：`L_seed ∈ {90, 180, 365}` × seed 衰减 {关, 开（τ_seed = 30）}；(90, 关) 就是当前配置 | +5 |
+
+**HPO 第 2 步为什么用网格，而不是"一次只改一个因素"**：两个因素明显相互影响。seed 窗口越长，覆盖的用户越多（D1 上 32.2% 的 query 因 90 天内没有购买而输出为空），但不衰减时，几个月前的旧购买和昨天的购买权重相同，噪声随窗口变长而变大；衰减正是用来抵消这部分噪声的。单独调窗口（衰减关）会低估长窗口，单独调衰减（90 天）又看不到它在长窗口上的作用。网格只有 6 格，每格在 D1 上只需十几秒（§1.3），成本可以忽略。
 
 不同 α 可以复用同一周的 `C_w` 和 `n_w`，只需重新归一化、重新取 Top-`K_n`。**内存**：按 seed 分块计算（见 §1.3）。
 
-**合计 4 个配置。**
+**实现**（`src/hmrec/recall/r4_itemcf.py`）：`C_w` 不整块存储。每块 seed（`chunking.item_chunk_size`）的 `C_w(i, ·)` 用 scipy 稀疏矩阵乘法算出，对每个 α 各做一次归一化和 Top-`K_n`，然后释放；所以一次扫描同时得到多个 α 的邻居表（`generate_for_alphas`）。每个 `C_w` 元素按同样的用户顺序求和，分块和不分块的结果逐位相同（有测试）。只计算本周 query 用到的 seed 的邻居。用户打分同样是稀疏矩阵乘法（seed 0/1 矩阵 × 邻居相似度矩阵），按 `chunking.query_chunk_size` 分块。CF0 和 CF3 只在用户权重上不同，α 是独立的配置项；CF0 的 ablation 用 α=0.5（即上表的 `C / sqrt(n(i)·n(j))`）。Seed 窗口和 seed 衰减只影响用户打分，不影响建图；`L_seed` 不能超过拟合窗口（365 天），保证每个 seed 都在图里。
+
+**合计 9 个配置。**
 
 ### R5 — WALS（时间衰减的隐式 ALS）
 
@@ -337,6 +344,7 @@ Recency-only 的分数 = `1 / age_days`，`age_days` 取用户最近一次购买
 - 置信度：`c_ui = 1 + α_conf · r_ui`，作为 CSR 矩阵的值传入 `implicit`，并设置库参数 `alpha=1.0`，避免重复放大。
 - 默认：W2，`α_conf=20`，`factors=64`，`λ=0.1`，`iterations=15`，固定 seed。
 - 推理：拟合得到的用户向量点乘商品向量，取活跃池内 Top-100。不排除已购商品。窗口内没有交互的用户输出为空。
+- **实现**（`src/hmrec/recall/r5_wals.py`）：只有窗口内有购买的用户和商品才有行 / 列（才有向量）。先用 float32 矩阵乘法（按 `chunking.query_chunk_size` 个 query 分块）找出每个用户得分不低于第 100 名的商品，再用 `hmrec.vectors.dot_pairs` 重新计算这些候选的分数并排序，保证 `score` 与 §8.3 的 `wals_dot` 逐位相同。两种计算在最后一位可能不同，所以在第 100 名附近几乎同分时，保留的集合可能与精确排序差最后一个商品；保存的分数和顺序总是精确的。`implicit` 用 CPU 版，`num_threads` 取自 `configs/base.yaml`，`random_seed` 在 `configs/recall/r5_wals.yaml` 中固定。
 
 | 类型 | 内容 | 配置数 |
 |---|---|---|
@@ -376,7 +384,8 @@ Recency-only 的分数 = `1 / age_days`，`age_days` 取用户最近一次购买
 
 1. **Union recall**（目标 ≥ 24%，即 G2）；
 2. **Leave-one-out union recall**：去掉每一路后，union recall 下降多少，用来判断这一路有没有带来其他路没有的候选；
-3. 每个 query 的候选数分布（平均值、P50、P90）。
+3. 每个 query 的候选数分布（平均值、P50、P90）；
+4. **R3 活跃池诊断**：在 D1–D4 上统计 R3 候选中不在 `A(a)` 内的比例和命中率（与 `A(a)` 内的候选对比），以及去掉其中"没有被其他任何一路召回"的候选后 union recall 的变化。**预先登记的决策标准**：如果 union recall 下降 **< 0.1 个百分点**（绝对值），则把 R3 改为只输出 `A(a)` 内的商品；否则保持不变（§2.4）。R2 做同样的统计，**只做诊断，不改动**。该标准在看过 D1 的 R3 结果之后制定，见 `docs/decisions.md`（2026-11-16 "R3 活跃池外候选"）。
 
 如果 union recall 明显低于 24%，**先改 recall，不进入 F 阶段**。是否删掉某一路，由 V 阶段的系统级 ablation（MAP@12）决定，不在这里决定。
 
@@ -387,7 +396,7 @@ Recency-only 的分数 = `1 / age_days`，`age_days` 取用户最近一次购买
 | R1 | 8 | 极低 |
 | R2 | 4 | 极低 |
 | R3 | 5 | 低 |
-| R4 | 4 | 中（每周建图，需要分块） |
+| R4 | 9 | 中（每周建图，需要分块） |
 | R5 | ~9 | 中（约 36 次 ALS） |
 | R6 | 1 次 base + 约 8 条链 | 高（GPU） |
 
@@ -743,6 +752,7 @@ hm-recsys/
 │   ├── logging_utils.py         # 统一的 logger 设置
 │   ├── memory.py                # 内存监控、分块迭代工具
 │   ├── threads.py               # 在 import polars 之前按 base.yaml 设置 POLARS_MAX_THREADS（只依赖标准库和 yaml）
+│   ├── vectors.py               # 用户 / 商品向量（WALS、Two-Tower 共用）：按 (customer_idx, article_idx) 批量点积、保存 / 读取
 │   │
 │   ├── data/
 │   │   ├── preprocess.py        # 原始 CSV → Parquet；ID 映射成 int32；压缩 dtype
@@ -862,11 +872,12 @@ hm-recsys/
 ### 14.1 分层规则
 
 ```
-scripts/  →  src/hmrec/{recall, fusion, features, ranker, hpo}  →  src/hmrec/{data, eval}  →  config / paths
+scripts/  →  src/hmrec/{recall, fusion, features, ranker, hpo}  →  src/hmrec/{data, eval, vectors}  →  config / paths
 ```
 
 - 上层可以调用下层，**下层不能 import 上层**。例如 `data/` 不能 import `recall/`。
 - `recall/`、`features/`、`ranker/` 之间互不 import，通过 `artifacts/` 里的文件交接。
+- `vectors.py` 属于底层（只依赖 numpy 和标准库），`recall/` 和 `features/` 都可以 import 它：R5 / R6 训练后用它把向量存到 `artifacts/models/{wals,twotower}/{fold}/`，§8.3 的 `wals_dot`、`tt_dot` 用它读取并计算点积。召回分数和点积特征用同一个函数计算，所以同一个 (用户, 商品) 的 R5 `score` 与 `wals_dot` 完全相同。
 - 所有按时间取历史数据的操作都必须经过 `data/asof.py`。
 
 ### 14.2 模块之间交接的数据
@@ -876,6 +887,7 @@ scripts/  →  src/hmrec/{recall, fusion, features, ranker, hpo}  →  src/hmrec
 | `data/queries.py` | `artifacts/queries/{fold}.parquet` | `query_id, fold, customer_idx, anchor` | 全部 |
 | `data/queries.py` | `artifacts/labels/{fold}.parquet` | `query_id, fold, article_idx` | `eval/`、`ranker/sampling.py` |
 | `recall/*` | `artifacts/candidates/{fold}/{channel}.parquet` | `query_id, article_idx, channel, rank, score` | `fusion/union.py` |
+| `recall/r5_wals.py`、`recall/twotower/`（通过 `vectors.py`） | `artifacts/models/{wals,twotower}/{fold}/`：`user_customer_idx.npy`、`user_vectors.npy`、`item_article_idx.npy`、`item_vectors.npy`、`vectors.json`（来源、fold） | 用户向量只存该 fold query 中的用户，商品向量全部保存 | `features/dense.py`（通过 `vectors.py`） |
 | `fusion/union.py` + `features/build.py` | `artifacts/features/{fold}/part-*.parquet` | `query_id, article_idx`，§8 的全部特征列 | `ranker/` |
 | `ranker/predict.py` | `artifacts/predictions/{run_id}/{fold}.parquet` | `query_id, article_idx, score, rank` | `eval/` |
 

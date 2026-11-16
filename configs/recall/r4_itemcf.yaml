@@ -1,0 +1,21 @@
+# R4 ItemCF, proposal §5 R4. Read by hmrec.config.load_itemcf_config.
+# Interactions are 0/1 per (user, article) in the fit window.
+#   w_u        = 1 / ln(1 + d_u)  (CF3, IUF; d_u = distinct articles of u in the fit window)
+#              = 1                (CF0)
+#   C_w(i, j)  = sum_u w_u * R_ui * R_uj        n_w(i) = sum_u w_u * R_ui
+#   s(i -> j)  = C_w(i, j) / (n_w(i)^alpha * n_w(j)^(1 - alpha)), j != i
+#   S(u, j)    = sum of q_ui * s(i -> j) over the distinct seeds i that u bought in the seed window
+#   q_ui       = 1 (seed decay off) or exp(-age_ui / seed_tau_days) (on), age_ui = days since
+#                u last bought i. The graph (C_w, n_w, d_u) is never decayed.
+# Neighbours j are limited to the active pool A(a) BEFORE the Top-K_n cut (proposal §5 R4).
+# Seed-item chunk size is chunking.item_chunk_size in configs/base.yaml.
+
+variant: CF3             # ablation: {CF0, CF3}; CF0 is compared at alpha 0.5 (plain cosine)
+fit_window_days: 365     # C_w and n_w: [anchor - 365d, anchor)
+seed_window_days: 90     # seeds: distinct articles the user bought in [anchor - 90d, anchor)
+                         # HPO step 2 grid (with seed_decay): {90, 180, 365}
+alpha: 0.7               # HPO: {0.5, 0.7, 0.9}
+neighbors_per_seed: 100  # K_n
+seed_decay: false        # HPO step 2 grid: {false, true}
+seed_tau_days: 30.0      # FIXED at 30 (same as R2 / R3), not tuned; used only when seed_decay is true
+quota: 100               # at most 100, never padded; already-bought articles are NOT excluded
