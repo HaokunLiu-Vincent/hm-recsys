@@ -79,6 +79,11 @@ class ProjectPaths:
         return self.configs_dir / "selection_rule.yaml"
 
     @property
+    def preprocess_config_file(self) -> Path:
+        """configs/preprocess.yaml."""
+        return self.configs_dir / "preprocess.yaml"
+
+    @property
     def locks_dir(self) -> Path:
         """configs/locks/ (append-only)."""
         return self.configs_dir / "locks"
@@ -146,6 +151,63 @@ class ProjectPaths:
     def text_article_ids_file(self) -> Path:
         """Parquet: embedding_row (int64) -> article_id (10-char string)."""
         return self.text_features_dir / "text_article_ids.parquet"
+
+    # ------------------------------------------------------------ M0 outputs (data/processed/)
+
+    @property
+    def customer_id_map_file(self) -> Path:
+        """Parquet: customer_idx (int32) <-> customer_id (64-char string)."""
+        return self.processed_dir / "customer_id_map.parquet"
+
+    @property
+    def article_id_map_file(self) -> Path:
+        """Parquet: article_idx (int32) <-> article_id (10-char string)."""
+        return self.processed_dir / "article_id_map.parquet"
+
+    @property
+    def transactions_file(self) -> Path:
+        """Parquet: one row per purchase line, sorted by (t_dat_day, customer_idx)."""
+        return self.processed_dir / "transactions.parquet"
+
+    @property
+    def customers_file(self) -> Path:
+        """Parquet: one row per customer, keyed by customer_idx."""
+        return self.processed_dir / "customers.parquet"
+
+    @property
+    def articles_file(self) -> Path:
+        """Parquet: one row per article, keyed by article_idx."""
+        return self.processed_dir / "articles.parquet"
+
+    @property
+    def processed_embeddings_dir(self) -> Path:
+        """data/processed/embeddings/: embeddings re-ordered by article_idx."""
+        return self.processed_dir / "embeddings"
+
+    @property
+    def image_embeddings_by_idx_file(self) -> Path:
+        """float32 array [n_articles, 512]; row i is article_idx i (zeros when missing)."""
+        return self.processed_embeddings_dir / "image_by_article_idx.npy"
+
+    @property
+    def image_embedding_mask_file(self) -> Path:
+        """Bool array [n_articles]; True where article_idx i has an image vector."""
+        return self.processed_embeddings_dir / "image_mask.npy"
+
+    @property
+    def text_embeddings_by_idx_file(self) -> Path:
+        """float32 array [n_articles, 384]; row i is article_idx i (zeros when missing)."""
+        return self.processed_embeddings_dir / "text_by_article_idx.npy"
+
+    @property
+    def text_embedding_mask_file(self) -> Path:
+        """Bool array [n_articles]; True where article_idx i has a text vector."""
+        return self.processed_embeddings_dir / "text_mask.npy"
+
+    @property
+    def processed_metadata_file(self) -> Path:
+        """JSON: day_zero, age buckets and config hash used to build data/processed/."""
+        return self.processed_dir / "metadata.json"
 
     # ------------------------------------------------------------ artifacts (proposal §14.2)
 

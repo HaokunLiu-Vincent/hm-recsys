@@ -16,12 +16,13 @@ Validation (all must hold, otherwise ValueError):
 
 from collections.abc import Mapping
 from dataclasses import dataclass
-from datetime import date, datetime, timedelta
+from datetime import date, timedelta
 from pathlib import Path
 from typing import Any
 
 from hmrec.config import (
     check_keys,
+    get_date,
     get_int,
     get_mapping,
     get_str,
@@ -114,16 +115,6 @@ class FoldManifest:
 # ---------------------------------------------------------------- parsing
 
 
-def _get_date(raw: Mapping[str, Any], key: str, where: str) -> date:
-    """Return raw[key] as a date. PyYAML already turns YYYY-MM-DD into a date."""
-    value = raw[key]
-    # datetime is a subclass of date, so reject it explicitly: a time of day
-    # would make "<" comparisons with plain dates fail or behave unexpectedly.
-    if not isinstance(value, date) or isinstance(value, datetime):
-        raise ValueError(f"{where}.{key}: expected a date YYYY-MM-DD, got {value!r}")
-    return value
-
-
 def parse_fold_checks(raw: Mapping[str, Any]) -> FoldChecks:
     """Parse the `checks` block of the manifest."""
     where = "fold_manifest.checks"
@@ -134,7 +125,7 @@ def parse_fold_checks(raw: Mapping[str, Any]) -> FoldChecks:
         week_length_days=get_int(raw, "week_length_days", where),
         folds_per_phase=get_int(raw, "folds_per_phase", where),
         phase_order=get_str_list(raw, "phase_order", where),
-        last_label_date=_get_date(raw, "last_label_date", where),
+        last_label_date=get_date(raw, "last_label_date", where),
     )
     require_positive(checks.week_length_days, f"{where}.week_length_days")
     require_positive(checks.folds_per_phase, f"{where}.folds_per_phase")
@@ -153,8 +144,8 @@ def parse_fold(raw: Mapping[str, Any], position: int) -> Fold:
     return Fold(
         name=get_str(raw, "name", where),
         phase=get_str(raw, "phase", where),
-        anchor=_get_date(raw, "anchor", where),
-        label_end=_get_date(raw, "label_end", where),
+        anchor=get_date(raw, "anchor", where),
+        label_end=get_date(raw, "label_end", where),
     )
 
 

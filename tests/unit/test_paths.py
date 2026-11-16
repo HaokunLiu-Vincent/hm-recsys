@@ -52,6 +52,27 @@ def test_build_paths_derives_everything_from_roots(tmp_path: Path) -> None:
     assert paths.d_phase_results_file == tmp_path / "results" / "d_phase.csv"
 
 
+def test_m0_outputs_live_in_data_processed(tmp_path: Path) -> None:
+    paths = build_paths(make_config("my_data", "artifacts"), tmp_path)
+    processed = tmp_path / "my_data" / "processed"
+
+    assert paths.preprocess_config_file == tmp_path / "configs" / "preprocess.yaml"
+    assert paths.transactions_file == processed / "transactions.parquet"
+    assert paths.customers_file == processed / "customers.parquet"
+    assert paths.articles_file == processed / "articles.parquet"
+    assert paths.customer_id_map_file == processed / "customer_id_map.parquet"
+    assert paths.article_id_map_file == processed / "article_id_map.parquet"
+    assert paths.processed_metadata_file == processed / "metadata.json"
+    assert (
+        paths.image_embeddings_by_idx_file == processed / "embeddings" / "image_by_article_idx.npy"
+    )
+    assert paths.image_embedding_mask_file == processed / "embeddings" / "image_mask.npy"
+    assert paths.text_embeddings_by_idx_file == processed / "embeddings" / "text_by_article_idx.npy"
+    assert paths.text_embedding_mask_file == processed / "embeddings" / "text_mask.npy"
+    # The aligned copies must not overwrite the read-only source embeddings.
+    assert paths.image_embeddings_by_idx_file != paths.image_embeddings_file
+
+
 def test_get_paths_resolves_relative_to_config_location(tmp_path: Path) -> None:
     # A fake repo: <tmp>/configs/base.yaml with relative roots.
     configs_dir = tmp_path / "configs"

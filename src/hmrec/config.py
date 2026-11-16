@@ -5,6 +5,7 @@ Code should pass these dataclasses around, never raw dicts (AGENTS.md §6.4).
 Loaders in this module:
     - load_base_config: configs/base.yaml -> BaseConfig
     - load_selection_rule: configs/selection_rule.yaml -> SelectionRule
+    - load_preprocess_config: configs/preprocess.yaml -> PreprocessConfig
 
 The fold manifest is parsed in hmrec.data.folds, which reuses load_yaml and the
 small field helpers defined here.
@@ -13,8 +14,11 @@ Every loader is strict: a missing key, an unknown key (usually a typo), or a
 value of the wrong type raises ValueError with a message that names the key.
 """
 
+import hashlib
+import json
 from collections.abc import Mapping
-from dataclasses import dataclass
+from dataclasses import asdict, dataclass
+from datetime import date, datetime
 from pathlib import Path
 from typing import Any
 
@@ -202,6 +206,16 @@ def get_str_list(raw: Mapping[str, Any], key: str, where: str) -> tuple[str, ...
     return tuple(value)
 
 
+def get_date(raw: Mapping[str, Any], key: str, where: str) -> date:
+    """Return raw[key] as a date. PyYAML already turns YYYY-MM-DD into a date."""
+    value = raw[key]
+    # datetime is a subclass of date, so reject it explicitly: a time of day
+    # would make "<" comparisons with plain dates fail or behave unexpectedly.
+    if not isinstance(value, date) or isinstance(value, datetime):
+        raise ValueError(f"{where}.{key}: expected a date YYYY-MM-DD, got {value!r}")
+    return value
+
+
 def require_positive(value: float, name: str) -> None:
     """Fail if `value` is not strictly greater than zero."""
     if value <= 0:
@@ -362,3 +376,190 @@ def load_selection_rule(path: Path) -> SelectionRule:
         A validated SelectionRule.
     """
     return parse_selection_rule(load_yaml(path))
+
+
+# ---------------------------------------------------------------- preprocess.yaml
+
+
+@dataclass(frozen=True)
+class AgeBucket:
+    """One age bucket for R1 popularity (proposal §5 R1).
+
+    Attributes:
+        name: Bucket label stored in customers.age_bucket, e.g. "AGE_18_24".
+        min_age: Smallest age in the bucket, INCLUSIVE.
+        max_age: Largest age in the bucket, INCLUSIVE.
+    """
+
+    name: str
+    min_age: int
+    max_age: int
+
+
+@dataclass(frozen=True)
+class EmbeddingConfig:
+    """Expected shape and normalization of the precomputed embeddings (proposal §2.1).
+
+    Attributes:
+        image_dim: Width of the CLIP image vectors (512).
+        text_dim: Width of the MiniLM text vectors (384).
+        norm_tolerance: Every present vector must have L2 norm in [1 - tol, 1 + tol].
+    """
+
+    image_dim: int
+    text_dim: int
+    norm_tolerance: float
+
+
+@dataclass(frozen=True)
+class PreprocessConfig:
+    """Settings for M0 preprocessing from configs/preprocess.yaml.
+
+    Attributes:
+        day_zero: Day 0 of the integer day index: t_dat_day = (t_dat - day_zero).days.
+        age_buckets: Valid-age buckets, sorted and contiguous.
+        invalid_age_bucket: Bucket for ages outside every bucket (< 18 or > 99).
+        unknown_age_bucket: Bucket for a missing age.
+        embeddings: Expected embedding widths and norm tolerance.
+        transactions_row_group_size: Rows per Parquet row group in transactions.parquet.
+    """
+
+    day_zero: date
+    age_buckets: tuple[AgeBucket, ...]
+    invalid_age_bucket: str
+    unknown_age_bucket: str
+    embeddings: EmbeddingConfig
+    transactions_row_group_size: int
+
+    @property
+    def all_age_bucket_names(self) -> tuple[str, ...]:
+        """Every possible age_bucket value: valid buckets, then invalid, then unknown."""
+        valid_names = tuple(bucket.name for bucket in self.age_buckets)
+        return (*valid_names, self.invalid_age_bucket, self.unknown_age_bucket)
+
+
+def _parse_age_bucket(raw: Any, position: int) -> AgeBucket:
+    """Parse one entry of the age_buckets list."""
+    where = f"preprocess.age_buckets[{position}]"
+    if not isinstance(raw, Mapping):
+        raise ValueError(f"{where}: expected a mapping, got {raw!r}")
+    check_keys(raw, {"name", "min_age", "max_age"}, where)
+    return AgeBucket(
+        name=get_str(raw, "name", where),
+        min_age=get_int(raw, "min_age", where),
+        max_age=get_int(raw, "max_age", where),
+    )
+
+
+def parse_preprocess_config(raw: Mapping[str, Any]) -> PreprocessConfig:
+    """Build a PreprocessConfig from the parsed content of configs/preprocess.yaml.
+
+    Args:
+        raw: Top-level mapping with keys day_zero, age_buckets, invalid_age_bucket,
+            unknown_age_bucket, embeddings, transactions_row_group_size.
+
+    Returns:
+        A validated PreprocessConfig.
+
+    Raises:
+        ValueError: If a key is missing or unknown, a type is wrong, or the age
+            buckets overlap, leave a gap, or reuse a name.
+    """
+    expected_keys = {
+        "day_zero",
+        "age_buckets",
+        "invalid_age_bucket",
+        "unknown_age_bucket",
+        "embeddings",
+        "transactions_row_group_size",
+    }
+    check_keys(raw, expected_keys, "preprocess")
+
+    raw_buckets = raw["age_buckets"]
+    if not isinstance(raw_buckets, list) or not raw_buckets:
+        raise ValueError("preprocess.age_buckets: expected a non-empty list")
+    age_buckets = tuple(
+        _parse_age_bucket(raw_bucket, position) for position, raw_bucket in enumerate(raw_buckets)
+    )
+
+    raw_embeddings = get_mapping(raw, "embeddings", "preprocess")
+    check_keys(raw_embeddings, {"image_dim", "text_dim", "norm_tolerance"}, "preprocess.embeddings")
+    embeddings = EmbeddingConfig(
+        image_dim=get_int(raw_embeddings, "image_dim", "preprocess.embeddings"),
+        text_dim=get_int(raw_embeddings, "text_dim", "preprocess.embeddings"),
+        norm_tolerance=get_float(raw_embeddings, "norm_tolerance", "preprocess.embeddings"),
+    )
+
+    config = PreprocessConfig(
+        day_zero=get_date(raw, "day_zero", "preprocess"),
+        age_buckets=age_buckets,
+        invalid_age_bucket=get_str(raw, "invalid_age_bucket", "preprocess"),
+        unknown_age_bucket=get_str(raw, "unknown_age_bucket", "preprocess"),
+        embeddings=embeddings,
+        transactions_row_group_size=get_int(raw, "transactions_row_group_size", "preprocess"),
+    )
+    _validate_preprocess_config(config)
+    return config
+
+
+def _validate_age_buckets(age_buckets: tuple[AgeBucket, ...]) -> None:
+    """Fail unless the buckets are non-empty ranges, sorted, and contiguous (no gap, no overlap)."""
+    for bucket in age_buckets:
+        if bucket.min_age > bucket.max_age:
+            raise ValueError(
+                f"age bucket {bucket.name}: min_age={bucket.min_age} > max_age={bucket.max_age}"
+            )
+    for previous, current in zip(age_buckets, age_buckets[1:], strict=False):
+        # Both ends are inclusive, so the next bucket must start exactly one year later.
+        if current.min_age <= previous.max_age:
+            raise ValueError(
+                f"age buckets {previous.name} and {current.name} overlap: "
+                f"{previous.max_age} >= {current.min_age}"
+            )
+        if current.min_age != previous.max_age + 1:
+            raise ValueError(
+                f"age buckets {previous.name} and {current.name} leave a gap: "
+                f"ages {previous.max_age + 1}..{current.min_age - 1} belong to no bucket"
+            )
+
+
+def _validate_preprocess_config(config: PreprocessConfig) -> None:
+    """Check value ranges and consistency of a PreprocessConfig."""
+    _validate_age_buckets(config.age_buckets)
+    names = config.all_age_bucket_names
+    if len(set(names)) != len(names):
+        raise ValueError(f"preprocess: age bucket names must be unique, got {list(names)}")
+    require_positive(config.embeddings.image_dim, "preprocess.embeddings.image_dim")
+    require_positive(config.embeddings.text_dim, "preprocess.embeddings.text_dim")
+    require_positive(config.embeddings.norm_tolerance, "preprocess.embeddings.norm_tolerance")
+    require_positive(config.transactions_row_group_size, "preprocess.transactions_row_group_size")
+
+
+def load_preprocess_config(path: Path) -> PreprocessConfig:
+    """Read and validate configs/preprocess.yaml.
+
+    Args:
+        path: Path to preprocess.yaml.
+
+    Returns:
+        A validated PreprocessConfig.
+    """
+    return parse_preprocess_config(load_yaml(path))
+
+
+def preprocess_config_hash(config: PreprocessConfig) -> str:
+    """Return a sha256 hex digest that identifies the preprocessing settings.
+
+    The hash is computed from the PARSED values (not the raw file bytes), so
+    editing comments or whitespace in preprocess.yaml does not change it, but
+    changing any value does. Keys are sorted so the result is stable.
+
+    Args:
+        config: Parsed preprocess config.
+
+    Returns:
+        64-character lowercase hex string.
+    """
+    # default=str turns the day_zero date into "YYYY-MM-DD".
+    canonical_json = json.dumps(asdict(config), sort_keys=True, default=str)
+    return hashlib.sha256(canonical_json.encode("utf-8")).hexdigest()

@@ -36,6 +36,8 @@ H&M 个性化时尚推荐（Kaggle H&M 数据集）。目标：预测每个用�
 - 对 anchor `a` 的任何计算（recall、特征、模型训练），**只能使用 `t_dat < a` 的数据**。anchor 当天属于 label 周。
 - 按时间截取历史数据，**只能通过 `src/hmrec/data/asof.py`**，不要在别处自己写日期过滤。
 - 每个 as-of 函数都要用断言检查输入的最大日期小于 anchor。
+- 读取 `data/processed/` 下的表，**必须通过 `hmrec.data.metadata.scan_processed_parquet`**。它先用 `data/processed/metadata.json` 核对 `day_zero`、年龄桶和预处理配置 hash，不一致就报错。不要直接对 processed 文件调用 `pl.scan_parquet` / `pl.read_parquet`。
+- processed 数据中的日期是 int16 列 `t_dat_day`（距 `day_zero` 的天数）。日期与天数的换算**必须调用 `src/hmrec/data/day_index.py`**，不能自己写 `(d - day_zero).days` 之类的公式。
 - **Recall 和特征代码永远不读 label。** Label 只在 `src/hmrec/eval/` 和 `src/hmrec/ranker/sampling.py` 中读取。
 - 某个 fold 的候选和特征一旦生成就冻结。之后用它们训练时，**不允许用更新的模型重新生成**。
 
@@ -64,6 +66,12 @@ H&M 个性化时尚推荐（Kaggle H&M 数据集）。目标：预测每个用�
 - 未经用户同意，不要在完整数据上运行重任务（全量 recall、Two-Tower 训练、Ranker 训练）。开发和测试只用 `tests/fixtures/` 的小数据。
 - 不要用 `print` 调试后留在代码里。
 - 不要为了让测试通过而修改测试的预期值，除非你能说明原来的预期值是错的。
+- 修改 `.gitignore` 后，必须做两项检查，并在回复中报告结果：
+  1. 用 `git check-ignore` 确认 `src/` 和 `tests/` 下的文件没有被忽略。下面的命令应当**没有任何输出**：
+     `find src tests -type f -not -path '*/__pycache__/*' | git check-ignore --stdin`
+  2. 确认 ruff 检查的文件数没有减少：比较修改前后 `uv run ruff format --check src tests scripts` 输出的文件数。
+
+  原因：ruff 会跳过 `.gitignore` 中的文件。曾经 `data/` 这一行同时忽略了 `src/hmrec/data/`，导致这个包既不会进 git，也没有被 ruff 检查，而 `make lint` 仍然显示通过。
 
 ---
 
@@ -235,7 +243,12 @@ make test         # uv run pytest tests（单元 + 集成）
 
 ## 10. Git
 
+- **Agent 不自行 commit**（也不 push、不打 tag）。完成任务后，在回复中列出：
+  1. 建议 commit 的文件（如果一个任务应该拆成多个 commit，按 commit 分组列出）；
+  2. 每个 commit 的 commit message（格式见下一条）。
+
+  由用户自己 commit。用户在对话中明确要求 agent commit 时才可以 commit。
 - 每次 commit 只做一件事，commit message 用英文，格式：`<scope>: <what changed>`，例如 `recall/r2: add decayed-frequency scoring`。
-- 锁定配置（M5、M7 等节点）时打 tag，例如 `lock-channels-v1`。
+- 锁定配置（M5、M7 等节点）时打 tag，例如 `lock-channels-v1`（由用户打，agent 只给出建议的 tag 名）。
 - 不要提交 `data/`、`artifacts/` 下的文件。
 - 未经用户要求，不要 push。

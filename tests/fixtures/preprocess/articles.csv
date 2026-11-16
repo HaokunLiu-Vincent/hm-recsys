@@ -1,0 +1,5 @@
+article_id,product_code,prod_name,product_type_no,product_group_name,colour_group_code,index_group_no,section_no,garment_group_no,detail_desc
+0951111001,0951111,Long dress,265,Garment Full body,93,2,15,1013,"A long dress, with a ""quoted"" word."
+0108775044,0108775,Strap top,253,Garment Upper body,10,1,16,1002,Jersey top.
+0108775015,0108775,Strap top,253,Garment Upper body,09,1,16,1002,Jersey top.
+0110065001,0110065,OP T-shirt,306,Underwear,-1,1,61,1017,Soft bra.

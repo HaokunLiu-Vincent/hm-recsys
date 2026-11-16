@@ -1,4 +1,5 @@
 import copy
+from datetime import date
 from pathlib import Path
 from typing import Any
 
@@ -6,10 +7,13 @@ import pytest
 
 from hmrec.config import (
     load_base_config,
+    load_preprocess_config,
     load_selection_rule,
     load_yaml,
     parse_base_config,
+    parse_preprocess_config,
     parse_selection_rule,
+    preprocess_config_hash,
 )
 
 REPO_CONFIGS = Path(__file__).resolve().parents[2] / "configs"
@@ -146,3 +150,86 @@ def test_selection_rule_rejects_negative_improvement() -> None:
     raw["acceptance"]["min_relative_improvement"] = -0.01
     with pytest.raises(ValueError, match="min_relative_improvement must be >= 0"):
         parse_selection_rule(raw)
+
+
+# ---------------------------------------------------------------- preprocess.yaml
+
+VALID_PREPROCESS: dict[str, Any] = {
+    "day_zero": date(2018, 9, 20),
+    "age_buckets": [
+        {"name": "YOUNG", "min_age": 18, "max_age": 29},
+        {"name": "OLD", "min_age": 30, "max_age": 99},
+    ],
+    "invalid_age_bucket": "INVALID",
+    "unknown_age_bucket": "UNKNOWN",
+    "embeddings": {"image_dim": 4, "text_dim": 3, "norm_tolerance": 0.001},
+    "transactions_row_group_size": 10,
+}
+
+
+def test_repo_preprocess_yaml_matches_proposal() -> None:
+    config = load_preprocess_config(REPO_CONFIGS / "preprocess.yaml")
+    # Proposal §2.1: transactions start on 2018-09-20.
+    assert config.day_zero == date(2018, 9, 20)
+    # Proposal §5 R1 age buckets (frozen), both ends inclusive.
+    assert [(b.name, b.min_age, b.max_age) for b in config.age_buckets] == [
+        ("AGE_18_24", 18, 24),
+        ("AGE_25_34", 25, 34),
+        ("AGE_35_44", 35, 44),
+        ("AGE_45_54", 45, 54),
+        ("AGE_55_PLUS", 55, 99),
+    ]
+    assert config.invalid_age_bucket == "AGE_INVALID"
+    assert config.unknown_age_bucket == "AGE_UNKNOWN"
+    # Proposal §2.1 embedding widths.
+    assert (config.embeddings.image_dim, config.embeddings.text_dim) == (512, 384)
+
+
+def test_parse_preprocess_config() -> None:
+    config = parse_preprocess_config(VALID_PREPROCESS)
+    assert config.all_age_bucket_names == ("YOUNG", "OLD", "INVALID", "UNKNOWN")
+    assert config.embeddings.norm_tolerance == pytest.approx(0.001)
+
+
+def test_overlapping_age_buckets_raise() -> None:
+    raw = copy.deepcopy(VALID_PREPROCESS)
+    raw["age_buckets"][1]["min_age"] = 29
+    with pytest.raises(ValueError, match="YOUNG and OLD overlap"):
+        parse_preprocess_config(raw)
+
+
+def test_age_bucket_gap_raises() -> None:
+    raw = copy.deepcopy(VALID_PREPROCESS)
+    raw["age_buckets"][1]["min_age"] = 31
+    with pytest.raises(ValueError, match=r"leave a gap: ages 30\.\.30"):
+        parse_preprocess_config(raw)
+
+
+def test_duplicate_bucket_names_raise() -> None:
+    raw = copy.deepcopy(VALID_PREPROCESS)
+    raw["unknown_age_bucket"] = "INVALID"
+    with pytest.raises(ValueError, match="names must be unique"):
+        parse_preprocess_config(raw)
+
+
+def test_preprocess_unknown_key_raises() -> None:
+    raw = copy.deepcopy(VALID_PREPROCESS)
+    raw["day_zeroo"] = date(2018, 9, 20)
+    with pytest.raises(ValueError, match=r"unknown keys \['day_zeroo'\]"):
+        parse_preprocess_config(raw)
+
+
+def test_day_zero_must_be_a_date() -> None:
+    raw = copy.deepcopy(VALID_PREPROCESS)
+    raw["day_zero"] = "2018-09-20"
+    with pytest.raises(ValueError, match="expected a date"):
+        parse_preprocess_config(raw)
+
+
+def test_preprocess_hash_is_stable_and_value_sensitive() -> None:
+    first = preprocess_config_hash(parse_preprocess_config(VALID_PREPROCESS))
+    second = preprocess_config_hash(parse_preprocess_config(copy.deepcopy(VALID_PREPROCESS)))
+    assert first == second
+    raw = copy.deepcopy(VALID_PREPROCESS)
+    raw["transactions_row_group_size"] = 11
+    assert preprocess_config_hash(parse_preprocess_config(raw)) != first

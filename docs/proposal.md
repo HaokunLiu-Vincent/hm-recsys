@@ -1,6 +1,7 @@
-# H&M 个性化时尚推荐系统 — 项目方案 v0.1
+# H&M 个性化时尚推荐系统 — 项目方案 v0.1.2
 
 > 日期：2026-11-15（v0.1.1：O1–O5 已决定，新增 §14 目录结构、§15 代码规范）
+> v0.1.2（2026-11-15，根据项目骨架和工具链迁移的结果）：§1.2 / §15 改为 Python 3.12 + uv（`uv.lock` 锁定依赖）+ Pyright；§1.3 注明内存峰值是采样值；§2.1 写入预计算 embedding 的实测事实；§4.2 明确"更好"指严格更好；§5 R6 说明缺图像向量的商品用 mask；§8.3 规定 `img_sim_hist` / `txt_sim_hist` 何时为 NaN；§14 更新 `data/` 目录树。
 > 状态：重新开始的第一版方案。旧项目的结果只作为参考数字，不沿用任何旧代码、旧配置或旧结论。
 > 系统结构：**6 路 recall → 候选合并去重（union + dedup）→ 1 个 LightGBM LambdaMART ranker → Top-12**
 > 原则：**能少跑就少跑**。每路只做 1–2 个 ablation 加一个小的 HPO 网格。一次只改一个因素（one-factor-at-a-time, OAT），不做全组合。
@@ -64,28 +65,33 @@
 
 | 组件 | 设备 | 设置 |
 |---|---|---|
-| 数据处理 | CPU | Polars 或 pandas + pyarrow；中间结果一律存 Parquet |
+| 数据处理 | CPU | 只用 Polars（优先 lazy API / streaming），不用 pandas；中间结果一律存 Parquet |
 | R1–R4 | CPU | 向量化计算，按需分块 |
 | R5 WALS | CPU | `implicit` CPU 版，`num_threads=6`（GPU 版只支持 CUDA） |
 | R6 Two-Tower | GPU（MPS） | PyTorch，`device="mps"`，全部 float32（MPS 不支持 float64） |
 | Ranker | CPU | LightGBM，`num_threads=6` |
 | 随机种子 | 全部 | 每个配置固定 seed，写进 config |
+| Python 环境 | — | **Python 3.12**（`.python-version`），由 **uv** 管理（`.venv`）；依赖写在 `pyproject.toml`，精确版本由 **`uv.lock`** 锁定（进 git） |
+| 开发工具 | — | `ruff` 格式化和 lint；**Pyright**（`standard` 模式）类型检查；`pytest` 测试。与 §15 一致 |
 
 ### 1.3 8 GB 内存的约束和对策
 
 8 GB 是最主要的限制。**任何一个任务的内存峰值不超过约 6 GB**，给系统留余量。**重任务一次只跑一个**，不并行。
 
-| 任务 | 估算内存 | 对策 |
-|---|---|---|
-| 交易表常驻内存 | ~0.5 GB | ID 全部映射成 int32；日期存 int16（距起始日天数）；price 用 float32；channel 用 int8 |
-| R4 ItemCF 共现矩阵（365 天） | 不分块可能远超 8 GB | **按 seed item 分块**（每块约 2,000 个 item），每块算完只保留 Top-`K_n` 邻居就释放 |
-| R5 WALS（180 天） | ~0.5–1 GB | 稀疏 CSR，没问题 |
-| R6 Two-Tower 训练 | ~1.5–2 GB | 用户历史预先存成 int32 数组 `[N, 20]`；商品特征表（~10.5 万 × 896 维，约 380 MB）整块放进 MPS 显存；batch 直接按下标取，不用 DataLoader |
-| 候选生成（每周） | 每周约 7 万 query × 最多 480 条 | 每个 channel 单独写 Parquet，再按 query 分块合并去重 |
-| Ranker 训练（4 周） | 负采样 1:40 约 900 万行，1:80 约 1,800 万行；原始 float32 特征 2–4 GB | **流式加载（stream loading）**：每周特征按 row group 存 Parquet，用 LightGBM 的 `lgb.Sequence` 分批读入构建 `Dataset`，原始特征不必一次性放进内存；构建后的分箱数据（每个值 1 字节）约 0.5–1 GB，存成 LightGBM binary 文件复用 |
-| Ranker 推理（每周，不采样） | 约 7 万 × 250 × 56 × 4 B ≈ 4 GB | **按 query 分块打分**（每块 1 万个 query） |
+| 任务 | 估算内存 | 实测 | 对策 |
+|---|---|---|---|
+| 交易表常驻内存 | ~0.5 GB | **0.44 GB**（454.7 MB，31,788,324 行；Parquet 文件 160 MB） | ID 全部映射成 int32；日期存 int16（距起始日天数）；price 用 float32；channel 用 int8 |
+| M0 预处理（CSV 流式转 Parquet、对齐 embedding） | — | **峰值 2.25 GB**（其中交易表一步峰值 2.10 GB）；全程约 6 秒 | Polars lazy 扫描 + streaming `sink_parquet`；字符串 ID 先换成 int32 再排序 |
+| R4 ItemCF 共现矩阵（365 天） | 不分块可能远超 8 GB | 待测 | **按 seed item 分块**（每块约 2,000 个 item），每块算完只保留 Top-`K_n` 邻居就释放 |
+| R5 WALS（180 天） | ~0.5–1 GB | 待测 | 稀疏 CSR，没问题 |
+| R6 Two-Tower 训练 | ~1.5–2 GB | 待测 | 用户历史预先存成 int32 数组 `[N, 20]`；商品特征表（~10.5 万 × 896 维，约 380 MB）整块放进 MPS 显存；batch 直接按下标取，不用 DataLoader |
+| 候选生成（每周） | 每周约 7 万 query × 最多 480 条 | 待测 | 每个 channel 单独写 Parquet，再按 query 分块合并去重 |
+| Ranker 训练（4 周） | 负采样 1:40 约 900 万行，1:80 约 1,800 万行；原始 float32 特征 2–4 GB | 待测 | **流式加载（stream loading）**：每周特征按 row group 存 Parquet，用 LightGBM 的 `lgb.Sequence` 分批读入构建 `Dataset`，原始特征不必一次性放进内存；构建后的分箱数据（每个值 1 字节）约 0.5–1 GB，存成 LightGBM binary 文件复用 |
+| Ranker 推理（每周，不采样） | 约 7 万 × 250 × 56 × 4 B ≈ 4 GB | 待测 | **按 query 分块打分**（每块 1 万个 query） |
 
-以上都是估算值，M0 阶段实测后更新这张表。
+以上除"实测"列外都是估算值，后续各阶段实测后继续填写"实测"列。M0 实测（2026-11-15）：常驻内存是读回 Parquet 后的 Polars `estimated_size()`；峰值是 `MemoryTracker` 的采样 RSS（间隔 0.5 秒，是下限，见下一段）。其他 M0 产物的常驻内存：customers 37 MB，articles 3 MB，customer ID 映射 89 MB，按 `article_idx` 对齐的图像 / 文本 embedding 206 MB / 155 MB。
+
+**内存峰值怎么测**：macOS 上 psutil 拿不到进程的历史峰值，所以 `src/hmrec/memory.py` 用后台线程定时采样 RSS（间隔见 `configs/base.yaml` 的 `memory.sample_interval_seconds`），峰值取所有采样值和开始、结束读数中的最大值。比采样间隔还短的瞬时峰值可能测不到；MPS 张量占用的统一内存也不一定全部计入 RSS。因此实测峰值是**下限**，6 GB 上限要留余量：实测峰值接近 6 GB 时就应该当作超限处理。
 
 ### 1.4 Two-Tower 速度估算（M1 Max，待实测）
 
@@ -108,15 +114,30 @@
 | `transactions_train.csv` | `t_dat, customer_id, article_id, price, sales_channel_id`；2018-09-20 至 2020-09-22。完全相同的重复行表示多次购买，**保留** |
 | `customers.csv` | `customer_id, FN, Active, club_member_status, fashion_news_frequency, age, postal_code` |
 | `articles.csv` | `article_id, product_code` 和各级类目、颜色、描述等元数据 |
-| 预计算 embedding | 每个商品的 CLIP ViT-B/32 图像向量（512 维）和 all-MiniLM-L6-v2 文本向量（384 维）。只读，不重新提取 |
+| 预计算 embedding | 每个商品的 CLIP ViT-B/32 图像向量（512 维）和 all-MiniLM-L6-v2 文本向量（384 维）。只读，不重新提取。详见下面的"预计算 embedding" |
 
 `article_id` 保留前导零，统一作为 10 位字符串处理，内部映射成 int32。
+
+**预计算 embedding**（2026-11-15 只读检查的结果，见 `docs/decisions.md`）：
+
+| | 图像 | 文本 |
+|---|---|---|
+| 模型 | CLIP ViT-B/32 | all-MiniLM-L6-v2 |
+| 向量文件 | `data/processed/image_features/image_embeddings.npy` | `data/processed/text_features/text_embeddings.npy` |
+| shape / dtype | `(105100, 512)` float32 | `(105542, 384)` float32 |
+| id 表 | `image_article_ids.parquet`（`embedding_row, article_id, image_path`） | `text_article_ids.parquet`（`embedding_row, article_id, text, token_count, was_truncated`） |
+| 覆盖 | 105,100 / 105,542 个商品，**442 个商品没有图像向量** | 全部 105,542 个商品 |
+
+- **对应关系**：`.npy` 的第 `i` 行，对应 id 表中 `embedding_row = i` 的 `article_id`（10 位字符串）。M0 中再映射成 `article_idx`（int32）。不能假设 `.npy` 的行号等于 `article_idx`。
+- **已经 L2 归一化**：两个向量的点积就是 cosine 相似度，使用时不需要再归一化。
+- 目录中的 `*_faiss.index` 文件**不使用**（项目不依赖 faiss）。目录中的 manifest json 记录了模型版本和 sha256，只作参考。
 
 ### 2.2 时间约定
 
 - Anchor `a` 是预测周的第一天。**输入**：`t_dat < a`。**Label**：`t_dat ∈ [a, a+7d)`。
 - 事件年龄：`age_days = (a − t_dat).days`，所以 anchor 前一天的年龄是 1。
 - 所有指数衰减都写成 `exp(−age_days / τ)`，τ 是**时间常数**，不是半衰期（半衰期 = τ × ln2）。
+- **processed 数据中的日期列**：`data/processed/transactions.parquet` 不存日期，存 int16 列 **`t_dat_day`** = 距 `day_zero`（`configs/preprocess.yaml`，2018-09-20）的天数，范围 0..733。设 `anchor_day = date_to_day_index(a, day_zero)`，上面的 `t_dat < a` 在代码里写成 `t_dat_day < anchor_day`，`age_days` 写成 `anchor_day − t_dat_day`。日期与天数的换算**只能**调用 `src/hmrec/data/day_index.py`（`date_to_day_index` / `day_index_to_date`，以及对应的 Polars 表达式版本 `*_expr`），不能在别处自己写公式。
 
 ### 2.3 Query 和 Label
 
@@ -196,7 +217,7 @@
 只有同时满足下面两条，才把默认值换成新的变体或超参数，否则**保留默认值**：
 
 1. 4 周合并分数**相对提升 ≥ 1%**；
-2. **4 周中至少 3 周**更好。
+2. **4 周中至少 3 周**更好。这里的"更好"指**严格更好**（新分数 > 默认分数），**分数相同不算更好**。
 
 两个候选差不多时，选**更简单、更便宜**的那个。这条规则写进 `configs/selection_rule.yaml`，**在看到任何分数之前提交**。
 
@@ -214,7 +235,9 @@
 
 **每个 trial 都要在 D1–D4 每周重新计算**：用该周 anchor 之前的数据重新统计或重新 fit。不能 fit 一次然后评 4 周。
 
-统一输出格式（每路一张表）：`query_id, article_id, channel, rank, score`。每个 query 内 `article_id` 不重复；按 `score DESC, article_id ASC` 排序；`rank` 从 1 开始连续编号；不足 quota 时不补齐。
+统一输出格式（每路一张表）：`query_id, article_idx, channel, rank, score`。每个 query 内 `article_idx` 不重复；按 `score DESC, article_idx ASC` 排序；`rank` 从 1 开始连续编号；不足 quota 时不补齐。
+
+`article_idx`（int32）是把 `articles.csv` 中全部 `article_id` 按字符串排序后的编号（0..N−1，见 `src/hmrec/data/id_maps.py`），所以按 `article_idx ASC` 排序与按 `article_id ASC` 排序完全等价，tie-break 的结果不变。
 
 ### R1 — 分年龄桶的时间衰减热度（Age-Bucketed Decayed Popularity）
 
@@ -315,6 +338,7 @@
 
 **模型**：
 - **Item tower**：冻结的 CLIP（512 维）和 MiniLM（384 维）向量，经过可训练的投影层；加上可训练的 `article_id`、`product_code` 和类目 embedding；有缺失时用 mask。
+  - 没有图像向量的 442 个商品（见 §2.1）：图像输入用 mask 遮掉（不填 0 向量当作真实输入），商品向量由文本、ID 和类目部分得到。这些商品**照常参与训练和召回**，不从商品目录或活跃池中删除。
 - **User tower**：用户在 anchor 之前**最近 20 件购买**（不限时间窗口）经过 item tower 编码后做 pooling，再加上用户 profile（年龄桶、会员状态、news 频率）。
 - 两边输出 128 维向量，L2 归一化。
 - **Loss**：in-batch softmax，加 LogQ 修正（按商品被采样的频率扣分）。同一用户同一天买的多个商品，在同一个 batch 里都算正样本（multi-positive），不能互相当作负样本。
@@ -466,8 +490,8 @@ WALS 和 Two-Tower 的原始分数放在 B 组，因为 B 组对所有候选都�
 | `tt_dot` | Two-Tower 用户向量 · 商品向量（当周 anchor 的模型） |
 | `wals_dot` | WALS 用户向量 · 商品向量；用户或商品没有向量时为 NaN |
 | `pop_bucket_score` | 该商品在用户年龄桶里的 R1 衰减热度分数（不受 Top-100 限制） |
-| `img_sim_hist` | 商品 CLIP 向量与用户最近 20 件购买的 CLIP 平均向量的 cosine 相似度 |
-| `txt_sim_hist` | 同上，换成 MiniLM 文本向量 |
+| `img_sim_hist` | 商品 CLIP 向量与用户最近 20 件购买的 CLIP 平均向量的 cosine 相似度。平均向量只用这 20 件中有图像向量的商品。**商品本身没有图像向量，或用户最近 20 件购买都没有图像向量时，取 NaN** |
+| `txt_sim_hist` | 同上，换成 MiniLM 文本向量。文本覆盖全部商品，所以只有在**用户没有历史购买（`t_dat < a` 内没有购买）时取 NaN** |
 
 ### 8.4 C 组：商品特征（16 个）
 
@@ -674,6 +698,7 @@ hm-recsys/
 │   ├── base.yaml                # 路径、全局 seed、线程数、内存上限、分块大小
 │   ├── fold_manifest.yaml       # D1–T4 共 16 个 fold 的 anchor 和日期
 │   ├── selection_rule.yaml      # §4 的选择规则（看分数之前提交）
+│   ├── preprocess.yaml          # M0：day_zero、年龄桶边界、embedding 维数、交易表 row group 大小
 │   ├── recall/                  # 每路的默认配置
 │   │   ├── r1_popularity.yaml
 │   │   ├── r2_repurchase.yaml
@@ -702,6 +727,8 @@ hm-recsys/
 │   ├── data/
 │   │   ├── preprocess.py        # 原始 CSV → Parquet；ID 映射成 int32；压缩 dtype
 │   │   ├── id_maps.py           # customer_id / article_id 与整数索引互转
+│   │   ├── day_index.py         # 日期 ↔ t_dat_day（距 day_zero 的天数）换算的唯一实现
+│   │   ├── metadata.py          # 读写 data/processed/metadata.json；scan_processed_parquet 先校验再读表
 │   │   ├── folds.py             # Fold dataclass；读取并校验 fold_manifest
 │   │   ├── asof.py              # 按 anchor 截取历史数据（防泄漏的唯一入口）
 │   │   ├── catalog.py           # 商品目录 C、活跃池 A(a)
@@ -772,7 +799,18 @@ hm-recsys/
 │
 ├── data/                        # 不进 git
 │   ├── raw/                     # 原始 CSV：articles / customers / transactions_train / sample_submission
-│   └── processed/               # M0 生成的 Parquet、ID 映射；以及下面两个预计算 embedding 目录（只读）
+│   └── processed/               # M0 生成的文件；以及两个预计算 embedding 目录（只读）
+│       ├── transactions.parquet           # 每行一条购买记录：customer_idx, article_idx (int32), t_dat_day (int16), price (float32), sales_channel_id (int8)；按 (t_dat_day, customer_idx) 排序，row group 100 万行
+│       ├── customers.parquet              # 每行一个用户：customer_idx, age (int8), age_bucket, fn, active (int8 0/1), club_member_status, fashion_news_frequency
+│       ├── articles.parquet               # 每行一个商品：article_idx, product_code 和 §8.4 的类目列
+│       ├── customer_id_map.parquet        # customer_idx (int32) ↔ customer_id (64 位字符串)
+│       ├── article_id_map.parquet         # article_idx (int32) ↔ article_id (10 位字符串)
+│       ├── embeddings/                    # 按 article_idx 重新排列的 embedding（M0 生成）
+│       │   ├── image_by_article_idx.npy   # float32 [105542, 512]，没有向量的行是 0
+│       │   ├── image_mask.npy             # bool [105542]，True = 有图像向量（442 个为 False）
+│       │   ├── text_by_article_idx.npy    # float32 [105542, 384]
+│       │   └── text_mask.npy              # bool [105542]，全部为 True
+│       ├── metadata.json                  # day_zero、年龄桶、preprocess 配置 hash、各表行数；下游读取时校验
 │       ├── image_features/      # CLIP ViT-B/32，覆盖 105,100 / 105,542 个商品（缺 442 个）
 │       │   ├── image_embeddings.npy           # float32 [105100, 512]，已 L2 归一化
 │       │   ├── image_article_ids.parquet      # embedding_row (int64, 0..N-1) → article_id (10 位字符串)
@@ -826,7 +864,7 @@ Label 只在 `eval/` 和 `ranker/sampling.py` 中读取，**recall 和特征代�
 
 读者是 junior MLE，所以**可读性优先于技巧**。完整规则写在 `AGENTS.md`，这里列出要点：
 
-1. **语言和工具**：Python 3.12，`uv` 管理环境和锁定依赖（`uv.lock`）；Polars 做表格处理，NumPy / SciPy 做矩阵，PyTorch（MPS）做 Two-Tower，LightGBM 做 Ranker；`ruff` 负责格式化和 lint，`pyright` 做类型检查，`pytest` 做测试。
+1. **语言和工具**：Python 3.12，`uv` 管理环境和锁定依赖（`uv.lock`）；Polars 做表格处理，NumPy / SciPy 做矩阵，PyTorch（MPS）做 Two-Tower，LightGBM 做 Ranker；`ruff` 负责格式化和 lint，`pyright`（`standard` 模式）做类型检查，`pytest` 做测试。与 §1.2 一致。
 2. **每个函数只做一件事**，一般不超过 50 行；每个文件对应一个清楚的组件。
 3. **全部加类型标注**；公开函数都要有 docstring，写清楚输入、输出、**表的粒度（一行代表什么）**和**时间窗口**。
 4. **注释写"为什么"**，而不只是"做了什么"。尤其要说明：时间窗口是开区间还是闭区间、为什么用这个 dtype、为什么要分块。
