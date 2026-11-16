@@ -9,7 +9,9 @@ from pathlib import Path
 import polars as pl
 import pytest
 
+from hmrec.data.day_index import day_index_to_date
 from hmrec.data.folds import Fold, FoldManifest
+from hmrec.recall.base import RecallInputs
 
 ASOF_FIXTURES = Path(__file__).resolve().parents[1] / "fixtures" / "asof"
 
@@ -54,3 +56,54 @@ def fixture_transactions() -> pl.DataFrame:
 def fixture_manifest() -> FoldManifest:
     """Two adjacent test folds: D1 (ordinal 0) and D2 (ordinal 1)."""
     return FoldManifest(folds=(D1, D2))
+
+
+# ---------------------------------------------------------------- recall helpers
+
+
+def make_queries(pairs: list[tuple[int, int]], fold: str = "D1") -> pl.DataFrame:
+    """Build a query list from (query_id, customer_idx) pairs."""
+    return pl.DataFrame(
+        {
+            "query_id": [pair[0] for pair in pairs],
+            "customer_idx": [pair[1] for pair in pairs],
+            "fold": [fold] * len(pairs),
+        },
+        schema={"query_id": pl.Int32, "customer_idx": pl.Int32, "fold": pl.String},
+    )
+
+
+def make_recall_inputs(
+    rows: list[tuple[int, int, int]],
+    anchor_day: int,
+    customers: dict[int, str] | None = None,
+    product_codes: dict[int, int] | None = None,
+    active_pool: list[int] | None = None,
+) -> RecallInputs:
+    """Build RecallInputs on FIXTURE_DAY_ZERO with the anchor at `anchor_day`.
+
+    Args:
+        rows: (customer_idx, article_idx, t_dat_day) purchase lines.
+        anchor_day: Anchor as a day index (so age_days = anchor_day - t_dat_day).
+        customers: customer_idx -> age_bucket.
+        product_codes: article_idx -> product_code (the catalog).
+        active_pool: article_idx list of A(a).
+    """
+    customers = customers or {}
+    product_codes = product_codes or {}
+    return RecallInputs(
+        anchor=day_index_to_date(anchor_day, FIXTURE_DAY_ZERO),
+        day_zero=FIXTURE_DAY_ZERO,
+        transactions=make_transactions(rows).lazy(),
+        customers=pl.DataFrame(
+            {"customer_idx": list(customers), "age_bucket": list(customers.values())},
+            schema={"customer_idx": pl.Int32, "age_bucket": pl.String},
+        ),
+        articles=pl.DataFrame(
+            {"article_idx": list(product_codes), "product_code": list(product_codes.values())},
+            schema={"article_idx": pl.Int32, "product_code": pl.Int32},
+        ),
+        active_pool=pl.DataFrame(
+            {"article_idx": active_pool or []}, schema={"article_idx": pl.Int32}
+        ),
+    )
