@@ -133,3 +133,56 @@ def test_quota_larger_than_pool_is_not_padded() -> None:
     candidates = _run(config)
     counts = candidates.group_by("query_id").len().sort("query_id")["len"].to_list()
     assert counts == [4, 4, 4]
+
+
+# ---------------------------------------------------------------- full bucket score table (M6)
+
+
+def _with_table(
+    rows: list[tuple[int, int, int]] = ROWS,
+) -> tuple[pl.DataFrame, pl.DataFrame]:
+    inputs = make_recall_inputs(rows, ANCHOR_DAY, customers=CUSTOMERS, active_pool=ACTIVE_POOL)
+    return PopularityChannel(A1).generate_with_bucket_scores(QUERIES, inputs)
+
+
+def test_bucket_score_table_is_not_cut_to_the_quota_or_the_active_pool() -> None:
+    candidates, table = _with_table()
+    # The candidates are exactly those of generate().
+    assert candidates.equals(_run(A1))
+    # S(g, i) of EVERY (bucket, article) in the window (see the module docstring):
+    # also (UNKNOWN, 14), although article 14 is not active and is never a candidate.
+    assert table.rows() == [
+        ("AGE_18_24", 10, pytest.approx(W1 + W3, rel=1e-6)),
+        ("AGE_18_24", 11, pytest.approx(W1, rel=1e-6)),
+        ("AGE_18_24", 12, pytest.approx(W6, rel=1e-6)),
+        ("AGE_25_34", 12, pytest.approx(2 * W1, rel=1e-6)),
+        ("AGE_25_34", 13, pytest.approx(W2, rel=1e-6)),
+        ("AGE_UNKNOWN", 14, pytest.approx(W1, rel=1e-6)),
+    ]
+    assert table.schema == pl.Schema(
+        {"age_bucket": pl.String, "article_idx": pl.Int32, "score": pl.Float32}
+    )
+    # Quota 1 keeps one candidate per query, but the table is unchanged.
+    quota_one = PopularityConfig(variant="A1", window_days=7, tau_days=3.0, quota=1)
+    inputs = make_recall_inputs(ROWS, ANCHOR_DAY, customers=CUSTOMERS, active_pool=ACTIVE_POOL)
+    cut, same_table = PopularityChannel(quota_one).generate_with_bucket_scores(QUERIES, inputs)
+    assert cut.height == 3 and same_table.equals(table)
+
+
+def test_non_fallback_scores_are_the_table_entries_bit_for_bit() -> None:
+    candidates, table = _with_table()
+    own = candidates.filter(pl.col("pop_is_fallback") == 0)
+    # q0 is bucket 18_24, q1 is bucket 25_34 (q2 has only fill-in rows).
+    bucket_of_query = {0: "AGE_18_24", 1: "AGE_25_34"}
+    entries = {(bucket, article): score for bucket, article, score in table.rows()}
+    assert own.height == 5
+    for query_id, article, score in own.select("query_id", "article_idx", "score").rows():
+        assert entries[(bucket_of_query[query_id], article)] == score  # exact, no tolerance
+
+
+def test_bucket_score_table_ignores_poison_and_g0_has_none() -> None:
+    poison = [(0, 13, 100)] * 5 + [(3, 13, 101)] * 5 + [(1, 11, 200)]
+    assert _with_table(ROWS + poison)[1].equals(_with_table()[1])
+    inputs = make_recall_inputs(ROWS, ANCHOR_DAY, customers=CUSTOMERS, active_pool=ACTIVE_POOL)
+    with pytest.raises(ValueError, match="A1 only"):
+        PopularityChannel(G0).generate_with_bucket_scores(QUERIES, inputs)

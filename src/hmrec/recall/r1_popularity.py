@@ -23,6 +23,12 @@ rows are sorted by (pop_is_fallback ASC, score DESC, article_idx ASC). Bucket
 rows carry S(g, i), fill-in rows carry the global S(i), so `score` mixes two
 scales; pop_is_fallback tells them apart. The B-group feature pop_bucket_score
 (proposal §8.3) gives every candidate the same S(g, i) scale.
+
+For that feature, generate_with_bucket_scores also returns the FULL S(g, i)
+table: every (age_bucket, article_idx) with a purchase in the window, not cut to
+the Top-quota and not limited to A(a) (a candidate of another channel may be
+outside both). The candidates and the table come from ONE computation of
+S(g, i), so a non-fallback candidate's score equals its table entry exactly.
 """
 
 import polars as pl
@@ -46,6 +52,8 @@ from hmrec.recall.base import (
 AGE_BUCKET = "age_bucket"
 FOLD = "fold"
 IS_FALLBACK = "pop_is_fallback"
+
+BUCKET_SCORES_SCHEMA = pl.Schema({AGE_BUCKET: pl.String, ARTICLE_IDX: pl.Int32, SCORE: pl.Float32})
 
 POP_SPEC = OutputSpec(
     channel="pop",
@@ -185,8 +193,8 @@ class PopularityChannel:
         """R1 output: extra column pop_is_fallback; fallback rows sorted last."""
         return POP_SPEC
 
-    def generate(self, queries: pl.DataFrame, inputs: RecallInputs) -> pl.DataFrame:
-        """Return R1 candidates for `queries` (see RecallChannel.generate)."""
+    def _history(self, inputs: RecallInputs) -> pl.DataFrame:
+        """Purchase lines of [anchor - window_days, anchor) with age_days."""
         history = history_window(
             inputs.transactions,
             inputs.anchor,
@@ -194,22 +202,67 @@ class PopularityChannel:
             self.config.window_days,
             columns=[CUSTOMER_IDX, ARTICLE_IDX],
         )
-        history = add_age_days(history, inputs.anchor_day)
+        return add_age_days(history, inputs.anchor_day)
+
+    def generate(self, queries: pl.DataFrame, inputs: RecallInputs) -> pl.DataFrame:
+        """Return R1 candidates for `queries` (see RecallChannel.generate)."""
+        history = self._history(inputs)
         if self.config.variant == "G0":
-            candidates = self._generate_g0(queries, history, inputs)
-        else:
-            candidates = self._generate_a1(queries, history, inputs)
-            log_fallback_diagnostics(fallback_diagnostics(candidates, queries, inputs.customers))
-        return candidates
+            return self._generate_g0(queries, history, inputs)
+        all_bucket_scores = bucket_decayed_scores(history, inputs.customers, self.config.tau_days)
+        return self._generate_a1(queries, history, inputs, all_bucket_scores)
+
+    def generate_with_bucket_scores(
+        self, queries: pl.DataFrame, inputs: RecallInputs
+    ) -> tuple[pl.DataFrame, pl.DataFrame]:
+        """R1 candidates plus the full S(g, i) table they were cut from (variant A1 only).
+
+        Uses only purchases in [anchor - window_days, anchor), like generate.
+
+        Returns:
+            (candidates, bucket_scores). candidates: exactly what generate
+            returns. bucket_scores: one row per (age_bucket, article_idx) bought
+            by that bucket in the window, NOT limited to A(a) and NOT cut to the
+            quota; columns age_bucket (str), article_idx (int32), score
+            (float32, the precision candidates are stored with), sorted by
+            (age_bucket, article_idx).
+
+        Raises:
+            ValueError: For variant G0, which has no age buckets.
+        """
+        if self.config.variant != "A1":
+            raise ValueError(f"variant {self.config.variant!r} has no bucket scores (A1 only)")
+        history = self._history(inputs)
+        # Computed ONCE and used for both outputs. Two separate group-bys could sum
+        # the float64 weights in another order and differ in the last bit.
+        all_bucket_scores = bucket_decayed_scores(history, inputs.customers, self.config.tau_days)
+        candidates = self._generate_a1(queries, history, inputs, all_bucket_scores)
+        table = all_bucket_scores.select(
+            pl.col(AGE_BUCKET).cast(pl.String),
+            pl.col(ARTICLE_IDX).cast(pl.Int32),
+            # The same float64 -> float32 cast as the candidates' score (_top_per_group).
+            pl.col(SCORE).cast(pl.Float32),
+        ).sort(AGE_BUCKET, ARTICLE_IDX)
+        return candidates, table
 
     def _generate_a1(
-        self, queries: pl.DataFrame, history: pl.DataFrame, inputs: RecallInputs
+        self,
+        queries: pl.DataFrame,
+        history: pl.DataFrame,
+        inputs: RecallInputs,
+        all_bucket_scores: pl.DataFrame,
     ) -> pl.DataFrame:
-        """A1: bucket lists with global fill-in, joined to each query by age bucket."""
+        """A1: bucket lists with global fill-in, joined to each query by age bucket.
+
+        Args:
+            queries: One row per query; columns query_id, customer_idx.
+            history: Purchase lines of the window with age_days.
+            inputs: The fold.
+            all_bucket_scores: S(g, i) of every (bucket, article) in the window
+                (bucket_decayed_scores), before the active-pool filter.
+        """
         tau = self.config.tau_days
-        bucket_scores = _keep_active(
-            bucket_decayed_scores(history, inputs.customers, tau), inputs.active_pool
-        )
+        bucket_scores = _keep_active(all_bucket_scores, inputs.active_pool)
         global_scores = _keep_active(global_decayed_scores(history, tau), inputs.active_pool)
         query_buckets = queries.select(QUERY_ID, CUSTOMER_IDX).join(
             inputs.customers.select(CUSTOMER_IDX, AGE_BUCKET), on=CUSTOMER_IDX, how="left"
@@ -221,7 +274,9 @@ class PopularityChannel:
         scored = query_buckets.join(lists, on=AGE_BUCKET).select(
             QUERY_ID, ARTICLE_IDX, SCORE, IS_FALLBACK
         )
-        return rank_candidates(scored, POP_SPEC, self.config.quota)
+        candidates = rank_candidates(scored, POP_SPEC, self.config.quota)
+        log_fallback_diagnostics(fallback_diagnostics(candidates, queries, inputs.customers))
+        return candidates
 
     def _generate_g0(
         self, queries: pl.DataFrame, history: pl.DataFrame, inputs: RecallInputs

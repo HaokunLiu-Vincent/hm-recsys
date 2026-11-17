@@ -208,6 +208,8 @@ class TwoTowerChainChannel:
         self.checkpoint_metadata = checkpoint_metadata
         self.last_anchor: date | None = None
         self.fine_tune_results: dict[str, FineTuneResult] = {}
+        # Fold -> (new-week rows, replay rows) of its fine-tune set (alarm users excluded).
+        self.fine_tune_row_counts: dict[str, tuple[int, int]] = {}
 
     @property
     def output_spec(self) -> OutputSpec:
@@ -258,6 +260,7 @@ class TwoTowerChainChannel:
         }
         save_checkpoint(self.resources.model, self.checkpoint_file(fold), metadata)
         self.fine_tune_results[fold] = result
+        self.fine_tune_row_counts[fold] = (arrays.n_new, arrays.n_replay)
         LOGGER.info(
             "%s fine-tune: %d new + %d replay rows, %d epoch(s), %.1f s, loss %.4f, "
             "alarm loss %.4f, peak rss %.2f GB",

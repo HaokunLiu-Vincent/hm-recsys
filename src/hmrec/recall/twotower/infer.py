@@ -205,6 +205,62 @@ def query_vectors(
     return UserItemVectors(customers, user_vectors, pool, item_vectors)
 
 
+def add_other_catalog_articles(
+    vectors: UserItemVectors, resources: TwoTowerResources, chunk_size: int
+) -> UserItemVectors:
+    """Add the item vectors of every catalog article that `vectors` does not have yet.
+
+    query_vectors encodes only the active pool A(a), which is all that R6 needs
+    for its own candidates. The tt_dot feature (proposal §8.3) is computed for
+    EVERY candidate, and a candidate of another channel (R2) can be outside
+    A(a), so the saved vectors must cover the whole catalog.
+
+    The rows that are already there are kept as they are (not encoded again),
+    so scoring with the result gives exactly the same R6 candidates and scores.
+
+    Returns:
+        Vectors with the same users and one item row per catalog article
+        (article_idx 0 .. n_articles - 1, strictly increasing).
+    """
+    all_articles = np.arange(resources.n_articles, dtype=np.int32)
+    missing = np.setdiff1d(all_articles, vectors.item_article_idx).astype(np.int32)
+    if missing.size == 0:
+        return vectors
+    missing_vectors = encode_articles(resources, missing, chunk_size)
+    article_idx = np.concatenate([vectors.item_article_idx, missing])
+    item_vectors = np.concatenate([vectors.item_vectors, missing_vectors])
+    order = np.argsort(article_idx, kind="stable")
+    return UserItemVectors(
+        user_customer_idx=vectors.user_customer_idx,
+        user_vectors=vectors.user_vectors,
+        item_article_idx=article_idx[order],
+        item_vectors=np.ascontiguousarray(item_vectors[order]),
+    )
+
+
+def candidates_from_query_vectors(
+    config: TwoTowerConfig,
+    queries: pl.DataFrame,
+    inputs: RecallInputs,
+    vectors: UserItemVectors,
+    chunks: TwoTowerChunks,
+) -> pl.DataFrame:
+    """Top-quota of A(a) per query from already computed vectors.
+
+    `vectors` may hold more articles than A(a) (add_other_catalog_articles);
+    only the articles in inputs.active_pool can become candidates.
+    """
+    return candidates_from_vectors(
+        queries,
+        vectors,
+        inputs.active_pool,
+        config.quota,
+        chunks.score_queries,
+        chunks.pairs,
+        TWOTOWER_SPEC,
+    )
+
+
 def twotower_candidates(
     config: TwoTowerConfig,
     resources: TwoTowerResources,
@@ -224,15 +280,7 @@ def twotower_candidates(
     if queries.height == 0 or inputs.active_pool.height == 0:
         return TWOTOWER_SPEC.schema.to_frame()
     vectors = query_vectors(config, resources, queries, inputs, chunks.encode_queries)
-    candidates = candidates_from_vectors(
-        queries,
-        vectors,
-        inputs.active_pool,
-        config.quota,
-        chunks.score_queries,
-        chunks.pairs,
-        TWOTOWER_SPEC,
-    )
+    candidates = candidates_from_query_vectors(config, queries, inputs, vectors, chunks)
     log_memory(LOGGER, f"{inputs.anchor}: {candidates.height} candidates")
     return candidates
 

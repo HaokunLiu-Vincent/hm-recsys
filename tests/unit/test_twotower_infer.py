@@ -38,7 +38,11 @@ from hmrec.recall.twotower.infer import (
     TwoTowerChannel,
     TwoTowerChunks,
     TwoTowerResources,
+    add_other_catalog_articles,
+    candidates_from_query_vectors,
+    encode_articles,
     query_histories,
+    query_vectors,
 )
 from hmrec.recall.twotower.model import build_two_tower_model
 from hmrec.vectors import dot_pairs
@@ -146,3 +150,35 @@ def test_score_chunk_size_does_not_change_the_candidates(score_queries: int) -> 
     reference = _channel().generate(QUERIES, inputs)
     chunks = TwoTowerChunks(encode_queries=2, score_queries=score_queries, pairs=3)
     assert TwoTowerChannel(CONFIG, _resources(), chunks).generate(QUERIES, inputs).equals(reference)
+
+
+# ---------------------------------------------------------------- vectors of the whole catalog (M6)
+
+
+def test_catalog_vectors_keep_the_pool_rows_and_add_every_other_article() -> None:
+    resources = _resources()
+    inputs = make_recall_inputs(LINES, 10, active_pool=ACTIVE)
+    pool_vectors = query_vectors(CONFIG, resources, QUERIES, inputs, chunk_size=2)
+    assert pool_vectors.item_article_idx.tolist() == ACTIVE  # only A(a)
+    vectors = add_other_catalog_articles(pool_vectors, resources, chunk_size=2)
+    assert vectors.item_article_idx.tolist() == list(range(TINY_N_ARTICLES))
+    assert np.array_equal(vectors.user_vectors, pool_vectors.user_vectors)
+    # The rows of A(a) are the SAME arrays as before (not encoded again) ...
+    assert np.array_equal(vectors.item_vectors[ACTIVE], pool_vectors.item_vectors)
+    # ... and the added rows are what the item tower gives for those articles.
+    outside = np.array([2, 5], dtype=np.int32)
+    assert np.array_equal(vectors.item_vectors[outside], encode_articles(resources, outside, 2))
+    # Nothing to add when every article is already there.
+    assert add_other_catalog_articles(vectors, resources, chunk_size=2) is vectors
+
+
+def test_candidates_from_catalog_vectors_equal_the_pool_only_candidates() -> None:
+    resources = _resources()
+    inputs = make_recall_inputs(LINES, 10, active_pool=ACTIVE)
+    expected = TwoTowerChannel(CONFIG, resources, CHUNKS).generate(QUERIES, inputs)
+    pool_vectors = query_vectors(CONFIG, resources, QUERIES, inputs, CHUNKS.encode_queries)
+    catalog_vectors = add_other_catalog_articles(pool_vectors, resources, CHUNKS.encode_queries)
+    candidates = candidates_from_query_vectors(CONFIG, QUERIES, inputs, catalog_vectors, CHUNKS)
+    # Articles outside A(a) have vectors now, but still cannot become R6 candidates.
+    assert candidates.equals(expected)
+    assert set(candidates["article_idx"].to_list()) <= set(ACTIVE)
