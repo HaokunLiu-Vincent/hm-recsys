@@ -24,6 +24,7 @@ import polars as pl
 import torch
 
 from hmrec.config import PreprocessConfig, TwoTowerConfig
+from hmrec.data.histories import recent_purchase_histories
 from hmrec.data.metadata import scan_processed_parquet
 from hmrec.logging_utils import get_logger
 from hmrec.memory import log_memory
@@ -32,10 +33,7 @@ from hmrec.recall.base import ARTICLE_IDX, CUSTOMER_IDX, OutputSpec, RecallInput
 from hmrec.recall.twotower.data import (
     DeviceItemFeatures,
     build_customer_profiles,
-    build_histories,
-    daily_purchases,
     items_to_device,
-    load_customer_lines_before,
     load_item_feature_arrays,
     profiles_to_device,
 )
@@ -122,12 +120,15 @@ def query_histories(
         history_length: L.
         n_articles: Padding index.
     """
-    lines = load_customer_lines_before(
-        inputs.transactions, customer_idx, inputs.anchor, inputs.day_zero
-    )
-    anchor_days = np.full(customer_idx.shape, inputs.anchor_day, dtype=np.int32)
-    return build_histories(
-        daily_purchases(lines), customer_idx, anchor_days, history_length, n_articles
+    # The shared definition of "the last purchases before the anchor"; the feature
+    # code (img_sim_hist / txt_sim_hist) calls the same function.
+    return recent_purchase_histories(
+        inputs.transactions,
+        customer_idx,
+        inputs.anchor,
+        inputs.day_zero,
+        history_length,
+        n_articles,
     )
 
 

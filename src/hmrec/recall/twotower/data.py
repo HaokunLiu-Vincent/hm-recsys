@@ -9,7 +9,7 @@ Groups (for the multi-positive loss, §5 R6)
     All samples of one customer on one day share a group_id (0, 1, 2, ...).
     Because of the sort order, a group is a block of consecutive rows.
 
-User history
+User history (built by hmrec.data.histories, shared with the feature code)
     For a sample on day d: the last `history_length` purchases of that customer
     with t_dat_day < d (the purchase day itself is NOT included, so the answer
     never leaks into the input). There is no lower time limit.
@@ -51,17 +51,17 @@ import torch
 
 from hmrec.config import PreprocessConfig, TrainingWindow
 from hmrec.data.asof import TRANSACTION_DAY, history_window
-from hmrec.data.day_index import date_to_day_index
+from hmrec.data.histories import (
+    build_histories,
+    check_below_padding,
+    daily_purchases,
+    load_all_lines_before,
+)
 from hmrec.data.id_maps import ARTICLE_IDX, CUSTOMER_IDX
 from hmrec.data.metadata import check_processed_metadata
 from hmrec.paths import ProjectPaths
 
 GROUP_ID = "group_id"
-# Key for sorting/searching (customer, day) pairs as one int64:
-# key = customer_idx * DAY_KEY_SPAN + day. t_dat_day is int16 (0..32767), so
-# 2**16 is larger than any day and keys of different customers never overlap.
-DAY_KEY_SPAN = 2**16
-
 PROFILE_COLUMNS = ("age_bucket", "club_member_status", "fashion_news_frequency")
 # product_code, then the six categorical columns of proposal §8.4.
 ARTICLE_CODE_COLUMNS = (
@@ -93,55 +93,7 @@ def load_window_lines(
     )
 
 
-def load_all_lines_before(
-    transactions: pl.LazyFrame, end_anchor: date, day_zero: date
-) -> pl.DataFrame:
-    """Every purchase line before end_anchor: t_dat_day in [0, end_anchor) (the history source).
-
-    The window starts at day 0 (day_zero, the first day of the data), so a
-    history may reach back as far as the data goes (proposal §5 R6: no time limit).
-    """
-    days_since_day_zero = date_to_day_index(end_anchor, day_zero)
-    if days_since_day_zero <= 0:
-        raise ValueError(f"end_anchor {end_anchor} must be after day_zero {day_zero}")
-    return history_window(
-        transactions,
-        end_anchor,
-        day_zero,
-        days_since_day_zero,
-        columns=[CUSTOMER_IDX, ARTICLE_IDX],
-    )
-
-
-def load_customer_lines_before(
-    transactions: pl.LazyFrame, customer_idx: np.ndarray, end_anchor: date, day_zero: date
-) -> pl.DataFrame:
-    """Every purchase line before end_anchor of the given customers only (inference histories).
-
-    Filtering by customer first (not by date, so asof still does every date
-    filter) keeps the table small: one fold's ~82k query customers instead of
-    all 1.37M customers.
-    """
-    customers = pl.Series(CUSTOMER_IDX, customer_idx, dtype=pl.Int32).implode()
-    of_customers = transactions.filter(pl.col(CUSTOMER_IDX).is_in(customers))
-    return load_all_lines_before(of_customers, end_anchor, day_zero)
-
-
 # ---------------------------------------------------------------- samples and groups
-
-
-def daily_purchases(lines: pl.DataFrame) -> pl.DataFrame:
-    """Collapse purchase lines to one row per (customer_idx, t_dat_day, article_idx).
-
-    Several lines of the same article by the same customer on the same day
-    (e.g. two pieces of one item) become one row: for the Two-Tower model they
-    are one positive, not two (proposal §6.1).
-
-    Returns:
-        Columns customer_idx (int32), t_dat_day (int16), article_idx (int32);
-        unsorted.
-    """
-    return lines.select(CUSTOMER_IDX, TRANSACTION_DAY, ARTICLE_IDX).unique()
 
 
 def build_samples(window_lines: pl.DataFrame) -> pl.DataFrame:
@@ -164,104 +116,6 @@ def build_samples(window_lines: pl.DataFrame) -> pl.DataFrame:
     starts_group = ((day != day.shift(1)) | (customer != customer.shift(1))).fill_null(True)
     group_id = (starts_group.cast(pl.Int32).cum_sum() - 1).cast(pl.Int32).alias(GROUP_ID)
     return samples.with_columns(group_id)
-
-
-# ---------------------------------------------------------------- histories
-
-
-def _event_keys(customer_idx: np.ndarray, day: np.ndarray) -> np.ndarray:
-    """int64 key that sorts by customer, then day (see DAY_KEY_SPAN)."""
-    if day.size and (day.min() < 0 or day.max() >= DAY_KEY_SPAN):
-        raise ValueError(f"t_dat_day must be in [0, {DAY_KEY_SPAN}); got {day.min()}..{day.max()}")
-    return customer_idx.astype(np.int64) * DAY_KEY_SPAN + day.astype(np.int64)
-
-
-def _sorted_events(events: pl.DataFrame) -> tuple[np.ndarray, np.ndarray, np.ndarray]:
-    """Events as numpy arrays (keys int64, article_idx int32, day int32).
-
-    Sorted by customer, day ascending, and article_idx DESCENDING within a day.
-    Reading this order BACKWARDS from a position gives: most recent day first,
-    and ascending article_idx within a day, which is the history order we want.
-    """
-    ordered = events.sort(
-        [CUSTOMER_IDX, TRANSACTION_DAY, ARTICLE_IDX], descending=[False, False, True]
-    )
-    customer = ordered[CUSTOMER_IDX].to_numpy()
-    day = ordered[TRANSACTION_DAY].to_numpy().astype(np.int32)
-    article = ordered[ARTICLE_IDX].to_numpy().astype(np.int32)
-    return _event_keys(customer, day), article, day
-
-
-def _check_history_before_query(
-    history_day: np.ndarray, history_mask: np.ndarray, query_day: np.ndarray
-) -> None:
-    """Fail if a filled history slot is not strictly before its query day (a leak)."""
-    leaked = history_mask & (history_day >= query_day[:, None])
-    if leaked.any():
-        row = int(np.argwhere(leaked)[0, 0])
-        raise ValueError(
-            f"history of query row {row} (day {query_day[row]}) contains a purchase on day "
-            f"{history_day[row][leaked[row]].max()}, which is not before the query day"
-        )
-
-
-def _check_below_padding(name: str, article_idx: np.ndarray, padding_idx: int) -> None:
-    """Fail unless every article_idx is in [0, padding_idx): only padding may equal padding_idx."""
-    if article_idx.size and (article_idx.min() < 0 or article_idx.max() >= padding_idx):
-        raise ValueError(
-            f"{name}: article_idx must be in [0, {padding_idx}) (padding_idx = n_articles), "
-            f"got {article_idx.min()}..{article_idx.max()}"
-        )
-
-
-def build_histories(
-    events: pl.DataFrame,
-    query_customer: np.ndarray,
-    query_day: np.ndarray,
-    history_length: int,
-    padding_idx: int,
-) -> tuple[np.ndarray, np.ndarray]:
-    """For each query (customer, day): the last `history_length` purchases before that day.
-
-    Args:
-        events: Daily purchases (daily_purchases) to take histories from; must
-            contain every purchase before the latest query day.
-        query_customer: int32 [Q], customer_idx of each query.
-        query_day: int16/int32 [Q], t_dat_day of each query.
-        history_length: L, e.g. 20.
-        padding_idx: Value of empty slots: n_articles, which is not a real article.
-
-    Returns:
-        (history int32 [Q, L], history_mask bool [Q, L]). Slot 0 is the most
-        recent purchase; empty slots hold padding_idx with mask False.
-
-    Raises:
-        ValueError: If an event's article_idx is not below padding_idx (it
-            would be confused with padding), or a history leaks (see
-            _check_history_before_query).
-    """
-    keys, articles, days = _sorted_events(events)
-    _check_below_padding("events", articles, padding_idx)
-    query_day = query_day.astype(np.int32)
-    # Events of this customer before the query day are exactly keys[start:end]:
-    #   start = first event of this customer (key >= customer * SPAN + 0),
-    #   end   = first event of this customer ON or AFTER the query day.
-    start = np.searchsorted(keys, _event_keys(query_customer, np.zeros_like(query_day)), "left")
-    end = np.searchsorted(keys, _event_keys(query_customer, query_day), "left")
-    n_queries = query_customer.shape[0]
-    history = np.full((n_queries, history_length), padding_idx, dtype=np.int32)
-    history_day = np.full((n_queries, history_length), -1, dtype=np.int32)
-    history_mask = np.zeros((n_queries, history_length), dtype=np.bool_)
-    for slot in range(history_length):
-        # Slot k holds the (k+1)-th most recent event: position end - 1 - k.
-        position = end - 1 - slot
-        filled = position >= start
-        safe_position = np.where(filled, position, 0)  # any valid index; masked anyway
-        history[:, slot] = np.where(filled, articles[safe_position], padding_idx)
-        history_day[:, slot] = np.where(filled, days[safe_position], -1)
-        history_mask[:, slot] = filled
-    _check_history_before_query(history_day, history_mask, query_day)
-    return history, history_mask
 
 
 # ---------------------------------------------------------------- training arrays
@@ -310,7 +164,7 @@ def arrays_from_samples(
         The arrays; the history is computed once per group (customer, day) and
         copied to each sample of the group, since it depends only on the group.
     """
-    _check_below_padding("samples", samples[ARTICLE_IDX].to_numpy(), n_articles)
+    check_below_padding("samples", samples[ARTICLE_IDX].to_numpy(), n_articles)
     groups = samples.unique(subset=GROUP_ID, keep="first", maintain_order=True)
     group_history, group_mask = build_histories(
         events,

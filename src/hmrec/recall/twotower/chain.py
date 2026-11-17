@@ -40,16 +40,11 @@ import polars as pl
 from hmrec.config import MemoryConfig, TwoTowerConfig
 from hmrec.data.asof import TRANSACTION_DAY
 from hmrec.data.day_index import date_to_day_index
+from hmrec.data.histories import daily_purchases, load_customer_lines_before
 from hmrec.data.id_maps import ARTICLE_IDX, CUSTOMER_IDX
 from hmrec.logging_utils import get_logger
 from hmrec.recall.base import OutputSpec, RecallInputs
-from hmrec.recall.twotower.data import (
-    arrays_from_samples,
-    build_samples,
-    daily_purchases,
-    load_customer_lines_before,
-    load_window_lines,
-)
+from hmrec.recall.twotower.data import arrays_from_samples, build_samples, load_window_lines
 from hmrec.recall.twotower.infer import (
     TWOTOWER_SPEC,
     TwoTowerChunks,
