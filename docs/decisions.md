@@ -213,3 +213,16 @@
   完整的逐步记录在 `results/d_phase.csv` 和 `results/d_phase_steps/{channel}.csv`；40 个 trial 全部 `git_dirty=False`。
 - **尚未锁定**：以上配置**还没有写入 `configs/locks/`**。按计划在 M4 之后、M5 统一锁定，因为 R3 是否只输出活跃池 `A(a)` 内的商品要在 M4 按 §5.7 第 4 项的预先登记标准决定（需要 R6 加入之后的 union）。M4 之前不再调 R1–R5。
 - **原因**：记录 D 阶段每一路的结论，供 M4 union 检查和 M5 锁定引用；锁定推迟是为了让 R3 的活跃池决定在锁定之前完成，避免锁定后再改。
+
+## 2026-11-17 D 阶段 R1–R5 union 预检查：结果记录，暂不修改 recall
+
+- **结果**（`scripts/m2_union_precheck.py`，HEAD 5b5d14e，工作区干净；只做诊断，没有运行新的 trial，也没有做任何选择；表格见 `results/d_phase_union_precheck.csv`，候选文件在 `artifacts/hpo/D/union_precheck/`，与 M4 的正式结果分开）：
+  - R1–R5 五路合并去重后的 union recall：D1 22.06%、D2 22.06%、D3 18.54%、D4 19.80%，**4 周合并 20.31%**。G2 的目标 24% 针对六路（含 R6），这里只有五路。
+  - **58.2%** 的 query（4 周合并）没有任何一路命中任何 label。
+  - Leave-one-out（去掉一路后 union recall 下降，4 周合并，百分点）：R1 **5.43**、R5 **2.23**、R4 **1.73**、R2 **0.58**、R3 **0.57**。
+  - 每个 query 去重后的候选数（4 周合并）：平均 257.9，P50 276，P90 311（上限 100 + 30 + 50 + 100 + 100 = 380）。
+  - 用重新生成的候选计算的各路选择指标与 `results/d_phase.csv` 中选中 trial 的合并分数逐位相同。
+- **决定**：
+  1. **现在不修改 R1–R5 的任何配置**（包括名额）。等 R6 加入后，在 M4 按 proposal §5.7 用六路统一判断；如果六路 union recall 仍明显低于 24%，按 §5.7 先改 recall，再进入 F 阶段。
+  2. **union 预检查的内存峰值 6.71 GB**，超过单任务约 6 GB 的目标，但在 8 GB 以内；本次不修复。候选生成本身的峰值为 3.5–4.6 GB，超出部分来自每周 6 次 union 去重（每周最多约 3,800 万行候选）。**M4 六路时候选更多，届时 union 计算必须改为**：先过滤出命中 label 的候选，再在这个小表上算 union recall 和 leave-one-out；每个 query 的候选数按 query 分块统计。
+- **原因**：D 阶段 R1–R5 到此结束。union recall 是系统层面的判断，R6 的贡献还不知道，现在改单路配置没有依据；内存问题只在 union 计算上，M4 必须重写这部分，届时一并处理。
