@@ -321,6 +321,15 @@ class ProjectPaths:
         """results/m4_union_check.csv: the six-channel union check (proposal §5.7)."""
         return self.results_root / "m4_union_check.csv"
 
+    def m4_union_check_variant_file(self, variant: str) -> Path:
+        """results/m4_union_check_{variant}.csv: the union check of one variant."""
+        return self.results_root / f"m4_union_check_{variant}.csv"
+
+    @property
+    def m4_trials_file(self) -> Path:
+        """results/m4_trials.csv: trials of M4 variants (rule outcomes; never select)."""
+        return self.results_root / "m4_trials.csv"
+
     def d_phase_seeds_file(self, channel: str) -> Path:
         """results/d_phase_steps/{channel}_seeds.csv: extra-seed runs (reported only)."""
         return self.results_root / "d_phase_steps" / f"{channel}_seeds.csv"

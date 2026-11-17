@@ -15,6 +15,11 @@ configs/m4_union_check.yaml):
      no hit (items 1-3 of §5.7), and the active-pool diagnostics of R2 / R3 with
      the pre-registered R3 rule (item 4).
 
+Folds are checked one at a time: a fold's context and candidates are loaded when
+the fold starts and released before the next one (check_one_fold). Each stage can
+be wrapped in a MemoryTracker (memory_stage_tracker), so the log shows the peak
+RSS of every stage.
+
 Memory (docs/decisions.md 2026-11-17, after the pre-check peaked at 6.71 GB):
 unions are built from the HITS only. A candidate that is not a label can never
 change union recall, and only about 1 in 400 candidates is a hit, so each
@@ -25,6 +30,7 @@ The results equal the pre-check's direct computation exactly (tests).
 """
 
 from collections.abc import Callable, Mapping, Sequence
+from contextlib import AbstractContextManager, nullcontext
 from dataclasses import dataclass
 from functools import partial
 from pathlib import Path
@@ -33,13 +39,27 @@ import polars as pl
 
 from hmrec.config import (
     BaseConfig,
+    MemoryConfig,
     PreprocessConfig,
+    SelectionRule,
     TwoTowerConfig,
     UnionCheckConfig,
+    load_yaml,
     parse_twotower_config,
 )
 from hmrec.eval.metrics import FOLD, QUERY_ID, VALUE, macro_mean
-from hmrec.hpo.runner import IN_ACTIVE_POOL, POOL_FLAG_CHANNELS, FoldContext, twotower_chunks
+from hmrec.hpo.grid import PhaseGrid, RawConfig, apply_overrides
+from hmrec.hpo.records import TrialRecord, append_record, read_records, result_columns
+from hmrec.hpo.runner import (
+    IN_ACTIVE_POOL,
+    POOL_FLAG_CHANNELS,
+    EvaluateFn,
+    FoldContext,
+    TrialSettings,
+    evaluate_trial,
+    make_evaluate_fn,
+    twotower_chunks,
+)
 from hmrec.hpo.union_precheck import (
     ALL_CHANNELS,
     MEASURE,
@@ -54,6 +74,7 @@ from hmrec.hpo.union_precheck import (
     summarize_precheck,
 )
 from hmrec.logging_utils import get_logger
+from hmrec.memory import MemoryTracker
 from hmrec.paths import ProjectPaths
 from hmrec.recall.base import ARTICLE_IDX, validate_candidates, write_candidates
 from hmrec.recall.twotower.infer import (
@@ -70,6 +91,36 @@ LOGGER = get_logger("hpo.union_check")
 R6_CHANNEL = "r6_twotower"
 R3_CHANNEL = "r3_sibling"
 PAIR = [QUERY_ID, ARTICLE_IDX]
+
+
+# ---------------------------------------------------------------- memory per stage
+
+StageTracker = Callable[[str], AbstractContextManager[object]]
+
+
+def no_stage_tracking(label: str) -> AbstractContextManager[object]:
+    """A StageTracker that measures nothing (the default, used by tests)."""
+    del label
+    return nullcontext()
+
+
+def memory_stage_tracker(memory: MemoryConfig) -> StageTracker:
+    """A StageTracker that logs the start, end and PEAK RSS of every stage.
+
+    Each stage runs inside its own MemoryTracker, so with a short sampling
+    interval (memory.sample_interval_seconds, e.g. 0.05 s) the log shows in
+    which stage a memory spike happens.
+    """
+
+    def track(label: str) -> AbstractContextManager[object]:
+        return MemoryTracker(
+            f"stage {label}",
+            LOGGER,
+            limit_gb=memory.limit_gb,
+            sample_interval_seconds=memory.sample_interval_seconds,
+        )
+
+    return track
 
 
 # ---------------------------------------------------------------- unions from hits
@@ -227,6 +278,7 @@ def fold_result(
     context: FoldContext,
     metrics: Mapping[str, str],
     query_chunk_size: int,
+    track: StageTracker = no_stage_tracking,
 ) -> FoldResult:
     """Union tables and pool diagnostics of one fold.
 
@@ -236,25 +288,25 @@ def fold_result(
         context: The fold.
         metrics: Channel -> its selection metric.
         query_chunk_size: Queries per chunk when counting candidates.
+        track: Wraps each stage (to log its memory peak); default: no tracking.
     """
-    hits = channel_hits(candidates_by_channel, context)
-    channel_metric = {
-        channel: context.evaluator.per_query(candidates, metrics[channel])
-        for channel, candidates in candidates_by_channel.items()
-    }
-    tables = FoldTables(
-        union_recall=union_recall_tables_from_hits(hits, context),
-        candidate_counts=count_candidates_chunked(
-            candidates_by_channel, context.queries, query_chunk_size
-        ),
-        channel_metric=channel_metric,
-    )
-    pools = {
-        channel: pool_diagnostics(channel, candidates_by_channel, hits, context)
-        for channel in POOL_FLAG_CHANNELS
-        if channel in candidates_by_channel
-    }
-    return FoldResult(tables, pools)
+    fold = context.fold.name
+    with track(f"{fold} | hits of every channel"):
+        hits = channel_hits(candidates_by_channel, context)
+    channel_metric: dict[str, pl.DataFrame] = {}
+    for channel, candidates in candidates_by_channel.items():
+        with track(f"{fold} | {channel} {metrics[channel]}"):
+            channel_metric[channel] = context.evaluator.per_query(candidates, metrics[channel])
+    with track(f"{fold} | union recall and leave-one-out"):
+        union_tables = union_recall_tables_from_hits(hits, context)
+    with track(f"{fold} | candidates per query"):
+        counts = count_candidates_chunked(candidates_by_channel, context.queries, query_chunk_size)
+    pools: dict[str, PoolDiagnostics] = {}
+    for channel in POOL_FLAG_CHANNELS:
+        if channel in candidates_by_channel:
+            with track(f"{fold} | {channel} active-pool diagnostics"):
+                pools[channel] = pool_diagnostics(channel, candidates_by_channel, hits, context)
+    return FoldResult(FoldTables(union_tables, counts, channel_metric), pools)
 
 
 def check_reproduces_record(choice: SelectedChannel, fold: str, per_query: pl.DataFrame) -> None:
@@ -273,6 +325,102 @@ def check_reproduces_record(choice: SelectedChannel, fold: str, per_query: pl.Da
         choice.record.metric,
         score,
     )
+
+
+# ---------------------------------------------------------------- variants (rule outcomes)
+
+
+def variant_step(variant: str) -> str:
+    """Step name of a variant's trials in results/m4_trials.csv, e.g. "m4_r3_active_pool"."""
+    return f"m4_{variant}"
+
+
+def apply_variant(
+    selected: Sequence[SelectedChannel],
+    overrides: Mapping[str, Mapping[str, object]],
+    evaluator_of: Callable[[str], EvaluateFn],
+    step: str,
+) -> list[SelectedChannel]:
+    """Replace the configs of the channels named in a variant.
+
+    The new config's trial comes from `evaluator_of(channel)`: read from
+    results/m4_trials.csv if it is there, else evaluated on the D folds and
+    saved. Such a trial is the OUTCOME of a rule; it is never compared with
+    other configurations.
+
+    Args:
+        selected: The channels' selections.
+        overrides: Channel -> config keys to change (configs/m4_union_check.yaml, variants).
+        evaluator_of: Channel -> its (step, raw config) -> TrialRecord function.
+        step: Step name stored with new trials.
+    """
+    unknown = sorted(set(overrides) - {choice.channel for choice in selected})
+    if unknown:
+        raise ValueError(f"variant changes channels that are not selected: {unknown}")
+    result: list[SelectedChannel] = []
+    for choice in selected:
+        if choice.channel not in overrides:
+            result.append(choice)
+            continue
+        raw_config = apply_overrides(choice.raw_config, overrides[choice.channel])
+        record = evaluator_of(choice.channel)(step, raw_config)
+        LOGGER.info(
+            "%s: variant trial %s (%s) replaces trial %s",
+            choice.channel,
+            record.trial_id,
+            dict(overrides[choice.channel]),
+            choice.record.trial_id,
+        )
+        result.append(SelectedChannel(choice.channel, raw_config, record))
+    return result
+
+
+@dataclass(frozen=True)
+class VariantEvaluation:
+    """What is needed to evaluate a variant trial on the D folds and record it.
+
+    Attributes:
+        paths: Project paths (results/m4_trials.csv, recall configs, flag files).
+        grid: configs/hpo/d_phase.yaml (fold groups and extra metrics of the report).
+        rule: configs/selection_rule.yaml (each channel's metric; nothing is selected).
+        base: configs/base.yaml.
+        contexts: The D folds.
+        git_commit: HEAD when the run started.
+        git_dirty: Uncommitted changes when the run started.
+    """
+
+    paths: ProjectPaths
+    grid: PhaseGrid
+    rule: SelectionRule
+    base: BaseConfig
+    contexts: Sequence[FoldContext]
+    git_commit: str
+    git_dirty: bool
+
+    def evaluator_of(self, channel: str) -> EvaluateFn:
+        """(step, raw config) -> record for one channel, backed by results/m4_trials.csv."""
+        folds = [context.fold.name for context in self.contexts]
+        groups, extra = list(self.grid.fold_groups), self.grid.extra_metrics
+        columns = result_columns(folds, groups, extra)
+        records = read_records(self.paths.m4_trials_file, columns, folds, groups, extra)
+        finished = {record.trial_id: record for record in records if record.channel == channel}
+        settings = TrialSettings(
+            phase="D",
+            metric=self.rule.selection_metric[channel],
+            extra_metrics=extra,
+            fold_groups=self.grid.fold_groups,
+            base=self.base,
+            git_commit=self.git_commit,
+            git_dirty=self.git_dirty,
+            flags_dir=partial(self.paths.hpo_trial_dir, "D"),
+        )
+        default_raw = load_yaml(self.paths.recall_config_file(channel))
+
+        def run_trial(step: str, raw_config: RawConfig) -> TrialRecord:
+            return evaluate_trial(channel, step, raw_config, default_raw, self.contexts, settings)
+
+        save = partial(append_record, self.paths.m4_trials_file, columns=columns)
+        return make_evaluate_fn(channel, finished, run_trial, save)
 
 
 # ---------------------------------------------------------------- R6 from saved models
@@ -455,9 +603,10 @@ def summarize_union_check(
 
     Rows: everything of union_precheck.summarize_precheck (union recall, leave-one-out,
     zero-hit share, candidates per query, each channel's metric with recorded_pooled),
-    then union_recall_target, the active-pool rows of R2 and R3 (pool_rows), and the
-    R3 rule: r3_rule_max_union_recall_drop and r3_rule_switch_to_active_pool_only
-    (1 = switch, 0 = keep; decided on the pooled column, repeated in every column).
+    then union_recall_target, the active-pool rows of R2 and R3 (pool_rows), and, while
+    R3 still has candidates outside A(a), the R3 rule: r3_rule_max_union_recall_drop
+    and r3_rule_switch_to_active_pool_only (1 = switch, 0 = keep; decided on the pooled
+    column, repeated in every column).
     """
     table = summarize_precheck([result.tables for result in results], scopes, selected)
     folds = [fold for fold, scope_folds in scopes.items() if tuple(scope_folds) == (fold,)]
@@ -468,7 +617,10 @@ def summarize_union_check(
     for channel in results[0].pools:
         pools = {fold: result.pools[channel] for fold, result in zip(folds, results, strict=True)}
         extra.update(pool_rows(channel, pools, union_all, scopes))
-    if R3_CHANNEL in results[0].pools:
+    r3_pools = [result.pools[R3_CHANNEL] for result in results if R3_CHANNEL in result.pools]
+    if r3_pools and sum(pool.rows_out for pool in r3_pools) > 0:
+        # The rule is about R3 while it still returns articles outside A(a); once R3
+        # is "A(a) only" there is nothing left to decide, so the rows are left out.
         drop = extra[f"union_recall_drop_without_{R3_CHANNEL}_out_of_pool"][POOLED]
         switch = r3_rule_switches(drop, settings.r3_max_union_recall_drop)
         extra["r3_rule_max_union_recall_drop"] = dict.fromkeys(
@@ -504,61 +656,89 @@ def _fold_candidates(
     base: BaseConfig,
     files: CandidateFiles,
     r6: R6Source | None,
+    track: StageTracker,
 ) -> dict[str, pl.DataFrame]:
     """Per channel: query_id, article_idx, rank of one fold (R2 / R3 also in_active_pool)."""
     fold = context.fold.name
     candidates_by_channel: dict[str, pl.DataFrame] = {}
     for choice in selected:
         key = (fold, choice.channel, choice.record.trial_id)
-        if choice.channel == R6_CHANNEL:
-            if r6 is None:
-                raise ValueError("r6_twotower is selected but no R6Source was given")
-            candidates = load_or_generate_r6(context, r6, files.write(*key))
-        else:
-            reuse_path = files.reuse(*key)
-            path = reuse_path if reuse_path.exists() else files.write(*key)
-            candidates = load_or_generate_candidates(choice, context, base, path)
-        kept = candidates.select(QUERY_ID, ARTICLE_IDX, "rank")
-        if choice.channel in POOL_FLAG_CHANNELS:
-            kept = flag_active_pool(kept, context.inputs.active_pool)
-        candidates_by_channel[choice.channel] = kept
+        with track(f"{fold} | {choice.channel} candidates"):
+            if choice.channel == R6_CHANNEL:
+                if r6 is None:
+                    raise ValueError("r6_twotower is selected but no R6Source was given")
+                candidates = load_or_generate_r6(context, r6, files.write(*key))
+            else:
+                reuse_path = files.reuse(*key)
+                path = reuse_path if reuse_path.exists() else files.write(*key)
+                candidates = load_or_generate_candidates(choice, context, base, path)
+            kept = candidates.select(QUERY_ID, ARTICLE_IDX, "rank")
+            if choice.channel in POOL_FLAG_CHANNELS:
+                kept = flag_active_pool(kept, context.inputs.active_pool)
+            candidates_by_channel[choice.channel] = kept
     return candidates_by_channel
 
 
+@dataclass(frozen=True)
+class UnionCheckRun:
+    """What every fold of one union-check run shares.
+
+    Attributes:
+        selected: The channels' selections.
+        base: configs/base.yaml.
+        files: Candidate file locations.
+        r6: Model and checkpoints of R6 (None if R6 is not selected).
+        track: Stage tracker (memory per stage).
+    """
+
+    selected: Sequence[SelectedChannel]
+    base: BaseConfig
+    files: CandidateFiles
+    r6: R6Source | None
+    track: StageTracker
+
+
+def check_one_fold(run: UnionCheckRun, context: FoldContext) -> FoldResult:
+    """Everything of ONE fold: candidates, record check, union tables.
+
+    The fold's candidates exist only inside this function, so they are released
+    when it returns; the result holds only small per-query tables.
+    """
+    metrics = {choice.channel: choice.record.metric for choice in run.selected}
+    candidates = _fold_candidates(run.selected, context, run.base, run.files, run.r6, run.track)
+    chunk_size = run.base.chunking.query_chunk_size
+    result = fold_result(candidates, context, metrics, chunk_size, run.track)
+    for choice in run.selected:
+        per_query = result.tables.channel_metric[choice.channel]
+        check_reproduces_record(choice, context.fold.name, per_query)
+    return result
+
+
 def run_union_check(
-    selected: Sequence[SelectedChannel],
-    contexts: Sequence[FoldContext],
-    base: BaseConfig,
-    files: CandidateFiles,
-    r6: R6Source | None,
+    run: UnionCheckRun,
+    folds: Sequence[str],
+    load_context: Callable[[str], FoldContext],
     settings: UnionCheckConfig,
     fold_groups: Mapping[str, Sequence[str]],
 ) -> pl.DataFrame:
-    """Load or generate the candidates fold by fold, check them, and build the M4 table.
+    """Check the folds ONE AT A TIME and build the M4 table.
 
-    One fold's candidates are in memory at a time. Every channel's fold score
-    must equal the recorded D-phase score exactly (check_reproduces_record).
+    Each fold's context (queries, labels, active pool) is loaded when the fold
+    starts and released, together with its candidates, before the next fold
+    starts. Every channel's fold score must equal its recorded score exactly
+    (check_reproduces_record).
 
     Args:
-        selected: The six channels' selections (select_channels with manual choices).
-        contexts: The D folds in time order.
-        base: configs/base.yaml.
-        files: Candidate file locations.
-        r6: Model and checkpoints of R6 (None if R6 is not in `selected`).
+        run: Selections, files, R6 source and stage tracker.
+        folds: Fold names in time order.
+        load_context: Fold name -> its FoldContext (loaded on demand).
         settings: configs/m4_union_check.yaml.
         fold_groups: Diagnostic groups, e.g. {"D1_D2": ("D1", "D2")}.
     """
-    metrics = {choice.channel: choice.record.metric for choice in selected}
     results: list[FoldResult] = []
-    for context in contexts:
-        candidates_by_channel = _fold_candidates(selected, context, base, files, r6)
-        result = fold_result(
-            candidates_by_channel, context, metrics, base.chunking.query_chunk_size
-        )
-        for choice in selected:
-            per_query = result.tables.channel_metric[choice.channel]
-            check_reproduces_record(choice, context.fold.name, per_query)
-        results.append(result)
-        LOGGER.info("fold %s: union tables done", context.fold.name)
-    scopes = precheck_scopes([context.fold.name for context in contexts], fold_groups)
-    return summarize_union_check(results, scopes, selected, settings)
+    for fold in folds:
+        with run.track(f"{fold} | whole fold"):
+            results.append(check_one_fold(run, load_context(fold)))
+        LOGGER.info("fold %s: union tables done", fold)
+    scopes = precheck_scopes(list(folds), fold_groups)
+    return summarize_union_check(results, scopes, run.selected, settings)

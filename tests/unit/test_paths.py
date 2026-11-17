@@ -73,6 +73,10 @@ def test_build_paths_derives_everything_from_roots(tmp_path: Path) -> None:
         "/abs/artifacts/m4/candidates/D3/r6_twotower_abc.parquet"
     )
     assert paths.m4_union_check_results_file == tmp_path / "results" / "m4_union_check.csv"
+    assert paths.m4_union_check_variant_file("r3_active_pool") == (
+        tmp_path / "results" / "m4_union_check_r3_active_pool.csv"
+    )
+    assert paths.m4_trials_file == tmp_path / "results" / "m4_trials.csv"
     assert paths.d_phase_seeds_file("r6_twotower") == (
         tmp_path / "results" / "d_phase_steps" / "r6_twotower_seeds.csv"
     )

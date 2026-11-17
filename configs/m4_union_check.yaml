@@ -19,3 +19,17 @@ manual_selection:
   # (2, 0); (2, 50%) was chosen by hand after seeing the chain results.
   r6_twotower:
     replay: 0.5
+
+# Variants: further changes on top of the selections above, run with
+#   scripts/m4_union_check.py --variant NAME
+# and written to results/m4_union_check_{NAME}.csv (the main file is never replaced).
+# A variant config without a trial yet is evaluated on D1-D4 and recorded in
+# results/m4_trials.csv (same columns as d_phase.csv). These trials are the outcome of
+# a rule, NOT candidates of any selection.
+variants:
+  # 2026-11-17: the pre-registered R3 rule said "switch" (pooled union recall drop
+  # 0.045 pp < 0.1 pp), so R3 outputs only articles in A(a). gamma and tau are NOT
+  # re-tuned: the D-phase selection (gamma 1.0, tau 30) is kept.
+  r3_active_pool:
+    r3_sibling:
+      active_pool_only: true
