@@ -295,3 +295,26 @@
   8. **稳健性**：按规则排名前 2 的配置（第 2 名 = 去掉第 1 名后规则会选中的；没有候选通过时按合并分数排）各再用 seed 43、44 跑一遍，只影响 fine-tune 的打乱顺序和 replay 抽样；汇报均值、标准差、最小值、最大值。选择仍以 seed 42 的结果为准，额外 seed 只用于汇报。写在 `configs/hpo/d_phase.yaml` 新增的 `robustness` 部分。
   9. **内存**：训练链按 fold 逐个处理，每周的 fine-tune 数组在这一周用完后释放；fine-tune 的历史只读取涉及的用户的购买（与推理相同）。预测的每个阶段（历史、向量、候选）记录内存，用来查明 E_base 评估中第一个 trial 6.27 GB 峰值的原因（结果在运行后另记）。
 - **proposal §6.4 已同步。**
+
+## 2026-11-17 R6 训练链：采用 (E_update = 2, replay = 50%)，偏离规则选中的 (2, 0)（人工决定）
+
+- **如实说明**：这是一次**偏离预先登记规则的人工决定**，是在**看到训练链全部结果（4 个候选 + 4 个额外 seed）之后**做的。按 §4.2 的多候选规则，选中的是 (E_update = 2, replay = 0)：4 个候选都通过，最高合并分数是 (2, 50%) 的 14.634%，(2, 0) 为 14.576%（低 0.40%，在 1% 的"差不多"范围内），而 (2, 0) 在预先写定的优先顺序中更靠前。`configs/selection_rule.yaml`、`src/hmrec/hpo/selection.py` 和 `configs/hpo/d_phase.yaml` 都**不修改**；`results/d_phase.csv` 和 `results/d_phase_steps/r6_twotower.csv` 中规则的结论（选中 (2, 0)）保持原样。
+- **决定**：R6 采用 **(E_update = 2, replay = 50%)**（seed 42 的 trial `835ef201ee4d`，M4 = `artifacts/models/twotower/chain/835ef201ee4d/D4.pt`）。M4 的 union 检查和之后的 F / V / T 阶段都用它。尚未写入 `configs/locks/`，锁定在 M5 统一进行。
+- **理由**：
+  1. 训练链在 D 阶段只验证了 4 周，但实际要**连续运行 16 周**（到 T4）；规则只比较这 4 周的合并分数，看不到更长时间的累积效应。
+  2. 不加 replay 时已经出现**遗忘的迹象**：(2, 0) 的 D4（13.98%）低于它自己的 D3（14.23%）；(2, 50%) 的 D4 为 14.58%，D4/D1 为 1.007（(2, 0) 为 0.966）。
+  3. 3 个 seed 的平均合并分数 (2, 50%) 更高（14.630% vs 14.563%），标准差小约 4 倍（0.004 vs 0.016 个百分点）；MAP@12 高 4.4%（1.458% vs 1.396%，只报告、不参与选择的指标）。
+  4. 代价只是每周 fine-tune 多约 40 秒（D 阶段每周 58–107 秒 vs 29–54 秒）。
+- **影响**：选择偏差只限于 D1–D4（这 4 周不进入 Ranker 训练）；V、T 阶段不受影响，因为配置在 M5 锁定后不再改动。人工选择写在 `configs/m4_union_check.yaml` 的 `manual_selection` 中（在规则选中的配置上覆盖 `replay`），M5 锁定时以它为准。
+
+## 2026-11-17 M4 准备：R6 打分分块、一次 join 算多个指标、只用命中的候选算 union
+
+- **背景**：R1–R5 union 预检查峰值 6.71 GB；R6 的 E_base 评估第一个 trial 采样到 6.27 GB，训练链整个进程的真实峰值（`/usr/bin/time`）5.76 GB，而 0.5 秒采样的各阶段读数只有 1.3–4.4 GB，说明峰值是预测 / 评估中短于采样间隔的瞬时峰值。
+- **决定**（都只影响内存和耗时，不改变任何结果，有测试）：
+  1. **R6 打分分块单独配置**：`configs/base.yaml` 新增 `chunking.twotower_score_query_chunk_size = 2500`（R5 仍用 `dense_score_query_chunk_size = 5000`）。只用于"用户 × 活跃商品"的分数矩阵；用户 / 商品向量的编码仍按 5,000 分块，与 D 阶段已记录的运行完全相同，保存的 `score` 来自 `dot_pairs`，与分块无关。放在 `base.yaml` 而不是 `r6_twotower.yaml`，是因为后者的任何新键都会改变 R6 已记录 trial 的 trial_id。
+  2. **评估时一次 join 算多个指标**：`eval.metrics.ranked_hits` 对候选做一次输入检查、与 label 做一次 join，得到所有命中的 (query, rank)；Recall / NDCG / MAP 的各个 K 都从这张小表计算（`metric_from_hits`，与原来的单指标函数共用同一段计算代码，结果逐位相同）。runner 改用 `FoldEvaluator.per_query_many`。原来 6 个指标各自检查并 join 一次。
+  3. **Union 只用命中的候选计算**（预检查那条记录中预告的方案）：每一路的候选先与 label 做一次 semi join（命中的行约占 1/400），union recall、leave-one-out 和 R2 / R3 的活跃池诊断都在这些小表上做；每个 query 的候选数按 `chunking.query_chunk_size` 个 query 分块统计。预检查的直接算法保留在 `union_precheck.py` 中作为对照，测试保证两种算法结果完全一致。
+  4. **M4 的候选来源**：R1–R5 复用预检查的文件；R6 不重新训练，用训练链保存的模型逐周预测（D1 用 base epoch 4，D2 用 D1 之后保存的模型，依此类推），并要求每一路每一周的选择指标与 `results/d_phase.csv` 的记录逐位相同，否则停下。
+  5. **人工选择的记录方式**：`configs/m4_union_check.yaml` 的 `manual_selection` 在规则选中的配置上覆盖指定的键（R6：`replay: 0.5`），对应的 trial 必须已经在 `results/d_phase.csv` 中。规则本身和它的结论不改。
+  6. **R3 活跃池规则的执行方式**：阈值 0.001（2026-11-16 预先登记的 0.1 个百分点）写在 `configs/m4_union_check.yaml`，用 4 周合并的 union recall 判断，严格小于才改。M4 的运行只计算并报告结论（`results/m4_union_check.csv` 的 `r3_rule_switch_to_active_pool_only`）；如果结论是"改"，R3 的配置修改和候选重新生成在 M5 锁定之前另行完成。
+- **原因**：M4 是六路（候选更多），M6 之后 R6 每周都要运行，瞬时峰值必须留出余量。
