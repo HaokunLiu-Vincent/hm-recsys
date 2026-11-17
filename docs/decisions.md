@@ -548,3 +548,17 @@
   2. `ui_lift_ptype_52w` 尾部很重：最大 129,900，135 万行（5.1%）大于 100，中位数 1.19；原因是冷门类型的全站占比极小。
   3. `ui_cnt_item`、`ui_cnt_pcode` 的最大值都是 100：对照原始购买行核对了计数最大的 4 行（100、95、77、73），全部一致，是真实的重复购买，不是截断。
 - **proposal 已同步**：§1.3（特征宽表一行的实测、⑤ 的磁盘估算）。
+
+## 2026-11-18 内存上限从约 6 GB 调到 7 GB；特征锁定（`configs/locks/features.lock.yaml`）
+
+- **内存上限**：`configs/base.yaml` 的 `memory.limit_gb` 从 6.0 改为 **7.0**。规则的写法同步改为：本机可用内存 8 GB，单个进程的真实峰值（`ru_maxrss`）上限为 7 GB，留 1 GB 余量（AGENTS.md §4、proposal §1.3）。
+  - **原因**：F1 特征生成的真实峰值是 6.10 GB，超过原来的 6 GB 上限（见上一条）。用户决定不改特征生成代码，改为调高上限。
+  - **影响范围**：`memory.limit_gb` 是所有脚本共用的一个值，所以这次调整对 recall、特征和之后的 Ranker 都生效，不只是特征生成。从 M5 起有真实峰值记录的运行中，最高是 F1 特征的 6.10 GB，其次是 M6 候选生成的 4.70 GB，都在新上限之内。
+  - **没有改写的历史数字**：proposal §1.3 的表和表下说明里，写于此前的"6 GB 上限""6 GB 以内"指当时的上限，保留原文，并在 §1.3 开头加了说明。`configs/base.yaml` 中 `item_chunk_size` 的注释（M5 把分块减半的原因）也保留原文。
+  - **测试**：`tests/unit/test_config.py` 中核对 `base.yaml` 的那一条，预期值从 6.0 改为 7.0。这是配置本身按用户决定修改，不是为了让测试通过而改预期值。
+- **特征锁定**：新增 `configs/locks/features.lock.yaml`（`locked_on` 2026-11-18，`git_commit` 是写入时的 HEAD `068956d`）。内容：71 个特征的名称、顺序、dtype；8 个类别特征的清单；两个固定值 `decay_tau_days` 30、`history_similarity_top_k` 5；四项设置 `history_length` 20、`rrf_k` 60、`online_sales_channel_id` 2、三个窗口长度 7 / 28 / 364。前三部分是用户最初指定的；四项设置是 agent 在提交前指出"它们同样决定特征取值，而锁定文件提交后不能修改"之后，用户同意加入的。
+  - **时间点**：F1 的特征已生成并通过全部检查，F2–T4 的特征还没有生成，也没有任何 Ranker 结果。
+  - **怎么生效**：代码仍然读 `configs/features.yaml`。`src/hmrec/locks.py` 新增 `load_features_lock` 和 `check_features_match_lock`，逐项比较 `features.yaml` 和锁定文件，不一致就报错。调用它的有两处：`scripts/m6_build_features.py`（生成每个 fold 之前）和 `tests/unit/test_features_lock.py`。脚本里的这次调用是用户最初的要求之外加的一行，用户已确认保留。
+  - **锁定文件没有记录的**：`configs/features.yaml` 的 `embedding_pair_chunk_size`（只影响内存，不影响结果）；类别编码表 `artifacts/features/category_codes.json`（不进 git），由 `save_or_check_category_codes` 在每个 fold 核对是否与已有文件一致。
+  - **测试**（`tests/unit/test_features_lock.py`）：真实的两个文件一致；8 个数值（2 个固定值、3 项设置、3 个窗口长度）中改任何一个都被拒绝；删特征、调顺序、改 dtype 被拒绝；`FeaturesConfig` 的字段除特征清单和 `embedding_pair_chunk_size` 外必须全部在锁定核对的清单里，所以以后给 `features.yaml` 加新的数值而不加进锁定，测试会失败。
+- **proposal 已同步**：§1.3（上限的写法）、§8.7（特征已锁定）、§14（目录树）。

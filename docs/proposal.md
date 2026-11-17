@@ -78,7 +78,9 @@
 
 ### 1.3 8 GB 内存的约束和对策
 
-8 GB 是最主要的限制。**任何一个任务的内存峰值不超过约 6 GB**，给系统留余量。**重任务一次只跑一个**，不并行。
+8 GB 是最主要的限制。本机可用内存 8 GB，**单个进程的真实峰值上限为 7 GB**（`configs/base.yaml` 的 `memory.limit_gb`），留 1 GB 余量。**重任务一次只跑一个**，不并行。
+
+上限在 2026-11-18 之前是"约 6 GB"：F1 特征生成的真实峰值是 6.10 GB，用户决定不改代码，改为把上限调到 7 GB（`docs/decisions.md` 2026-11-18）。下表和表下说明中写于此前的"6 GB 上限""6 GB 以内"指当时的上限，作为记录保留，没有改写。
 
 | 任务 | 估算内存 | 实测 | 对策 |
 |---|---|---|---|
@@ -127,7 +129,7 @@
 - **采样峰值**（`MemoryTracker`，`peak_rss` / `sampled_peak_rss_gb`）：后台线程用 psutil 定时采样 RSS（间隔见 `configs/base.yaml` 的 `memory.sample_interval_seconds`），取所有采样值和开始、结束读数中的最大值。可以**分阶段**测（每个阶段一个 tracker），用来定位内存用在哪里；但比采样间隔还短的瞬时峰值测不到，所以只是**下限**。
 - **真实峰值**（`read_process_peak_memory`，`process_max_rss_gb`）：标准库 `resource.getrusage(RUSAGE_SELF).ru_maxrss`，操作系统记录的、进程启动以来的最大 RSS，不会漏掉瞬时峰值，与 `/usr/bin/time -l` 读的是同一个计数器。但它**只有整个进程的一个数**，不能清零，所以说不出峰值出在哪个阶段。单位随系统不同（macOS 是字节，Linux 是 KB），由 `ru_maxrss_to_bytes` 换算。子进程不计入本进程的 RSS，另外记录 `RUSAGE_CHILDREN`（已结束的子进程中最大的一个，不是总和）。
 
-是否超过 6 GB **以真实峰值为准**；采样峰值用来找出是哪个阶段造成的。每个 `MemoryTracker` 结束时两种数字都写进日志（真实峰值在相邻两个阶段的日志之间变大，说明尖峰出在后一个阶段）；脚本在最后一步调用 `log_process_peak_memory`，并把真实峰值写进这次运行的结果记录（M5 的锁定核对写到 `results/m5_lock_check.csv`）。**2026-11-17（M5）之前的数字**：上表中标为"采样"或 MemoryTracker 的都是采样峰值（下限）；标为 `/usr/bin/time` 的是真实峰值，但只出现在终端输出里，没有写入运行日志。MPS 张量占用的统一内存不一定全部计入 RSS，两种峰值都受此影响。6 GB 上限仍要留余量。
+是否超过上限（7 GB；2026-11-18 之前是 6 GB）**以真实峰值为准**；采样峰值用来找出是哪个阶段造成的。每个 `MemoryTracker` 结束时两种数字都写进日志（真实峰值在相邻两个阶段的日志之间变大，说明尖峰出在后一个阶段）；脚本在最后一步调用 `log_process_peak_memory`，并把真实峰值写进这次运行的结果记录（M5 的锁定核对写到 `results/m5_lock_check.csv`）。**2026-11-17（M5）之前的数字**：上表中标为"采样"或 MemoryTracker 的都是采样峰值（下限）；标为 `/usr/bin/time` 的是真实峰值，但只出现在终端输出里，没有写入运行日志。MPS 张量占用的统一内存不一定全部计入 RSS，两种峰值都受此影响，这是上限之外还要留 1 GB 余量的原因之一。
 
 ### 1.4 Two-Tower 速度估算（M1 Max）
 
@@ -747,7 +749,7 @@ WALS 和 Two-Tower 的原始分数放在 B 组，因为 B 组对所有候选都�
 
 ### 8.7 特征的冻结和检查
 
-- 特征列表和 dtype 写在 `configs/features.yaml`（加载时逐项核对：必须正好是 §8.2–§8.6 的 71 个，顺序、分组、类别特征都不能变）。`configs/locks/features.lock.yaml` 在 F1 的特征经确认之后再写入，目前还没有写（原计划是"M6 之前"）。V 阶段**不调特征**。
+- 特征列表和 dtype 写在 `configs/features.yaml`（加载时逐项核对：必须正好是 §8.2–§8.6 的 71 个，顺序、分组、类别特征都不能变）。**特征已锁定**（2026-11-18，F1 的特征生成并核对之后、任何 Ranker 结果出现之前；原计划是"M6 之前"）：`configs/locks/features.lock.yaml` 记录 71 个特征的名称、顺序、dtype，8 个类别特征的清单，两个固定值（`decay_tau_days` 30、`history_similarity_top_k` 5），以及另外四项决定特征取值的设置（`history_length` 20、`rrf_k` 60、`online_sales_channel_id` 2、三个窗口长度 7 / 28 / 364）。代码仍然读 `configs/features.yaml`；`hmrec.locks.check_features_match_lock` 逐项比较两个文件，不一致就报错，`scripts/m6_build_features.py` 在生成每个 fold 之前调用它，`tests/unit/test_features_lock.py` 也调用它。`configs/features.yaml` 里只有 `embedding_pair_chunk_size` 不在锁定文件中（它只影响内存，不影响结果）。类别编码表（`artifacts/features/category_codes.json`，不进 git）也不在锁定文件中，由每个 fold 生成时核对是否与已有文件一致。V 阶段**不调特征**。
 - **每个 fold 生成后自动检查**（`src/hmrec/features/build.py`）：行数等于去重后的候选数（`results/m6_candidates.csv` 的 union 行）；没有重复的 `(query_id, article_idx)`；`tt_dot` / `wals_dot` 与 R6 / R5 的 `score` 逐位相同；每个特征的缺失率、最小值、最大值、均值写进 `results/m6_features.csv`。
 - **独立核对**（`scripts/checks/check_features.py`）：不使用 `features/`、`fusion/`、`asof`、`vectors` 的任何代码，用最朴素的循环对随机 1,000 行重新计算 25 个特征（每组至少 2 个，其中 6 个是新增的），与宽表比较。
 - **特征文件的记录和核对**（`src/hmrec/feature_files.py`）：每个 fold 的 `features.json` 记录每个 part 文件的 sha256、行数，以及列清单。`verify_feature_files` 核对：列清单与预期一致、磁盘上的 part 文件正好是记录的那些、每个文件的 sha256 / 行数 / 列都一致。**M7 读取任何一个 fold 的特征之前必须先调用它。**
@@ -925,7 +927,7 @@ hm-recsys/
 │   └── locks/                   # 锁定后的配置，只能新增，不能修改
 │       ├── channels.lock.yaml   # M5：R1–R5 的完整配置、名额、trial_id、D 阶段分数（只作记录）、选择依据
 │       ├── twotower.lock.yaml   # M5：R6 的完整配置、报警用户设置、两个模型文件的路径和 sha256
-│       ├── features.lock.yaml
+│       ├── features.lock.yaml   # M6：71 个特征的名称、顺序、dtype，类别特征清单，两个固定值和四项设置
 │       └── ranker.lock.yaml
 │
 ├── src/hmrec/                   # 所有可复用逻辑都在这里
