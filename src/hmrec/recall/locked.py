@@ -10,22 +10,30 @@ Code that runs after the lock must NOT read configs/recall/*.yaml (the D-phase
 defaults) or results/d_phase.csv to decide a configuration.
 tests/unit/test_locked.py scans the post-lock code for those names.
 
-R6 is returned as a predict-only channel that starts from a locked model file:
-    "base"      the base checkpoint (E_base epochs): the model that predicted D1;
-    "f1_start"  the chain model after the D4 fine-tune (M4): the model that predicts F1.
-The file's sha256 is compared with the lock BEFORE its weights are loaded, and a
-mismatch is an error: artifacts/ is not in git, so the hash is the only proof
-that the file is the one that was locked. Nothing is trained here.
+R6 comes in two forms, both starting from a model file whose sha256 is checked
+BEFORE its weights are loaded (a mismatch is an error: artifacts/ is not in git,
+so the hash is the only proof that the file is the one that was recorded):
+
+  - load_locked_twotower_channel: predict only, from a file named in the lock
+    ("base" = the model that predicted D1; "f1_start" = the chain model after
+    the D4 fine-tune, which predicts F1). Nothing is trained.
+  - load_locked_twotower_chain: the weekly training chain of proposal §6.6 with
+    the locked settings (E_update, replay, fine-tune lr, chain seed, alarm
+    users). It returns the SAME TwoTowerChainChannel class the D phase used, so
+    the weekly fine-tune is the same code. The caller gives the start model
+    (hmrec.recall.chain_records decides which file that is for a fold) and
+    drives "predict, save, then fine-tune" (hmrec.recall.generate).
 """
 
 from collections.abc import Sequence
-from dataclasses import dataclass
+from dataclasses import asdict, dataclass
 from pathlib import Path
 from typing import Any
 
 import numpy as np
 
 from hmrec.config import BaseConfig, PreprocessConfig, parse_twotower_config
+from hmrec.data.folds import Fold, FoldManifest
 from hmrec.locks import (
     ALL_CHANNELS,
     BASE_CHECKPOINT,
@@ -44,6 +52,7 @@ from hmrec.logging_utils import get_logger
 from hmrec.paths import ProjectPaths
 from hmrec.recall.base import RecallChannel
 from hmrec.recall.build import build_statistical_channel, twotower_chunks
+from hmrec.recall.twotower.chain import TwoTowerChainChannel
 from hmrec.recall.twotower.data import read_training_array
 from hmrec.recall.twotower.infer import TwoTowerChannel, load_twotower_resources
 from hmrec.recall.twotower.model import TwoTowerModel
@@ -56,6 +65,8 @@ ARTIFACTS_PREFIX = "artifacts"
 # The chain model that predicts F1 was saved after the fine-tune on the LAST D fold
 # (M4 in proposal §6.4), as chain/{trial_id}/D4.pt.
 F1_START_FOLD = "D4"
+# Phases whose folds are generated after the lock, in time order (proposal §3).
+POST_LOCK_PHASES = ("F", "V", "T")
 # The alarm users are drawn from the base-window training arrays (proposal §6.4).
 BASE_WINDOW_NAME = "base"
 ALARM_SOURCE_ARRAY = "customer_idx"
@@ -94,7 +105,43 @@ def load_locked_recall(paths: ProjectPaths) -> LockedRecall:
     )
 
 
+def post_lock_folds(manifest: FoldManifest) -> tuple[Fold, ...]:
+    """The folds generated with the locked configuration: F1 ... T4, in time order.
+
+    Raises:
+        ValueError: If the fold right before the first of them is not D4. The
+            locked "f1_start" model is the chain model after the D4 fine-tune,
+            so it may only predict the week that directly follows D4.
+    """
+    folds = tuple(fold for fold in manifest.folds if fold.phase in POST_LOCK_PHASES)
+    if not folds:
+        raise ValueError(f"the fold manifest has no folds of phases {POST_LOCK_PHASES}")
+    first_position = manifest.folds.index(folds[0])
+    before = manifest.folds[first_position - 1].name if first_position > 0 else None
+    if before != F1_START_FOLD:
+        raise ValueError(
+            f"the fold before {folds[0].name} is {before}, expected {F1_START_FOLD}: "
+            "the locked f1_start model would not fit the first post-lock fold"
+        )
+    if manifest.folds[first_position:] != folds:
+        raise ValueError("folds of phases F, V, T must be the last folds of the manifest")
+    return folds
+
+
 # ---------------------------------------------------------------- R6 model files
+
+
+@dataclass(frozen=True)
+class ModelFile:
+    """A model file together with the sha256 it must have.
+
+    Attributes:
+        path: The checkpoint file.
+        sha256: The recorded sha256 (lock file or results/m6_twotower_chain.csv).
+    """
+
+    path: Path
+    sha256: str
 
 
 def _artifact_path(paths: ProjectPaths, recorded: str) -> Path:
@@ -194,6 +241,60 @@ def load_locked_twotower_channel(
         load_verified_checkpoint(resources.model, start_file, expected_sha256, resources.identity)
         resources.model.eval()
     return TwoTowerChannel(config, resources, twotower_chunks(base))
+
+
+def load_locked_twotower_chain(
+    locked: LockedRecall,
+    base: BaseConfig,
+    paths: ProjectPaths,
+    preprocess: PreprocessConfig,
+    start: ModelFile,
+) -> TwoTowerChainChannel:
+    """The weekly training chain with the locked settings, starting from a checked model.
+
+    Returns the D-phase chain class (hmrec.recall.twotower.chain), configured
+    only from the lock: E_update, replay, fine-tune learning rate, chain seed,
+    and the locked alarm users (load_locked_alarm_users). Its
+    fine_tune_on_week(fold, inputs) fine-tunes on the week [anchor, anchor + 7)
+    with a NEW Adam and saves the model to
+    artifacts/models/twotower/chain_locked/{fold}.pt (never overwritten).
+
+    Args:
+        locked: Both lock files.
+        base: configs/base.yaml (chunk sizes, memory settings).
+        paths: Project paths.
+        preprocess: Current preprocess config.
+        start: The model to start from and its recorded sha256: the locked
+            f1_start for F1, else the model saved after the previous fold.
+
+    Raises:
+        FileNotFoundError: If a model file is missing.
+        ValueError: If a sha256 differs from its record (nothing is loaded).
+    """
+    lock = locked.twotower
+    config = parse_twotower_config(lock.channel.config)
+    base_file = locked_checkpoint_file(paths, lock, BASE_CHECKPOINT)
+    # load_twotower_resources reads the base checkpoint, so it is hashed before that.
+    check_file_sha256(base_file, lock.checkpoints[BASE_CHECKPOINT].sha256)
+    resources = load_twotower_resources(paths, preprocess, config)
+    load_verified_checkpoint(resources.model, start.path, start.sha256, resources.identity)
+    resources.model.eval()
+    metadata = {
+        "trial_id": lock.channel.trial_id,
+        "config": asdict(config),
+        "model_identity": resources.identity,
+        "start": f"{start.path.name} (sha256 {start.sha256})",
+        "lock_git_commit": lock.stamp.git_commit,
+    }
+    return TwoTowerChainChannel(
+        config,
+        resources,
+        twotower_chunks(base),
+        paths.twotower_locked_chain_checkpoint_file,
+        load_locked_alarm_users(paths, lock),
+        base.memory,
+        metadata,
+    )
 
 
 def load_locked_alarm_users(paths: ProjectPaths, lock: TwoTowerLock) -> np.ndarray:
