@@ -47,7 +47,8 @@ from hmrec.config import (
     load_yaml,
     parse_twotower_config,
 )
-from hmrec.eval.metrics import FOLD, QUERY_ID, VALUE, macro_mean
+from hmrec.eval.metrics import QUERY_ID, macro_mean
+from hmrec.eval.monitor import count_candidates_chunked
 from hmrec.hpo.grid import PhaseGrid, RawConfig, apply_overrides
 from hmrec.hpo.records import TrialRecord, append_record, read_records, result_columns
 from hmrec.hpo.runner import (
@@ -155,36 +156,6 @@ def union_recall_tables_from_hits(
         others = [table for channel, table in pairs.items() if channel != left_out]
         tables[f"without_{left_out}"] = evaluator.union_recall_of_hits(pl.concat(others))
     return tables
-
-
-def count_candidates_chunked(
-    candidates_by_channel: Mapping[str, pl.DataFrame], queries: pl.DataFrame, query_chunk_size: int
-) -> pl.DataFrame:
-    """Distinct candidate articles per query after union + dedup, counted in chunks of queries.
-
-    Only one chunk's pairs of all channels are in memory at a time
-    (query_chunk_size queries x at most 480 candidates).
-
-    Returns:
-        One row per query in `queries`, sorted by query_id: query_id, fold,
-        value (float64; 0 for a query without candidates). Same as
-        union_precheck.count_candidates_per_query.
-    """
-    if query_chunk_size <= 0:
-        raise ValueError(f"query_chunk_size must be > 0, got {query_chunk_size}")
-    query_ids = queries[QUERY_ID].sort()
-    counts: list[pl.DataFrame] = []
-    for start in range(0, query_ids.len(), query_chunk_size):
-        chunk_ids = query_ids.slice(start, query_chunk_size)
-        # query_ids are sorted and unique, so chunks are disjoint id ranges.
-        in_chunk = pl.col(QUERY_ID).is_between(chunk_ids[0], chunk_ids[-1])
-        parts = [c.filter(in_chunk).select(PAIR) for c in candidates_by_channel.values()]
-        # Dedup at (query_id, article_idx): an article from several channels counts once.
-        distinct = pl.concat(parts).unique()
-        counts.append(distinct.group_by(QUERY_ID).agg(pl.len().alias("n_candidates")))
-    per_query = queries.select(QUERY_ID, FOLD).join(pl.concat(counts), on=QUERY_ID, how="left")
-    value = pl.col("n_candidates").fill_null(0).cast(pl.Float64).alias(VALUE)
-    return per_query.select(QUERY_ID, FOLD, value).sort(QUERY_ID)
 
 
 # ---------------------------------------------------------------- active-pool diagnostics
