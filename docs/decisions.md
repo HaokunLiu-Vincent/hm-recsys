@@ -562,3 +562,15 @@
   - **锁定文件没有记录的**：`configs/features.yaml` 的 `embedding_pair_chunk_size`（只影响内存，不影响结果）；类别编码表 `artifacts/features/category_codes.json`（不进 git），由 `save_or_check_category_codes` 在每个 fold 核对是否与已有文件一致。
   - **测试**（`tests/unit/test_features_lock.py`）：真实的两个文件一致；8 个数值（2 个固定值、3 项设置、3 个窗口长度）中改任何一个都被拒绝；删特征、调顺序、改 dtype 被拒绝；`FeaturesConfig` 的字段除特征清单和 `embedding_pair_chunk_size` 外必须全部在锁定核对的清单里，所以以后给 `features.yaml` 加新的数值而不加进锁定，测试会失败。
 - **proposal 已同步**：§1.3（上限的写法）、§8.7（特征已锁定）、§14（目录树）。
+
+## 2026-11-18 内存上限从 7 GB 调到 8 GB（等于项目预算）；F2–F4、V1 的特征已生成，V1 保留不重跑
+
+- **运行**（HEAD `ad082b0`，tag `lock-features-v1`，工作区干净）：先用 `verify_feature_files` 确认 F1 完整（9 个 part，26,373,844 行），再依次生成 F2、F3、F4、V1。V1 的真实峰值是 **7.002 GB**，超过当时的 7 GB 上限约 2 MB，脚本在写完全部文件和记录之后以非零退出码结束，运行按规则停下。V2–T4 当时没有生成。
+- **五个 fold 的真实峰值**（`results/m6_runs.csv`）：F1 6.10 GB（2,637 万行）、F2 6.25 GB（2,346 万行）、F3 6.83 GB（2,381 万行）、F4 6.71 GB（2,471 万行）、V1 7.00 GB（2,523 万行）。峰值在 6.10–7.00 GB 之间浮动，**与行数无关**：行数最多的 F1 峰值最低。**推测**是分配器没有及时把内存归还给系统（**未验证**）。
+- **事实更正**：本机的物理内存是 **32 GB**（`sysctl hw.memsize` = 34,359,738,368 字节）。8 GB 是项目自己定的预算，不是机器的物理限制。
+- **决定（用户）**：`configs/base.yaml` 的 `memory.limit_gb` 从 7.0 改为 **8.0**，等于项目预算。特征生成代码不改。
+  - **原因**：上一条记录里 7 GB 上限的理由是"留 1 GB 余量"，防止系统内存不足而交换。物理内存是 32 GB，这个理由不成立，所以上限不再低于预算。
+  - **同步修改**：AGENTS.md §4、proposal §1.1 和 §1.3 的文字；`memory.py`、`run_records.py` 的 docstring；`tests/unit/test_config.py` 中核对 `base.yaml` 的预期值（7.0 → 8.0，配置本身按用户决定修改）。
+  - **如果之后还有 fold 超过 8 GB**：到时候再做"读候选文件时只读用到的列"这一处只影响内存的改动（用户已指定）。
+- **V1 的文件保留，不重跑**：V1 的 9 个 part 文件和 `features.json` 完整；生成时的自动检查全部通过（行数等于去重后的候选数、没有重复的 `(query_id, article_idx)`、`tt_dot` / `wals_dot` 与 R6 / R5 的 `score` 逐位相同）；`verify_feature_files` 通过；独立核对脚本随机 1,000 行 × 25 个特征全部一致。F2、F3、F4 同样全部通过。
+- **proposal 已同步**：§1.1（8 GB 是预算，物理内存 32 GB）、§1.3（上限等于预算，以及上限三次取值的经过）。
