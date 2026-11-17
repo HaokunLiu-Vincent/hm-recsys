@@ -241,3 +241,13 @@
   - 第 3 项"历史也按天去重"是 agent 在实现时提出的，用户在 commit 前确认。
   - padding 最初用 `article_idx = 0`；0 是真实商品，漏用 mask 时会无声出错，所以在 commit 前按用户要求改为 `n_articles`，并给商品特征表加 padding 行。
 - **proposal §6.1 已同步。**
+
+## 2026-11-17 Two-Tower 配置文件位置更正；base 窗口数组和 200 步 benchmark
+
+- **更正**：上面"Two-Tower 训练样本和用户历史的定义"一条写的配置文件 `configs/twotower.yaml` 与 proposal §14 的目录不一致，已移到 **`configs/recall/r6_twotower.yaml`**（与 R1–R5 的配置放在一起），并加入 benchmark 设置（200 步、batch 512、embedding 128；占位模型的学习率和温度只用于计时）。
+- **新增**：`src/hmrec/recall/twotower/benchmark.py`（§1.4 的占位模型，不是 R6 正式模型）和 `scripts/m3_build_twotower_data.py`；proposal §14 的目录已同步。
+- **实测**（填入 proposal §1.3、§1.4）：
+  - Base 窗口（购买日 2019-12-03 – 2020-06-02）：6,160,524 个样本，1,960,337 个 (用户, 日) 组，714,091 个用户，52,538 个商品；平均历史长度 15.18；9.0% 的样本历史为空。数组 670 MB；生成耗时 4.6 秒，峰值 3.35 GB（`/usr/bin/time` 4.15 GB）。
+  - 200 步 benchmark：取 batch 占每步时间的 1.7%（MPS）和 0.7%（CPU），数据管道不需要优化。占位模型在 MPS 上每步 45.0 ms，**比 CPU（37.1 ms）慢约 20%**；按此外推 1 个 epoch 约 9.2 分钟（MPS）/ 7.5 分钟（CPU），高于 §1.4 原估算的 2–5 分钟。
+- **未决定**：R6 用哪个设备训练。§1.2 仍写 MPS；用真实模型重新比较后再定。
+- **说明**：数组生成和 benchmark 运行时，Part 3 的新代码尚未 commit（`metadata.json` 记录 `git_dirty: true`，HEAD 9e34ba1）；数据构建的核心逻辑（`data.py` 的样本、历史、padding）在 9e34ba1 中已 commit。

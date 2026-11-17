@@ -86,7 +86,7 @@
 | R1–R3 候选生成（D1，默认配置） | — | **整体峰值 1.77 GB**（`/usr/bin/time` 最大 RSS，整个脚本：读 queries / labels、算活跃池、跑 3 路、评估）；耗时 R1 0.6 秒、R2 0.2 秒、R3 0.5 秒，全程 2.2 秒。单个 channel 的运行时间短于 0.5 秒的采样间隔，**单路峰值不可靠**，不单独列出 | 每路只读需要的列；R2 / R3 的历史先按 query 用户 semi-join |
 | R4 ItemCF 共现矩阵（365 天） | 不分块可能远超 8 GB | **D1（CF3，α=0.7）：整体峰值 2.95 GB**（`/usr/bin/time` 最大 RSS，含读数据；MemoryTracker 采样 2.62 GB）；耗时 17.2 秒（建图 + 邻居 15.5 秒，打分 1.8 秒）。图规模：1,540 万条购买行 → 1,325 万个 (用户, 商品) 对，98.8 万用户，7.2 万商品，`Σ d_u²` ≈ 5.1 亿；28,110 个 seed，分 15 块。**D 阶段（D1–D4 四周，9 个配置）：最重的 trial 峰值 4.76 GB**（MemoryTracker 采样，整个进程，含已加载的 4 周数据；配置 seed 窗口 365 天、衰减关，4 周共 115 秒）；seed 窗口越长，要算邻居的 seed 越多，峰值越高（其余 trial 3.9–4.6 GB） | **按 seed item 分块**（每块约 2,000 个 item），每块算完只保留 Top-`K_n` 邻居就释放。4.76 GB 离 6 GB 上限太近：**M6 之前把 `chunking.item_chunk_size` 从 2000 调到 1000**（分块只影响内存和速度，不影响结果：分块和不分块的 `C_w` 逐位相同，有测试） |
 | R5 WALS（180 天） | ~0.5–1 GB | **D1（W2，默认配置）：整体峰值 3.10 GB**（`/usr/bin/time` 最大 RSS；MemoryTracker 采样：拟合 0.96 GB，打分 2.11 GB）；耗时 63.8 秒（拟合 53.0 秒，打分 10.8 秒）。矩阵 71.1 万用户 × 5.2 万商品，590 万个非零值。**峰值来自打分**而不是拟合：打分按 `chunking.dense_score_query_chunk_size` = 5,000 个 query 分块，每块 5,000 × 20,764 个活跃商品的 float32 分数矩阵约 0.41 GB，再加 `np.partition` 的副本（分块为 1 万时整体峰值 4.05 GB；两种分块的 Recall@100 都是 11.36%，候选行数相同）。当前 `implicit` 的 macOS wheel 没有链接 OpenMP，拟合实际是**单线程**（`num_threads=6` 不起作用） | 稀疏 CSR，没问题 |
-| R6 Two-Tower 训练 | ~1.5–2 GB | 待测 | 用户历史预先存成 int32 数组 `[N, 20]`；商品特征表（~10.5 万 × 896 维，约 380 MB）整块放进 MPS 显存；batch 直接按下标取，不用 DataLoader |
+| R6 Two-Tower 训练 | ~1.5–2 GB | **训练数组生成（base 窗口，2026-11-17）：峰值 3.35 GB**（MemoryTracker 采样；`/usr/bin/time` 最大 RSS 4.15 GB，含读数据），耗时 4.6 秒；616 万个样本，数组共 670 MB（`history` int32 470 MB、`history_mask` 118 MB）。**200 步 benchmark（占位模型，batch 512）**：MPS 进程最大 RSS 2.00 GB，MPS 张量占用 1.17 GB（驱动共持有 2.02 GB，统一内存，与 RSS 部分重叠）；CPU 进程最大 RSS 2.34 GB。真实模型（训练全程）待测 | 用户历史预先存成 int32 数组 `[N, 20]`；商品特征表（~10.5 万 × 896 维，约 380 MB）整块放进 MPS 显存；batch 直接按下标取，不用 DataLoader |
 | 候选生成（每周） | 合并前最多约 3,940 万行，全部放在内存约 0.73 GB（D3 约 1.07 GB）；单个 channel 最多约 0.15 GB；合并去重后约 2,050 万行（计算见表下 ①） | 待测 | 每个 channel 单独写 Parquet，再按 query 分块合并去重 |
 | Ranker 训练（4 周） | 负采样 1:40 约 1,100 万行，1:80 约 2,170 万行（上限）；原始 float32 特征约 2.3–4.5 GB，分箱后约 0.6–1.1 GB（计算见表下 ②） | 待测 | **流式加载（stream loading）**：每周特征按 row group 存 Parquet，用 LightGBM 的 `lgb.Sequence` 分批读入构建 `Dataset`，原始特征不必一次性放进内存；构建后的分箱数据（每个值 1 字节）约 0.5–1 GB，存成 LightGBM binary 文件复用 |
 | Ranker 推理（每周，不采样） | 一次全放进内存约 4.3 GB；按 1 万 query 分块后每块约 0.52 GB（计算见表下 ③） | 待测 | **按 query 分块打分**（每块 1 万个 query） |
@@ -101,15 +101,26 @@
 
 **内存峰值怎么测**：macOS 上 psutil 拿不到进程的历史峰值，所以 `src/hmrec/memory.py` 用后台线程定时采样 RSS（间隔见 `configs/base.yaml` 的 `memory.sample_interval_seconds`），峰值取所有采样值和开始、结束读数中的最大值。比采样间隔还短的瞬时峰值可能测不到；MPS 张量占用的统一内存也不一定全部计入 RSS。因此实测峰值是**下限**，6 GB 上限要留余量：实测峰值接近 6 GB 时就应该当作超限处理。
 
-### 1.4 Two-Tower 速度估算（M1 Max，待实测）
+### 1.4 Two-Tower 速度估算（M1 Max）
 
-| 步骤 | 估算耗时 |
-|---|---|
-| Base 1 个 epoch（26 周，约 700–800 万样本，batch 512） | 约 2–5 分钟 |
-| 每周 fine-tune（约 30 万样本） | 约 10 秒 – 1 分钟 |
-| 每周推理（平均约 8.2 万 query，最多 12.0 万（D3）× 约 10 万商品，取 Top-100） | 几秒到十几秒（分块矩阵乘法 + `torch.topk`） |
+| 步骤 | 估算耗时 | 实测 |
+|---|---|---|
+| Base 1 个 epoch（26 周，约 700–800 万样本，batch 512） | 约 2–5 分钟 | **占位模型：MPS 约 9.2 分钟，CPU 约 7.5 分钟**（实际 616 万个样本 = 12,033 步；按 200 步 benchmark 去掉前 10 步后的平均每步时间外推；真实模型待测） |
+| 每周 fine-tune（约 30 万样本） | 约 10 秒 – 1 分钟 | 待测 |
+| 每周推理（平均约 8.2 万 query，最多 12.0 万（D3）× 约 10 万商品，取 Top-100） | 几秒到十几秒（分块矩阵乘法 + `torch.topk`） | 待测 |
 
 **开工前的 benchmark**：在 `mps` 和 `cpu` 上各跑 200 步，分别记录取数据的时间和 forward + backward 的时间（计时前后调用 `torch.mps.synchronize()`）。如果取数据占一半以上时间，先优化数据管道。
+
+**Benchmark 实测（2026-11-17，`scripts/m0_benchmark_twotower.py`，torch 2.15.0）**：用占位模型（`src/hmrec/recall/twotower/benchmark.py`：图像 / 文本投影 + ID 和 7 个类目 embedding，用户塔对 20 件历史做 masked mean 加 profile embedding，multi-positive in-batch softmax，没有 LogQ；不是 R6 的正式模型），base 窗口的数组，batch 512，200 步，每个设备单独一个进程。
+
+| 设备 | 取 batch（每步，去掉前 10 步） | forward + backward + 更新（每步） | 取 batch 占比 | 前 10 步合计 | 200 步合计 |
+|---|---|---|---|---|---|
+| MPS | 0.80 ms | 45.0 ms（中位数 44.5，P90 47.8） | **1.7%** | 1.84 秒 | 10.5 秒 |
+| CPU（6 线程） | 0.26 ms | 37.1 ms（中位数 37.1，P90 37.8） | **0.7%** | 0.43 秒 | 7.5 秒 |
+
+- 取 batch 远低于一半，**数据管道不需要优化**。
+- 两个设备的 loss 逐步一致（7.860 → 6.388），说明计算相同。
+- 占位模型在 **MPS 上比 CPU 慢约 20%**。占位模型每步的矩阵很小，MPS 的 kernel 启动和 embedding 反向（scatter）开销占主要部分；真实模型更大时结论可能不同。正式训练前用真实模型重新比较两个设备，再决定 R6 在哪个设备上训练（§1.2 目前写的是 MPS）。
 
 ---
 
@@ -786,7 +797,8 @@ hm-recsys/
 │   │   ├── r4_itemcf.py
 │   │   ├── r5_wals.py
 │   │   └── twotower/
-│   │       ├── data.py          # 训练样本、用户历史数组 [N, 20]
+│   │       ├── data.py          # 训练样本、用户历史数组 [N, 20]、商品特征表（末尾 padding 行）、在设备上取 batch
+│   │       ├── benchmark.py     # §1.4 的占位模型和 200 步计时（不是 R6 正式模型）
 │   │       ├── model.py         # ItemTower、UserTower
 │   │       ├── loss.py          # multi-positive in-batch softmax + LogQ
 │   │       ├── train.py         # base 训练、每周 fine-tune
@@ -827,8 +839,9 @@ hm-recsys/
 │   ├── m0_preprocess.py
 │   ├── m0_build_queries.py      # 每个 fold 的 query 名单和 label → artifacts/queries/、artifacts/labels/
 │   ├── m0_check_folds.py
-│   ├── m0_benchmark_twotower.py
+│   ├── m0_benchmark_twotower.py # --device mps / cpu：占位模型 200 步，取 batch 与计算分开计时（§1.4）
 │   ├── m2_recall_hpo.py         # --channel r1 ... r5
+│   ├── m3_build_twotower_data.py   # base 窗口的训练数组 → artifacts/twotower/data/base/
 │   ├── m3_twotower_base.py
 │   ├── m3_twotower_chain.py
 │   ├── m4_union_check.py
