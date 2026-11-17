@@ -426,3 +426,17 @@ def test_r6_chain_settings_enter_the_trial_id_only_when_fine_tuning() -> None:
     assert make_trial_id("r6_twotower", chain) != make_trial_id(
         "r6_twotower", {**chain, "chain_seed": 43}
     )
+
+
+def test_r3_active_pool_option_enters_the_trial_id_only_when_on() -> None:
+    raw = load_yaml(REPO / "configs" / "recall" / "r3_sibling.yaml")
+    assert raw["active_pool_only"] is False
+    # Ids recorded in results/d_phase.csv before the option existed: the default
+    # config and the D-phase selection (gamma 1.0).
+    assert make_trial_id("r3_sibling", raw) == "f50217180db2"
+    assert make_trial_id("r3_sibling", {**raw, "gamma": 1.0}) == "3188358fa459"
+    # A config stored without the key (old records) is the same trial.
+    without_key = {key: value for key, value in raw.items() if key != "active_pool_only"}
+    assert make_trial_id("r3_sibling", {**without_key, "gamma": 1.0}) == "3188358fa459"
+    switched = make_trial_id("r3_sibling", {**raw, "gamma": 1.0, "active_pool_only": True})
+    assert switched not in {"3188358fa459", "f50217180db2"}

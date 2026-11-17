@@ -767,6 +767,10 @@ class SiblingConfig:
         tau_days: Decay time constant of P(u, c).
         gamma: Exponent of (1 + M(j)); 0 means style preference only.
         quota: Maximum candidates per query (never padded).
+        active_pool_only: If True, only articles in the active pool A(a) can be
+            candidates; the filter is applied BEFORE the Top-quota cut, so the
+            freed places go to in-pool siblings. Default False (the D-phase
+            runs). Switched on once at M4 by the pre-registered rule (§2.4, §5.7).
     """
 
     style_lookback_days: int
@@ -774,6 +778,7 @@ class SiblingConfig:
     tau_days: float
     gamma: float
     quota: int
+    active_pool_only: bool = False
 
 
 @dataclass(frozen=True)
@@ -870,13 +875,19 @@ def parse_sibling_config(raw: Mapping[str, Any]) -> SiblingConfig:
     """
     where = "r3_sibling"
     expected = {"style_lookback_days", "market_window_days", "tau_days", "gamma", "quota"}
-    check_keys(raw, expected, where)
+    # active_pool_only is optional (configs recorded before M4 do not have it): absent = False.
+    required = {key: value for key, value in raw.items() if key != "active_pool_only"}
+    check_keys(required, expected, where)
+    active_pool_only = (
+        get_bool(raw, "active_pool_only", where) if "active_pool_only" in raw else False
+    )
     config = SiblingConfig(
         style_lookback_days=get_int(raw, "style_lookback_days", where),
         market_window_days=get_int(raw, "market_window_days", where),
         tau_days=get_float(raw, "tau_days", where),
         gamma=get_float(raw, "gamma", where),
         quota=get_int(raw, "quota", where),
+        active_pool_only=active_pool_only,
     )
     require_positive(config.style_lookback_days, f"{where}.style_lookback_days")
     require_positive(config.market_window_days, f"{where}.market_window_days")
@@ -1362,11 +1373,27 @@ class UnionCheckConfig:
             this (absolute), R3 becomes "A(a) only".
         manual_selection: Channel -> config keys that replace the rule's
             D-phase selection (each has a docs/decisions.md record).
+        variants: Variant name -> {channel -> config keys}: further changes on
+            top of the selections, checked with `--variant NAME` and written
+            to their own results file (e.g. R3 limited to A(a) after the rule).
     """
 
     union_recall_target: float
     r3_max_union_recall_drop: float
     manual_selection: dict[str, dict[str, Any]]
+    variants: dict[str, dict[str, dict[str, Any]]]
+
+
+def _channel_overrides(raw: Any, where: str) -> dict[str, dict[str, Any]]:
+    """Parse {channel: {config key: value}}; every channel needs at least one key."""
+    if not isinstance(raw, Mapping):
+        raise ValueError(f"{where} must be a mapping of channel -> config keys, got {raw!r}")
+    overrides: dict[str, dict[str, Any]] = {}
+    for channel, keys in raw.items():
+        if not isinstance(keys, Mapping) or not keys:
+            raise ValueError(f"{where}.{channel} must be a non-empty mapping")
+        overrides[str(channel)] = dict(keys)
+    return overrides
 
 
 def parse_union_check_config(raw: Mapping[str, Any]) -> UnionCheckConfig:
@@ -1377,20 +1404,24 @@ def parse_union_check_config(raw: Mapping[str, Any]) -> UnionCheckConfig:
             or a manual_selection entry is not a non-empty mapping.
     """
     where = "m4_union_check"
-    check_keys(raw, {"union_recall_target", "r3_active_pool_rule", "manual_selection"}, where)
+    expected = {"union_recall_target", "r3_active_pool_rule", "manual_selection", "variants"}
+    check_keys(raw, expected, where)
     raw_rule = get_mapping(raw, "r3_active_pool_rule", where)
     check_keys(raw_rule, {"max_union_recall_drop"}, f"{where}.r3_active_pool_rule")
-    manual: dict[str, dict[str, Any]] = {}
-    for channel, overrides in get_mapping(raw, "manual_selection", where).items():
-        if not isinstance(overrides, Mapping) or not overrides:
-            raise ValueError(f"{where}.manual_selection.{channel} must be a non-empty mapping")
-        manual[str(channel)] = dict(overrides)
+    manual = _channel_overrides(
+        get_mapping(raw, "manual_selection", where), f"{where}.manual_selection"
+    )
+    variants = {
+        str(name): _channel_overrides(overrides, f"{where}.variants.{name}")
+        for name, overrides in get_mapping(raw, "variants", where).items()
+    }
     config = UnionCheckConfig(
         union_recall_target=get_float(raw, "union_recall_target", where),
         r3_max_union_recall_drop=get_float(
             raw_rule, "max_union_recall_drop", f"{where}.r3_active_pool_rule"
         ),
         manual_selection=manual,
+        variants=variants,
     )
     for name in ("union_recall_target", "r3_max_union_recall_drop"):
         if not 0 < getattr(config, name) < 1:

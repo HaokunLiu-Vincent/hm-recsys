@@ -462,6 +462,7 @@ def test_repo_union_check_config() -> None:
     # Pre-registered 2026-11-16: 0.1 percentage points, absolute. Must never change.
     assert config.r3_max_union_recall_drop == 0.001
     assert config.manual_selection == {"r6_twotower": {"replay": 0.5}}
+    assert config.variants == {"r3_active_pool": {"r3_sibling": {"active_pool_only": True}}}
 
 
 def test_union_check_config_errors() -> None:
@@ -472,3 +473,13 @@ def test_union_check_config_errors() -> None:
         parse_union_check_config({**valid, "manual_selection": {"r6_twotower": {}}})
     with pytest.raises(ValueError, match="r3_active_pool_rule"):  # wrong key name
         parse_union_check_config({**valid, "r3_active_pool_rule": {"max_drop": 0.001}})
+
+
+def test_sibling_active_pool_only_is_optional_and_a_bool() -> None:
+    raw = load_yaml(REPO_CONFIGS / "recall" / "r3_sibling.yaml")
+    assert parse_sibling_config(raw).active_pool_only is False
+    without_key = {key: value for key, value in raw.items() if key != "active_pool_only"}
+    assert parse_sibling_config(without_key).active_pool_only is False
+    assert parse_sibling_config({**raw, "active_pool_only": True}).active_pool_only is True
+    with pytest.raises(ValueError, match="active_pool_only"):
+        parse_sibling_config({**raw, "active_pool_only": "yes"})

@@ -38,6 +38,7 @@ gamma = 1: 41 = 0.967216 x 9 = 8.704945, 31 = 0.367879 x 4 = 1.471518, 32 = 0.36
 (Values are rounded to 6 decimals after computing with the exact weights.)
 """
 
+import dataclasses
 import math
 
 import polars as pl
@@ -45,7 +46,7 @@ import pytest
 from conftest import make_queries, make_recall_inputs
 
 from hmrec.config import SiblingConfig
-from hmrec.recall.base import validate_candidates
+from hmrec.recall.base import rank_candidates, validate_candidates
 from hmrec.recall.r3_sibling import SIB_SPEC, SiblingChannel
 
 ANCHOR_DAY = 200
@@ -116,3 +117,59 @@ def test_ignores_poison_on_and_after_anchor() -> None:
     # and 10 lines of 32 would raise M(32); a day-201 purchase of code 500 would raise P.
     poison = [(0, 32, 200), *[(5, 32, 200)] * 10, (0, 31, 201)]
     assert _run(_config(), ROWS + poison).equals(_run(_config()))
+
+
+# ---------------------------------------------------------------- active pool only (M4 rule)
+#
+# Same example, gamma 0.5: unfiltered order 41 (2.901648), 31 (0.735759), 32 (0.367879).
+# Active pool A(a) = {31, 32, 40}: green 41 is NOT in the pool.
+#   active_pool_only -> 41 is dropped BEFORE the cut: order 31, 32.
+#   With quota 2: unfiltered Top-2 = 41, 31; filtered Top-2 = 31, 32, so the place
+#   freed by 41 goes to the next in-pool sibling (32), it is not left empty.
+
+
+def _pool_config(gamma: float = 0.5, quota: int = 50) -> SiblingConfig:
+    return dataclasses.replace(_config(gamma, quota), active_pool_only=True)
+
+
+def _run_with_pool(
+    config: SiblingConfig, pool: list[int], rows: list[tuple[int, int, int]] = ROWS
+) -> pl.DataFrame:
+    inputs = make_recall_inputs(rows, ANCHOR_DAY, product_codes=PRODUCT_CODES, active_pool=pool)
+    return SiblingChannel(config).generate(QUERIES, inputs)
+
+
+def test_active_pool_only_drops_out_of_pool_siblings_and_keeps_scores() -> None:
+    result = _run_with_pool(_pool_config(), [31, 32, 40])
+    validate_candidates(result, SIB_SPEC, quota=50)
+    assert result["article_idx"].to_list() == [31, 32]
+    # Scores are unchanged: P(u, c) and M(j) still use every article and customer.
+    assert result["score"].to_list() == pytest.approx([P_500 * 2, P_500], rel=1e-6)
+
+
+def test_freed_places_go_to_in_pool_siblings() -> None:
+    assert _run_with_pool(_config(quota=2), [31, 32, 40])["article_idx"].to_list() == [41, 31]
+    assert _run_with_pool(_pool_config(quota=2), [31, 32, 40])["article_idx"].to_list() == [31, 32]
+
+
+@pytest.mark.parametrize("pool", [[31, 32, 40], [41], [30, 31, 41], []])
+@pytest.mark.parametrize("quota", [1, 2, 50])
+def test_filter_before_cut_equals_full_scoring_then_filter(pool: list[int], quota: int) -> None:
+    # Reference: score EVERY sibling (no quota limit), delete the out-of-pool rows, then
+    # rank and cut to the quota. The option must give exactly this table.
+    everything = _run_with_pool(_config(quota=1000), pool)
+    in_pool = everything.filter(
+        pl.col("article_idx").is_in(pl.Series(pool, dtype=pl.Int32).implode())
+    )
+    reference = rank_candidates(in_pool.select("query_id", "article_idx", "score"), SIB_SPEC, quota)
+    assert _run_with_pool(_pool_config(quota=quota), pool).equals(reference)
+
+
+def test_option_off_ignores_the_active_pool() -> None:
+    assert _run_with_pool(_config(), [31]).equals(_run(_config()))
+
+
+def test_active_pool_only_ignores_poison_on_and_after_anchor() -> None:
+    poison = [(0, 32, 200), (0, 41, 205), *[(8, 32, 200)] * 50, *[(8, 31, 201)] * 50]
+    clean = _run_with_pool(_pool_config(), [31, 32, 40])
+    assert _run_with_pool(_pool_config(), [31, 32, 40], ROWS + poison).equals(clean)

@@ -15,7 +15,13 @@ Formulas (§5 R3):
 Candidates for u: every catalog article j whose product_code c(j) u bought in
 the style window, EXCLUDING articles u bought in the style window. An article
 u bought only before the style window is not excluded.
-Not limited to the active pool (proposal §2.4).
+
+Active pool (proposal §2.4): with active_pool_only = False (the D-phase runs)
+candidates are not limited to A(a). With active_pool_only = True only articles
+of A(a) can be candidates. The filter is applied to the sibling articles BEFORE
+scores are ranked and cut to `quota`, so a place freed by an out-of-pool sibling
+goes to the next in-pool sibling. P(u, c), M(j) and the exclusion still use all
+articles, so the scores themselves do not change.
 
 Order: default (score DESC, article_idx ASC). At most `quota` rows, never padded.
 """
@@ -83,7 +89,8 @@ def sibling_scores(
     Args:
         preference: P(u, c) from style_preference.
         style_history: The style-window purchase lines (for the exclusion).
-        articles: article_idx -> product_code (the catalog).
+        articles: article_idx -> product_code of the articles that may be
+            candidates (the catalog, or only A(a) with active_pool_only).
         market: M(j) from market_counts; articles not in it have M(j) = 0.
         gamma: Exponent of (1 + M(j)), >= 0.
 
@@ -112,6 +119,18 @@ class SiblingChannel:
         """R3 output: base columns only, default order."""
         return SIB_SPEC
 
+    def candidate_articles(self, inputs: RecallInputs) -> pl.DataFrame:
+        """Articles that may be candidates: the catalog, or only A(a) with active_pool_only.
+
+        Filtering here (before any score is ranked) is the same as scoring every
+        sibling, dropping the out-of-pool ones and then taking the Top-quota.
+        """
+        if not self.config.active_pool_only:
+            return inputs.articles
+        return inputs.articles.join(
+            inputs.active_pool.select(ARTICLE_IDX), on=ARTICLE_IDX, how="semi"
+        )
+
     def generate(self, queries: pl.DataFrame, inputs: RecallInputs) -> pl.DataFrame:
         """Return R3 candidates for `queries` (see RecallChannel.generate)."""
         style_history = history_window(
@@ -133,11 +152,13 @@ class SiblingChannel:
             self.config.market_window_days,
             columns=[ARTICLE_IDX],
         )
+        # P(u, c) always uses the whole catalog: a purchase of an out-of-pool article
+        # still shows which product_code the customer likes.
         preference = style_preference(style_history, inputs.articles, self.config.tau_days)
         scores = sibling_scores(
             preference,
             style_history,
-            inputs.articles,
+            self.candidate_articles(inputs),
             market_counts(market_history),
             self.config.gamma,
         )

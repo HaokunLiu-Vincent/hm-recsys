@@ -1,5 +1,6 @@
 # R3 sibling (same product_code, other colour), proposal §5 R3 (formula S2).
-# Read by hmrec.config.load_sibling_config. Not limited to the active pool (proposal §2.4).
+# Read by hmrec.config.load_sibling_config. Limited to the active pool only when
+# active_pool_only is true (proposal §2.4; decided once at M4 by the pre-registered rule).
 #   P(u, c) = sum of exp(-age_days / tau) over u's purchase lines of product_code c in the style window
 #   M(j)    = site-wide purchase lines of article j in the market window
 #   S(u, j) = P(u, c(j)) * (1 + M(j)) ** gamma
@@ -10,3 +11,8 @@ market_window_days: 7      # window for M(j): [anchor - 7d, anchor)
 tau_days: 30.0             # HPO (on the best gamma): {14, 30, 60}
 gamma: 0.5                 # ablation: {0, 0.5, 1.0}; 0 = style preference only
 quota: 50                  # at most 50, never padded
+# Only articles in the active pool A(a) may be candidates; filtered BEFORE the Top-50 cut
+# (like R4), so freed places go to in-pool siblings. false = the D-phase runs. While false
+# it is not part of the trial id (hmrec.hpo.runner.parsed_config), so recorded R3 trial ids
+# do not change. Switched on only by the M4 rule (configs/m4_union_check.yaml, proposal §2.4).
+active_pool_only: false

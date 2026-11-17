@@ -166,6 +166,10 @@ def parsed_config(channel: str, raw_config: Mapping[str, Any]) -> dict[str, Any]
     if channel not in parsers:
         raise ValueError(f"unknown channel {channel!r}")
     parsed = asdict(parsers[channel](raw_config))
+    if channel == "r3_sibling" and not parsed["active_pool_only"]:
+        # The option did not exist in the D phase and "off" is exactly the old
+        # behaviour, so it is not part of the identity: recorded R3 trial ids stay valid.
+        del parsed["active_pool_only"]
     if channel == "r6_twotower" and parsed["e_update"] == 0:
         # Frozen (no fine-tune): the chain settings cannot change the result, so they
         # are not part of the identity. This keeps the E_base trial ids, recorded
