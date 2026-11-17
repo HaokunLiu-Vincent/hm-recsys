@@ -17,6 +17,7 @@ The model is a fixed checkpoint (config.base_epoch); nothing is trained here.
 """
 
 from dataclasses import dataclass
+from typing import Any
 
 import numpy as np
 import polars as pl
@@ -24,6 +25,8 @@ import torch
 
 from hmrec.config import PreprocessConfig, TwoTowerConfig
 from hmrec.data.metadata import scan_processed_parquet
+from hmrec.logging_utils import get_logger
+from hmrec.memory import log_memory
 from hmrec.paths import ProjectPaths
 from hmrec.recall.base import ARTICLE_IDX, CUSTOMER_IDX, OutputSpec, RecallInputs
 from hmrec.recall.twotower.data import (
@@ -43,6 +46,8 @@ from hmrec.vectors import UserItemVectors
 
 TWOTOWER_SPEC = OutputSpec(channel="twotower")
 
+LOGGER = get_logger("recall.twotower.infer")
+
 
 @dataclass(frozen=True)
 class TwoTowerResources:
@@ -54,6 +59,8 @@ class TwoTowerResources:
         profiles: Profile codes int32 [n_customers, 3].
         n_articles: Real articles (= padding index of histories).
         device: Where everything lives.
+        identity: The code vocabularies the model was trained with (train.model_identity);
+            stored again in every chain checkpoint.
     """
 
     model: TwoTowerModel
@@ -61,6 +68,7 @@ class TwoTowerResources:
     profiles: torch.Tensor
     n_articles: int
     device: torch.device
+    identity: dict[str, Any]
 
 
 def load_twotower_resources(
@@ -99,6 +107,7 @@ def load_twotower_resources(
         profiles=profiles_to_device(profiles, device),
         n_articles=n_articles,
         device=device,
+        identity=expected,
     )
 
 
@@ -159,8 +168,61 @@ def encode_articles(
     return np.concatenate(parts).astype(np.float32, copy=False)
 
 
+def query_vectors(
+    config: TwoTowerConfig,
+    resources: TwoTowerResources,
+    queries: pl.DataFrame,
+    inputs: RecallInputs,
+    chunk_size: int,
+) -> UserItemVectors:
+    """User vectors of the query customers and item vectors of A(a), with the current model."""
+    customers = np.unique(queries[CUSTOMER_IDX].to_numpy()).astype(np.int32)
+    history, history_mask = query_histories(
+        inputs, customers, config.history_length, resources.n_articles
+    )
+    log_memory(LOGGER, f"{inputs.anchor}: histories of {customers.size} customers")
+    user_vectors = encode_customers(resources, customers, history, history_mask, chunk_size)
+    pool = np.unique(inputs.active_pool[ARTICLE_IDX].to_numpy()).astype(np.int32)
+    item_vectors = encode_articles(resources, pool, chunk_size)
+    log_memory(LOGGER, f"{inputs.anchor}: vectors of {customers.size} users, {pool.size} articles")
+    return UserItemVectors(customers, user_vectors, pool, item_vectors)
+
+
+def twotower_candidates(
+    config: TwoTowerConfig,
+    resources: TwoTowerResources,
+    queries: pl.DataFrame,
+    inputs: RecallInputs,
+    chunk_sizes: tuple[int, int],
+) -> pl.DataFrame:
+    """Top-quota of A(a) per query with the CURRENT model (no training here).
+
+    Args:
+        config: R6 settings (history length, quota).
+        resources: Model and tables.
+        queries: One row per query; columns query_id, customer_idx.
+        inputs: The fold.
+        chunk_sizes: (query chunk size, pair chunk size) from configs/base.yaml.
+    """
+    if queries.height == 0 or inputs.active_pool.height == 0:
+        return TWOTOWER_SPEC.schema.to_frame()
+    query_chunk_size, pair_chunk_size = chunk_sizes
+    vectors = query_vectors(config, resources, queries, inputs, query_chunk_size)
+    candidates = candidates_from_vectors(
+        queries,
+        vectors,
+        inputs.active_pool,
+        config.quota,
+        query_chunk_size,
+        pair_chunk_size,
+        TWOTOWER_SPEC,
+    )
+    log_memory(LOGGER, f"{inputs.anchor}: {candidates.height} candidates")
+    return candidates
+
+
 class TwoTowerChannel:
-    """R6 recall channel, see the module docstring."""
+    """R6 recall channel with a fixed checkpoint ("frozen"), see the module docstring."""
 
     def __init__(
         self,
@@ -172,8 +234,7 @@ class TwoTowerChannel:
         """Store the config, the loaded model and the chunk sizes (configs/base.yaml)."""
         self.config = config
         self.resources = resources
-        self.query_chunk_size = query_chunk_size
-        self.pair_chunk_size = pair_chunk_size
+        self.chunk_sizes = (query_chunk_size, pair_chunk_size)
 
     @property
     def output_spec(self) -> OutputSpec:
@@ -182,30 +243,8 @@ class TwoTowerChannel:
 
     def vectors(self, queries: pl.DataFrame, inputs: RecallInputs) -> UserItemVectors:
         """User vectors of the query customers and item vectors of A(a)."""
-        customers = np.unique(queries[CUSTOMER_IDX].to_numpy()).astype(np.int32)
-        history, history_mask = query_histories(
-            inputs, customers, self.config.history_length, self.resources.n_articles
-        )
-        pool = np.unique(inputs.active_pool[ARTICLE_IDX].to_numpy()).astype(np.int32)
-        return UserItemVectors(
-            user_customer_idx=customers,
-            user_vectors=encode_customers(
-                self.resources, customers, history, history_mask, self.query_chunk_size
-            ),
-            item_article_idx=pool,
-            item_vectors=encode_articles(self.resources, pool, self.query_chunk_size),
-        )
+        return query_vectors(self.config, self.resources, queries, inputs, self.chunk_sizes[0])
 
     def generate(self, queries: pl.DataFrame, inputs: RecallInputs) -> pl.DataFrame:
         """R6 candidates for `queries` (Top-quota of A(a) per query)."""
-        if queries.height == 0 or inputs.active_pool.height == 0:
-            return TWOTOWER_SPEC.schema.to_frame()
-        return candidates_from_vectors(
-            queries,
-            self.vectors(queries, inputs),
-            inputs.active_pool,
-            self.config.quota,
-            self.query_chunk_size,
-            self.pair_chunk_size,
-            TWOTOWER_SPEC,
-        )
+        return twotower_candidates(self.config, self.resources, queries, inputs, self.chunk_sizes)

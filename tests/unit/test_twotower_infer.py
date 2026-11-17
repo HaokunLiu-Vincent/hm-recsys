@@ -68,6 +68,7 @@ def _resources() -> TwoTowerResources:
         profiles=profiles_to_device(profiles, CPU),
         n_articles=TINY_N_ARTICLES,
         device=CPU,
+        identity={},
     )
 
 

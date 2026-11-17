@@ -1084,6 +1084,21 @@ class TwoTowerTrainingConfig:
 
 
 @dataclass(frozen=True)
+class TwoTowerChainConfig:
+    """Fixed settings of the weekly training chain (proposal §6.4).
+
+    Attributes:
+        week_days: Length of one fine-tune week (= a fold's label week, 7 days):
+            the new data of the fold with anchor a are purchase days [a, a + week_days).
+        replay_window_days: Replay rows come from purchase days [a - this, a)
+            (the 4 weeks before the week).
+    """
+
+    week_days: int
+    replay_window_days: int
+
+
+@dataclass(frozen=True)
 class TwoTowerConfig:
     """Settings from configs/recall/r6_twotower.yaml (proposal §5 R6, §6).
 
@@ -1093,6 +1108,12 @@ class TwoTowerConfig:
         base_epoch: Which base checkpoint (epoch) the channel predicts with;
             the D-phase step "base_epoch" selects it (E_base, §6.3).
         base_window: Training samples of the base model (§6.2).
+        e_update: Fine-tune epochs per week in the training chain (§6.4); 0 =
+            "frozen": the base checkpoint predicts every week with no update.
+        replay: Share of each fine-tune set drawn from the replay window
+            (0.5 -> as many old rows as new rows, 1 : 1); 0 = new data only.
+        chain_seed: Seed of the fine-tune shuffles and the replay draws.
+        chain: Fixed chain settings.
         model: Layer sizes.
         training: Optimiser, loss and device settings.
         benchmark: The pre-training speed benchmark (§1.4).
@@ -1102,6 +1123,10 @@ class TwoTowerConfig:
     quota: int
     base_epoch: int
     base_window: TrainingWindow
+    e_update: int
+    replay: float
+    chain_seed: int
+    chain: TwoTowerChainConfig
     model: TwoTowerModelConfig
     training: TwoTowerTrainingConfig
     benchmark: TwoTowerBenchmarkConfig
@@ -1232,10 +1257,35 @@ TWOTOWER_KEYS = {
     "quota",
     "base_epoch",
     "base_window",
+    "e_update",
+    "replay",
+    "chain_seed",
+    "chain",
     "model",
     "training",
     "benchmark",
 }
+
+
+def _parse_twotower_chain(raw: Mapping[str, Any]) -> TwoTowerChainConfig:
+    """Parse the fixed chain section; both lengths must be positive."""
+    where = "r6_twotower.chain"
+    check_keys(raw, {"week_days", "replay_window_days"}, where)
+    config = TwoTowerChainConfig(
+        week_days=get_int(raw, "week_days", where),
+        replay_window_days=get_int(raw, "replay_window_days", where),
+    )
+    require_positive(config.week_days, f"{where}.week_days")
+    require_positive(config.replay_window_days, f"{where}.replay_window_days")
+    return config
+
+
+def _check_twotower_chain_values(config: TwoTowerConfig) -> None:
+    """e_update >= 0 and replay in [0, 1) (replay 1 would leave no new data)."""
+    if config.e_update < 0:
+        raise ValueError(f"r6_twotower.e_update must be >= 0, got {config.e_update}")
+    if not 0 <= config.replay < 1:
+        raise ValueError(f"r6_twotower.replay must be in [0, 1), got {config.replay}")
 
 
 def parse_twotower_config(raw: Mapping[str, Any]) -> TwoTowerConfig:
@@ -1256,6 +1306,10 @@ def parse_twotower_config(raw: Mapping[str, Any]) -> TwoTowerConfig:
             end_anchor=get_date(raw_window, "end_anchor", f"{where}.base_window"),
             window_days=get_int(raw_window, "window_days", f"{where}.base_window"),
         ),
+        e_update=get_int(raw, "e_update", where),
+        replay=get_float(raw, "replay", where),
+        chain_seed=get_int(raw, "chain_seed", where),
+        chain=_parse_twotower_chain(get_mapping(raw, "chain", where)),
         model=_parse_twotower_model(get_mapping(raw, "model", where)),
         training=_parse_twotower_training(get_mapping(raw, "training", where)),
         benchmark=_parse_twotower_benchmark(get_mapping(raw, "benchmark", where)),
@@ -1263,6 +1317,7 @@ def parse_twotower_config(raw: Mapping[str, Any]) -> TwoTowerConfig:
     for key in ("history_length", "quota", "base_epoch"):
         require_positive(getattr(config, key), f"{where}.{key}")
     require_positive(config.base_window.window_days, f"{where}.base_window.window_days")
+    _check_twotower_chain_values(config)
     if config.base_epoch > config.training.epochs:
         raise ValueError(
             f"{where}.base_epoch={config.base_epoch} is larger than training.epochs="

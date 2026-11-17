@@ -62,6 +62,12 @@ def test_build_paths_derives_everything_from_roots(tmp_path: Path) -> None:
     assert paths.twotower_checkpoint_file(3) == Path(
         "/abs/artifacts/models/twotower/base/epoch_3.pt"
     )
+    assert paths.twotower_chain_checkpoint_file("abc", "D4") == Path(
+        "/abs/artifacts/models/twotower/chain/abc/D4.pt"
+    )
+    assert paths.d_phase_seeds_file("r6_twotower") == (
+        tmp_path / "results" / "d_phase_steps" / "r6_twotower_seeds.csv"
+    )
 
 
 def test_m0_outputs_live_in_data_processed(tmp_path: Path) -> None:

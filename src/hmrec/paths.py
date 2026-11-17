@@ -274,6 +274,10 @@ class ProjectPaths:
         """artifacts/models/twotower/base/epoch_{epoch}.pt: base model after `epoch` epochs."""
         return self.model_dir("twotower", "base") / f"epoch_{epoch}.pt"
 
+    def twotower_chain_checkpoint_file(self, trial_id: str, fold: str) -> Path:
+        """artifacts/models/twotower/chain/{trial_id}/{fold}.pt: model after fine-tuning on fold."""
+        return self.artifacts_root / "models" / "twotower" / "chain" / trial_id / f"{fold}.pt"
+
     def hpo_trial_dir(self, phase: str, channel: str, trial_id: str) -> Path:
         """artifacts/hpo/{phase}/{channel}/{trial_id}/: per-trial side files (pool flags)."""
         return self.artifacts_root / "hpo" / phase / channel / trial_id
@@ -302,6 +306,10 @@ class ProjectPaths:
     def union_precheck_results_file(self) -> Path:
         """results/d_phase_union_precheck.csv: union recall table of the R1-R5 pre-check."""
         return self.results_root / "d_phase_union_precheck.csv"
+
+    def d_phase_seeds_file(self, channel: str) -> Path:
+        """results/d_phase_steps/{channel}_seeds.csv: extra-seed runs (reported only)."""
+        return self.results_root / "d_phase_steps" / f"{channel}_seeds.csv"
 
     @property
     def v_phase_results_file(self) -> Path:

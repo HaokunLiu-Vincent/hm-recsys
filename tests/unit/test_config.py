@@ -437,3 +437,14 @@ def test_twotower_config_rejects_typo_and_bad_numbers() -> None:
     bad_device["training"]["device"] = "cuda"
     with pytest.raises(ValueError, match="device"):
         parse_twotower_config(bad_device)
+    with pytest.raises(ValueError, match="replay must be in"):
+        parse_twotower_config({**VALID_TWOTOWER, "replay": 1.0})
+    with pytest.raises(ValueError, match="e_update must be"):
+        parse_twotower_config({**VALID_TWOTOWER, "e_update": -1})
+
+
+def test_repo_twotower_chain_defaults() -> None:
+    config = load_twotower_config(REPO_CONFIGS / "recall" / "r6_twotower.yaml")
+    # Default = frozen (no update); the chain step overrides e_update / replay (§6.4).
+    assert (config.e_update, config.replay, config.chain_seed) == (0, 0.0, 42)
+    assert (config.chain.week_days, config.chain.replay_window_days) == (7, 28)

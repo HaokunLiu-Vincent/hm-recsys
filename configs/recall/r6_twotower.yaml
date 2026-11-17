@@ -9,6 +9,17 @@ history_length: 20
 quota: 100                # Top-100 per query (§5 R6, Recall@100)
 base_epoch: 1             # which base checkpoint the channel uses; D-phase step selects 1..6
 
+# Weekly training chain (proposal §6.4). e_update = 0 is "frozen": the base
+# checkpoint predicts D1-D4 with no update. With e_update = 0, replay / chain_seed /
+# chain have no effect, so they are left out of the trial id
+# (hmrec.hpo.runner.parsed_config) and the E_base trials keep their ids.
+e_update: 0               # fine-tune epochs per week; D-phase step `update` selects it
+replay: 0.0               # share of the fine-tune set drawn from the 4 weeks before the week
+chain_seed: 42            # fine-tune shuffles and replay draws (robustness seeds change only this)
+chain:
+  week_days: 7            # new data of the fold with anchor a: purchase days [a, a + 7)
+  replay_window_days: 28  # replay rows: purchase days [a - 28, a)
+
 base_window:
   # Base-model training samples (proposal §6.2): purchase days
   # [end_anchor - window_days, end_anchor). end_anchor is the D1 anchor, so the

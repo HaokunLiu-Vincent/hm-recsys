@@ -16,7 +16,7 @@
 import json
 import time
 from collections.abc import Callable, Iterator
-from dataclasses import asdict, dataclass
+from dataclasses import asdict, dataclass, replace
 from pathlib import Path
 from typing import Any
 
@@ -31,10 +31,12 @@ from hmrec.recall.twotower.data import (
     CategoryCodes,
     DeviceItemFeatures,
     DeviceSamples,
+    TrainingArrays,
     get_batch,
+    samples_to_device,
     synchronize,
 )
-from hmrec.recall.twotower.loss import multi_positive_logq_loss
+from hmrec.recall.twotower.loss import article_log_q, multi_positive_logq_loss
 from hmrec.recall.twotower.model import TwoTowerModel
 
 LOGGER = get_logger("recall.twotower.train")
@@ -58,6 +60,21 @@ class TrainingSplit:
     n_alarm_users: int
 
 
+def choose_alarm_users(customer_idx: np.ndarray, share: float, seed: int) -> np.ndarray:
+    """The alarm users: round(share x distinct users) customers drawn with `seed`.
+
+    The training chain calls this again on the BASE arrays, so it gets exactly
+    the same users as base training and keeps them out of every fine-tune.
+
+    Returns:
+        Sorted int array of customer_idx.
+    """
+    users = np.unique(customer_idx)
+    n_alarm_users = round(share * users.size)
+    rng = np.random.default_rng(seed)
+    return np.sort(rng.choice(users, size=n_alarm_users, replace=False))
+
+
 def split_alarm_users(customer_idx: np.ndarray, share: float, seed: int) -> TrainingSplit:
     """Keep round(share x distinct users) users, drawn with `seed`, out of training.
 
@@ -66,10 +83,8 @@ def split_alarm_users(customer_idx: np.ndarray, share: float, seed: int) -> Trai
         share: Share of distinct users to keep out (0.01).
         seed: Seed of the draw.
     """
-    users = np.unique(customer_idx)
-    n_alarm_users = round(share * users.size)
-    rng = np.random.default_rng(seed)
-    alarm_users = rng.choice(users, size=n_alarm_users, replace=False)
+    alarm_users = choose_alarm_users(customer_idx, share, seed)
+    n_alarm_users = alarm_users.size
     is_alarm = np.isin(customer_idx, alarm_users)
     return TrainingSplit(
         train_indices=np.flatnonzero(~is_alarm).astype(np.int64),
@@ -308,3 +323,161 @@ def check_model_identity(stored: dict[str, Any], current: dict[str, Any], path: 
     for key, value in current.items():
         if stored.get(key) != value:
             raise ValueError(f"{path}: {key} differs from the current data; retrain the model")
+
+
+# ---------------------------------------------------------------- weekly fine-tune (§6.4)
+
+
+@dataclass(frozen=True)
+class FineTuneArrays:
+    """The arrays of one weekly fine-tune.
+
+    Attributes:
+        train: New-week rows + replay rows, alarm users excluded.
+        alarm: The alarm users' new-week rows (loss only, never trained on).
+        n_new: New-week rows in `train`.
+        n_replay: Replay rows in `train`.
+    """
+
+    train: TrainingArrays
+    alarm: TrainingArrays
+    n_new: int
+    n_replay: int
+
+
+@dataclass(frozen=True)
+class DeviceTables:
+    """Tables every step reads, on the training device.
+
+    Attributes:
+        profiles: Profile codes int32 [n_customers, 3].
+        features: Item feature table (padding row last).
+    """
+
+    profiles: torch.Tensor
+    features: DeviceItemFeatures
+
+
+@dataclass(frozen=True)
+class FineTuneSchedule:
+    """How long and with which randomness one week is fine-tuned.
+
+    Attributes:
+        epochs: E_update.
+        seed: chain_seed.
+        week_day: t_dat_day of the week's anchor (makes every week's shuffle different).
+    """
+
+    epochs: int
+    seed: int
+    week_day: int
+
+
+@dataclass(frozen=True)
+class FineTuneResult:
+    """Numbers of one weekly fine-tune.
+
+    Attributes:
+        epochs: E_update.
+        steps: Optimizer steps in total.
+        n_train_samples: Fine-tune set size (new + replay, alarm users excluded).
+        n_alarm_samples: Alarm users' samples of the new week (loss only).
+        seconds: Wall time of the update steps.
+        mean_train_loss: Mean loss of the last epoch's steps.
+        alarm_loss: Mean loss of the alarm users' new-week samples after the update.
+        peak_rss_gb: Sampled peak RSS during the fine-tune (a lower bound).
+    """
+
+    epochs: int
+    steps: int
+    n_train_samples: int
+    n_alarm_samples: int
+    seconds: float
+    mean_train_loss: float
+    alarm_loss: float
+    peak_rss_gb: float
+
+
+def fine_tune_order(n_samples: int, seed: int, week_day: int, epoch: int) -> np.ndarray:
+    """A random permutation of 0..n-1 for one fine-tune epoch, seeded by (seed, week, epoch)."""
+    rng = np.random.default_rng([seed, week_day, epoch])
+    return rng.permutation(n_samples).astype(np.int64)
+
+
+def _alarm_loss(
+    model: TwoTowerModel,
+    alarm_arrays: TrainingArrays,
+    context: TrainingContext,
+    batch_size: int,
+) -> float:
+    """Mean loss of the alarm samples (no update), with the fine-tune set's log Q."""
+    if alarm_arrays.n_samples == 0:
+        return 0.0
+    alarm_context = replace(context, samples=samples_to_device(alarm_arrays, context.device))
+    indices = np.arange(alarm_arrays.n_samples, dtype=np.int64)
+    return mean_loss(model, indices, batch_size, alarm_context)
+
+
+def fine_tune(
+    model: TwoTowerModel,
+    sets: FineTuneArrays,
+    tables: DeviceTables,
+    training: TwoTowerTrainingConfig,
+    schedule: FineTuneSchedule,
+    memory: MemoryConfig,
+) -> FineTuneResult:
+    """One weekly fine-tune of `model` in place (proposal §6.4).
+
+    A NEW Adam optimizer (lr = fine_tune_learning_rate, other settings as in
+    base training) is created on every call, so no optimizer state carries over
+    from the previous week. log Q is counted on this fine-tune set only.
+
+    Args:
+        model: The current model (changed in place).
+        sets: The week's fine-tune set and alarm samples.
+        tables: Profile codes and item features on the training device.
+        training: Batch size, temperature, Adam settings, fine-tune lr.
+        schedule: Epochs (E_update), seed and the week's anchor day (for the shuffles).
+        memory: Memory limit and sampling interval.
+    """
+    device = tables.features.image.device
+    n_rows = int(tables.features.image.shape[0])  # n_articles + 1
+    log_q = article_log_q(sets.train.article_idx, n_rows)
+    context = TrainingContext(
+        samples=samples_to_device(sets.train, device),
+        profiles=tables.profiles,
+        features=tables.features,
+        log_q=torch.from_numpy(log_q).to(device),
+        temperature=training.temperature,
+        device=device,
+    )
+    optimizer = make_optimizer(model, training, training.fine_tune_learning_rate)
+    model.train()
+    with MemoryTracker(
+        f"fine-tune week {schedule.week_day}",
+        LOGGER,
+        limit_gb=memory.limit_gb,
+        sample_interval_seconds=memory.sample_interval_seconds,
+    ) as tracker:
+        started = time.perf_counter()
+        steps, train_loss = 0, 0.0
+        for epoch in range(1, schedule.epochs + 1):
+            order = fine_tune_order(sets.train.n_samples, schedule.seed, schedule.week_day, epoch)
+            epoch_steps, train_loss = train_epoch(
+                model, optimizer, order, training.batch_size, context, training.log_every_steps
+            )
+            steps += epoch_steps
+        synchronize(device)
+        seconds = time.perf_counter() - started
+        alarm_loss = _alarm_loss(model, sets.alarm, context, training.batch_size)
+    model.eval()
+    return FineTuneResult(
+        epochs=schedule.epochs,
+        steps=steps,
+        n_train_samples=sets.train.n_samples,
+        n_alarm_samples=sets.alarm.n_samples,
+        seconds=seconds,
+        mean_train_loss=train_loss,
+        alarm_loss=alarm_loss,
+        peak_rss_gb=bytes_to_gb(tracker.peak_rss_bytes),
+    )

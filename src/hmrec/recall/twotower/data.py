@@ -293,14 +293,16 @@ class TrainingArrays:
         return int(self.article_idx.shape[0])
 
 
-def build_training_arrays(
-    window_lines: pl.DataFrame, all_lines: pl.DataFrame, history_length: int, n_articles: int
+def arrays_from_samples(
+    samples: pl.DataFrame, events: pl.DataFrame, history_length: int, n_articles: int
 ) -> TrainingArrays:
-    """Samples of the window plus their user histories.
+    """Attach user histories to samples.
 
     Args:
-        window_lines: Purchase lines of the sample window (load_window_lines).
-        all_lines: Every purchase line before the window's end (load_all_lines_before).
+        samples: Output of build_samples (sorted, with group_id).
+        events: Daily purchases (daily_purchases) holding every purchase of the
+            samples' customers before their sample days (other customers may be
+            missing: a history only reads its own customer).
         history_length: L.
         n_articles: Number of real articles; also the padding index of the history.
 
@@ -308,11 +310,10 @@ def build_training_arrays(
         The arrays; the history is computed once per group (customer, day) and
         copied to each sample of the group, since it depends only on the group.
     """
-    samples = build_samples(window_lines)
     _check_below_padding("samples", samples[ARTICLE_IDX].to_numpy(), n_articles)
     groups = samples.unique(subset=GROUP_ID, keep="first", maintain_order=True)
     group_history, group_mask = build_histories(
-        daily_purchases(all_lines),
+        events,
         groups[CUSTOMER_IDX].to_numpy(),
         groups[TRANSACTION_DAY].to_numpy(),
         history_length,
@@ -329,6 +330,22 @@ def build_training_arrays(
     )
 
 
+def build_training_arrays(
+    window_lines: pl.DataFrame, all_lines: pl.DataFrame, history_length: int, n_articles: int
+) -> TrainingArrays:
+    """Samples of the window plus their user histories.
+
+    Args:
+        window_lines: Purchase lines of the sample window (load_window_lines).
+        all_lines: Every purchase line before the window's end (load_all_lines_before).
+        history_length: L.
+        n_articles: Number of real articles; also the padding index of the history.
+    """
+    return arrays_from_samples(
+        build_samples(window_lines), daily_purchases(all_lines), history_length, n_articles
+    )
+
+
 def write_training_arrays(arrays: TrainingArrays, directory: Path, metadata: dict) -> None:
     """Save every array as {name}.npy plus metadata.json; never into a non-empty directory.
 
@@ -342,6 +359,14 @@ def write_training_arrays(arrays: TrainingArrays, directory: Path, metadata: dic
         np.save(directory / f"{field.name}.npy", getattr(arrays, field.name))
     with (directory / "metadata.json").open("w") as handle:
         json.dump(metadata, handle, indent=2, sort_keys=True, default=str)
+
+
+def read_training_array(directory: Path, name: str) -> np.ndarray:
+    """Load ONE array written by write_training_arrays (e.g. "customer_idx")."""
+    names = [field.name for field in fields(TrainingArrays)]
+    if name not in names:
+        raise ValueError(f"{name!r} is not a training array; expected one of {names}")
+    return np.load(directory / f"{name}.npy")
 
 
 def read_training_arrays(directory: Path) -> TrainingArrays:
