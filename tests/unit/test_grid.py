@@ -27,14 +27,16 @@ def _step(channel: str, name: str):
 
 
 def test_configuration_counts_match_proposal() -> None:
-    # proposal §5: R1 8, R2 5, R3 7, R4 9, R5 9 configurations (default included).
-    # Counted with every step starting from the repo default (no winner changes).
+    # proposal §5: R1 8, R2 5, R3 7, R4 9, R5 11 configurations (default included).
+    # R5: 2 + 4 (alpha_conf 10/40/60/80) + 2 + 1 + 2 = 11, after alpha_conf was widened
+    # (docs/decisions.md 2026-11-17). Counted with every step starting from the repo
+    # default (no winner changes).
     expected = {
         "r1_popularity": 8,
         "r2_repurchase": 5,
         "r3_sibling": 7,
         "r4_itemcf": 9,
-        "r5_wals": 9,
+        "r5_wals": 11,
     }
     for channel, count in expected.items():
         default = _default(channel)
@@ -129,9 +131,10 @@ def test_stop_at_boundary_flags_and_edges() -> None:
         for step in steps
         if step.stop_at_boundary
     }
+    # R5 alpha_conf (already widened once) and factors (256 is never tried) are
+    # deliberately NOT flagged (docs/decisions.md 2026-11-17).
     assert flagged == {
         ("r4_itemcf", "alpha"),
-        ("r5_wals", "alpha_conf"),
         ("r5_wals", "regularization"),
     }
     alpha = _step("r4_itemcf", "alpha")
@@ -152,3 +155,13 @@ def test_stop_at_boundary_needs_one_numeric_key() -> None:
         parse_step(raw, "t")
     with pytest.raises(ValueError, match="must be true or false"):
         parse_step({**raw, "stop_at_boundary": "yes", "candidates": [{"a": 1}, {"a": 2}]}, "t")
+
+
+def test_r5_alpha_conf_priority_after_widening() -> None:
+    # From the default 20: distances 10 -> 10, 40 -> 20, 60 -> 40, 80 -> 60, so the
+    # priority is 10 < 40 < 60 < 80 (20 itself is the default, not a candidate).
+    step = _step("r5_wals", "alpha_conf")
+    configs = ordered_candidate_configs(step, _default("r5_wals"))
+    assert [config["alpha_conf"] for config in configs] == [10.0, 40.0, 60.0, 80.0]
+    assert step.stop_at_boundary is False
+    assert _step("r5_wals", "factors").stop_at_boundary is False

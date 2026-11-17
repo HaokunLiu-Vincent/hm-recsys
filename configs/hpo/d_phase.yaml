@@ -22,6 +22,10 @@
 #               or largest value of the step, the channel stops after this step and a
 #               human decides whether to widen the range; the grid is never extended
 #               automatically (R4, R5; docs/decisions.md 2026-11-17).
+#               Known limits: it fires only when the step SWITCHES to an edge value
+#               (a default kept at an edge does not trigger it), and it cannot be set
+#               on multi-parameter steps such as R4 seed_window_x_decay. Those cases
+#               are checked by hand (docs/decisions.md 2026-11-17, after the R4 run).
 
 report:
   # Diagnostics only, never used for selection (proposal §4.1): query-weighted
@@ -119,7 +123,7 @@ channels:
         - {seed_window_days: 365, seed_decay: false}
         - {seed_window_days: 365, seed_decay: true}
 
-  r5_wals:                       # proposal §5 R5: 2 + 2 + 2 + 1 + 2 = 9 configurations
+  r5_wals:                       # proposal §5 R5: 2 + 4 + 2 + 1 + 2 = 11 configurations
     - name: variant
       kind: select
       order: listed
@@ -129,11 +133,16 @@ channels:
     - name: alpha_conf
       kind: select
       order: nearest_to_current
-      stop_at_boundary: true
+      # Widened once, AFTER seeing the D results (40 won at the old edge {10, 20, 40}):
+      # 60 and 80 added. Widened at most once, so 80 is accepted even if it wins
+      # (docs/decisions.md 2026-11-17, R5 alpha_conf).
+      stop_at_boundary: false
       candidates:
         - {alpha_conf: 10.0}
         - {alpha_conf: 20.0}
         - {alpha_conf: 40.0}
+        - {alpha_conf: 60.0}
+        - {alpha_conf: 80.0}
     - name: regularization
       kind: select
       order: nearest_to_current
@@ -145,6 +154,9 @@ channels:
     - name: factors
       kind: select
       order: listed
+      # Not a boundary stop: if 128 passes it is accepted; 256 is never tried, because
+      # it would double memory and scoring time again (docs/decisions.md 2026-11-17).
+      stop_at_boundary: false
       candidates:
         - {factors: 64}          # cheaper
         - {factors: 128}
