@@ -410,3 +410,19 @@ def test_git_state_code_or_config_change_is_dirty(
     # A change under results/ at the same time must not hide the code change.
     (repo / "results" / "d_phase.csv").write_text("new trial\n")
     assert git_state(repo, repo / "results")[1] is True
+
+
+def test_r6_chain_settings_enter_the_trial_id_only_when_fine_tuning() -> None:
+    raw = load_yaml(REPO / "configs" / "recall" / "r6_twotower.yaml")
+    frozen = {**raw, "base_epoch": 4}
+    # Frozen (e_update 0): seed / replay cannot change the result -> same id, and it is
+    # the id recorded for E_base epoch 4 before the chain settings existed.
+    assert make_trial_id("r6_twotower", frozen) == "ab2952a3cd9b"
+    assert (
+        make_trial_id("r6_twotower", {**frozen, "chain_seed": 7, "replay": 0.5}) == "ab2952a3cd9b"
+    )
+    chain = {**frozen, "e_update": 1}
+    assert make_trial_id("r6_twotower", chain) != "ab2952a3cd9b"
+    assert make_trial_id("r6_twotower", chain) != make_trial_id(
+        "r6_twotower", {**chain, "chain_seed": 43}
+    )

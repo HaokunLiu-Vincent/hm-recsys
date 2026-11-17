@@ -184,3 +184,27 @@ channels:
         - {base_epoch: 4}
         - {base_epoch: 5}
         - {base_epoch: 6}
+    # Weekly training chain (proposal §6.4), from the E_base winner. The default is
+    # "frozen" (e_update 0: the base checkpoint predicts D1-D4 with no update; its
+    # trial is the E_base winner, reused). Every configuration scores D1 with the
+    # same base model, so "better on >= 3 of 4 weeks" in effect needs D2, D3 and D4
+    # all better. Priority: fewer epochs and no replay first (cheaper / simpler).
+    # Decided after seeing the E_base results, before any chain run
+    # (docs/decisions.md 2026-11-17).
+    - name: update
+      kind: select
+      order: listed
+      candidates:
+        - {e_update: 1, replay: 0.0}
+        - {e_update: 1, replay: 0.5}
+        - {e_update: 2, replay: 0.0}
+        - {e_update: 2, replay: 0.5}
+
+# Extra seeds, reported only (never used to select): the top 2 configurations of
+# a step by the §4.2 rule each run again with these seeds (hmrec.hpo.robustness).
+robustness:
+  r6_twotower:
+    step: update
+    top_k: 2
+    seed_key: chain_seed     # changes only the fine-tune shuffles and the replay draws
+    seeds: [43, 44]

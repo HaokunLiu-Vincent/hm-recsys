@@ -16,7 +16,7 @@ live in hmrec.hpo.selection; running trials lives in hmrec.hpo.runner.
 
 import copy
 from collections.abc import Mapping
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
 
@@ -121,6 +121,23 @@ def parse_step(raw: Any, where: str) -> Step:
 
 
 @dataclass(frozen=True)
+class Robustness:
+    """Extra seeds for the best configurations of one step (reported only, never selects).
+
+    Attributes:
+        step: The step whose candidates are ranked.
+        top_k: How many of them get extra seeds.
+        seed_key: The config key that holds the seed (e.g. "chain_seed").
+        seeds: Extra seed values, run in this order.
+    """
+
+    step: str
+    top_k: int
+    seed_key: str
+    seeds: tuple[int, ...]
+
+
+@dataclass(frozen=True)
 class PhaseGrid:
     """The whole configs/hpo/d_phase.yaml.
 
@@ -128,11 +145,13 @@ class PhaseGrid:
         fold_groups: Group name -> fold names; diagnostic group scores (proposal §4.1).
         extra_metrics: Metrics reported next to the selection metric, e.g. "ndcg@12".
         channels: Channel name (e.g. "r1_popularity") -> its steps in run order.
+        robustness: Channel name -> extra-seed runs after its steps (optional section).
     """
 
     fold_groups: dict[str, tuple[str, ...]]
     extra_metrics: tuple[str, ...]
     channels: dict[str, tuple[Step, ...]]
+    robustness: dict[str, Robustness] = field(default_factory=dict)
 
 
 def _parse_report(raw: Any) -> tuple[dict[str, tuple[str, ...]], tuple[str, ...]]:
@@ -143,10 +162,36 @@ def _parse_report(raw: Any) -> tuple[dict[str, tuple[str, ...]], tuple[str, ...]
     return fold_groups, tuple(str(metric) for metric in raw["extra_metrics"])
 
 
+def _parse_robustness(raw: Any, channels: Mapping[str, tuple[Step, ...]]) -> dict[str, Robustness]:
+    """The optional `robustness` section: {channel: {step, top_k, seed_key, seeds}}."""
+    if raw is None:
+        return {}
+    if not isinstance(raw, Mapping):
+        raise ValueError(f"robustness must be a mapping, got {raw!r}")
+    result: dict[str, Robustness] = {}
+    for channel, entry in raw.items():
+        where = f"robustness.{channel}"
+        if channel not in channels:
+            raise ValueError(f"{where}: unknown channel")
+        if not isinstance(entry, Mapping) or set(entry) != {"step", "top_k", "seed_key", "seeds"}:
+            raise ValueError(f"{where} needs exactly the keys step, top_k, seed_key, seeds")
+        if entry["step"] not in [step.name for step in channels[channel]]:
+            raise ValueError(f"{where}.step {entry['step']!r} is not a step of {channel}")
+        seeds = tuple(entry["seeds"])
+        if not seeds or len(set(seeds)) != len(seeds) or entry["top_k"] < 1:
+            raise ValueError(f"{where}: seeds must be distinct and non-empty, top_k >= 1")
+        result[str(channel)] = Robustness(
+            str(entry["step"]), int(entry["top_k"]), str(entry["seed_key"]), seeds
+        )
+    return result
+
+
 def parse_phase_grid(raw: Mapping[str, Any]) -> PhaseGrid:
-    """Build a PhaseGrid from the parsed YAML (top-level keys: report, channels)."""
-    if set(raw) != {"report", "channels"}:
-        raise ValueError(f"top-level keys must be report and channels, got {sorted(raw)}")
+    """Build a PhaseGrid from the parsed YAML (keys: report, channels, optional robustness)."""
+    if not {"report", "channels"} <= set(raw) <= {"report", "channels", "robustness"}:
+        raise ValueError(
+            f"top-level keys must be report, channels (and robustness), got {sorted(raw)}"
+        )
     fold_groups, extra_metrics = _parse_report(raw["report"])
     channels: dict[str, tuple[Step, ...]] = {}
     for channel, raw_steps in raw["channels"].items():
@@ -160,7 +205,8 @@ def parse_phase_grid(raw: Mapping[str, Any]) -> PhaseGrid:
         if len(set(names)) != len(names):
             raise ValueError(f"{channel}: step names repeat: {names}")
         channels[str(channel)] = steps
-    return PhaseGrid(fold_groups, extra_metrics, channels)
+    robustness = _parse_robustness(raw.get("robustness"), channels)
+    return PhaseGrid(fold_groups, extra_metrics, channels, robustness)
 
 
 def load_phase_grid(path: Path) -> PhaseGrid:

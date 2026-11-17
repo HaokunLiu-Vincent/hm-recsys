@@ -1,5 +1,6 @@
 """Tests for the D-phase grid: reading, candidate priority order, requires."""
 
+import copy
 from pathlib import Path
 
 import pytest
@@ -10,6 +11,7 @@ from hmrec.hpo.grid import (
     is_on_boundary,
     load_phase_grid,
     ordered_candidate_configs,
+    parse_phase_grid,
     parse_step,
     step_applies,
 )
@@ -37,7 +39,8 @@ def test_configuration_counts_match_proposal() -> None:
         "r3_sibling": 7,
         "r4_itemcf": 9,
         "r5_wals": 11,
-        "r6_twotower": 6,  # E_base: checkpoints 1..6 (proposal §6.3)
+        # E_base: checkpoints 1..6 (§6.3), then 4 update configs (§6.4): 1 + 5 + 4.
+        "r6_twotower": 10,
     }
     for channel, count in expected.items():
         default = _default(channel)
@@ -167,3 +170,30 @@ def test_r5_alpha_conf_priority_after_widening() -> None:
     assert [config["alpha_conf"] for config in configs] == [10.0, 40.0, 60.0, 80.0]
     assert step.stop_at_boundary is False
     assert _step("r5_wals", "factors").stop_at_boundary is False
+
+
+def test_r6_update_step_order_and_robustness() -> None:
+    update = _step("r6_twotower", "update")
+    assert [dict(c) for c in update.candidates] == [
+        {"e_update": 1, "replay": 0.0},
+        {"e_update": 1, "replay": 0.5},
+        {"e_update": 2, "replay": 0.0},
+        {"e_update": 2, "replay": 0.5},
+    ]
+    robustness = GRID.robustness["r6_twotower"]
+    assert (robustness.step, robustness.top_k, robustness.seed_key) == ("update", 2, "chain_seed")
+    assert robustness.seeds == (43, 44)
+
+
+def test_robustness_section_errors() -> None:
+    raw = load_yaml(REPO / "configs" / "hpo" / "d_phase.yaml")
+    bad_step = copy.deepcopy(raw)
+    bad_step["robustness"]["r6_twotower"]["step"] = "nope"
+    with pytest.raises(ValueError, match="is not a step"):
+        parse_phase_grid(bad_step)
+    repeated = copy.deepcopy(raw)
+    repeated["robustness"]["r6_twotower"]["seeds"] = [43, 43]
+    with pytest.raises(ValueError, match="distinct"):
+        parse_phase_grid(repeated)
+    no_section = {key: value for key, value in raw.items() if key != "robustness"}
+    assert parse_phase_grid(no_section).robustness == {}

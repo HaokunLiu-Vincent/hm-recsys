@@ -23,6 +23,7 @@ import time
 from collections.abc import Callable, Mapping, Sequence
 from dataclasses import asdict, dataclass
 from datetime import datetime
+from functools import partial
 from pathlib import Path
 from typing import Any
 
@@ -31,7 +32,6 @@ import polars as pl
 from hmrec.config import (
     BaseConfig,
     SelectionRule,
-    TwoTowerConfig,
     load_preprocess_config,
     parse_itemcf_config,
     parse_popularity_config,
@@ -60,9 +60,14 @@ from hmrec.recall.r2_repurchase import RepurchaseChannel
 from hmrec.recall.r3_sibling import SiblingChannel
 from hmrec.recall.r4_itemcf import ItemCFChannel
 from hmrec.recall.r5_wals import WalsChannel
+from hmrec.recall.twotower.chain import TwoTowerChainChannel
+from hmrec.recall.twotower.data import read_training_array
 from hmrec.recall.twotower.infer import TwoTowerChannel, load_twotower_resources
+from hmrec.recall.twotower.train import choose_alarm_users
 
 ALLOWED_PHASES = ("D", "V")
+# R6 settings that only matter when the model is fine-tuned (e_update > 0).
+TWOTOWER_CHAIN_KEYS = ("e_update", "replay", "chain_seed", "chain")
 IN_ACTIVE_POOL = "in_active_pool"
 POOL_FLAG_CHANNELS = ("r2_repurchase", "r3_sibling")  # channels not limited to A(a) (§2.4)
 
@@ -93,18 +98,45 @@ def build_channel(channel: str, raw_config: Mapping[str, Any], base: BaseConfig)
             chunking.pair_chunk_size,
         )
     if channel == "r6_twotower":
-        return _build_twotower_channel(parse_twotower_config(raw_config), base)
+        return _build_twotower_channel(raw_config, base)
     raise ValueError(f"unknown channel {channel!r}")
 
 
-def _build_twotower_channel(config: TwoTowerConfig, base: BaseConfig) -> TwoTowerChannel:
-    """R6 loads its checkpoint (config.base_epoch), item features and profiles once."""
+def _build_twotower_channel(
+    raw_config: Mapping[str, Any], base: BaseConfig
+) -> TwoTowerChannel | TwoTowerChainChannel:
+    """R6: frozen (e_update = 0) or the weekly training chain (e_update > 0, §6.4).
+
+    Both start from the base checkpoint config.base_epoch. The chain saves its
+    weekly models under artifacts/models/twotower/chain/{trial_id}/ and keeps
+    the base training's alarm users (drawn again from the base arrays) out.
+    """
+    config = parse_twotower_config(raw_config)
     paths = get_paths()
     preprocess = load_preprocess_config(paths.preprocess_config_file)
     resources = load_twotower_resources(paths, preprocess, config)
-    chunking = base.chunking
-    return TwoTowerChannel(
-        config, resources, chunking.dense_score_query_chunk_size, chunking.pair_chunk_size
+    chunk_sizes = (base.chunking.dense_score_query_chunk_size, base.chunking.pair_chunk_size)
+    if config.e_update == 0:
+        return TwoTowerChannel(config, resources, *chunk_sizes)
+    trial_id = make_trial_id("r6_twotower", raw_config)
+    base_customers = read_training_array(paths.twotower_data_dir("base"), "customer_idx")
+    alarm_customers = choose_alarm_users(
+        base_customers, config.training.alarm_user_share, config.training.seed
+    )
+    metadata = {
+        "trial_id": trial_id,
+        "config": asdict(config),
+        "model_identity": resources.identity,
+        "start": f"base epoch {config.base_epoch}",
+    }
+    return TwoTowerChainChannel(
+        config,
+        resources,
+        chunk_sizes,
+        partial(paths.twotower_chain_checkpoint_file, trial_id),
+        alarm_customers,
+        base.memory,
+        metadata,
     )
 
 
@@ -120,7 +152,14 @@ def parsed_config(channel: str, raw_config: Mapping[str, Any]) -> dict[str, Any]
     }
     if channel not in parsers:
         raise ValueError(f"unknown channel {channel!r}")
-    return asdict(parsers[channel](raw_config))
+    parsed = asdict(parsers[channel](raw_config))
+    if channel == "r6_twotower" and parsed["e_update"] == 0:
+        # Frozen (no fine-tune): the chain settings cannot change the result, so they
+        # are not part of the identity. This keeps the E_base trial ids, recorded
+        # before the chain settings existed, valid (docs/decisions.md 2026-11-17).
+        for key in TWOTOWER_CHAIN_KEYS:
+            del parsed[key]
+    return parsed
 
 
 def make_trial_id(channel: str, raw_config: Mapping[str, Any]) -> str:
@@ -306,6 +345,9 @@ def _score_folds(
         for metric in metrics:
             per_query[metric].append(context.evaluator.per_query(candidates, metric))
         numbers, flags = fold_diagnostics(channel, candidates, context)
+        if isinstance(recall_channel, TwoTowerChainChannel):
+            # The chain fine-tunes inside generate(); keep its time / memory per fold.
+            numbers["fine_tune"] = asdict(recall_channel.fine_tune_results[context.fold.name])
         diagnostics[context.fold.name] = numbers
         if flags is not None:
             directory = settings.flags_dir(channel, trial_id)
@@ -374,6 +416,8 @@ class StepReport:
         default: The current default at the start of the step.
         candidates: The step's candidates in priority order.
         decision: The selection outcome (None if skipped).
+        default_config: Raw config of `default`.
+        candidate_configs: Raw configs of `candidates`, same order.
     """
 
     channel: str
@@ -382,6 +426,8 @@ class StepReport:
     default: TrialRecord
     candidates: tuple[TrialRecord, ...]
     decision: StepDecision | None
+    default_config: RawConfig | None = None
+    candidate_configs: tuple[RawConfig, ...] = ()
 
 
 EvaluateFn = Callable[[str, RawConfig], TrialRecord]
@@ -467,7 +513,18 @@ def run_channel(
         candidates = [evaluate(step.name, config) for config in configs]
         decision = _decide(step, current, candidates, configs, current_raw, rule)
         decision = _apply_boundary_rule(step, decision, configs, candidates)
-        reports.append(StepReport(channel, step.name, True, current, tuple(candidates), decision))
+        reports.append(
+            StepReport(
+                channel,
+                step.name,
+                True,
+                current,
+                tuple(candidates),
+                decision,
+                dict(current_raw),
+                tuple(configs),
+            )
+        )
         LOGGER.info("%s step %s: %s (%s)", channel, step.name, decision.action, decision.reason)
         if decision.action == STOP:
             break

@@ -5,6 +5,10 @@ requested channel and writes:
     results/d_phase.csv                  one row per trial (appended, resumable)
     results/d_phase_steps/{channel}.csv  every step: all candidates, pass / fail,
                                          per-fold, pooled and group scores, decision
+    results/d_phase_steps/{channel}_seeds.csv
+                                         extra-seed runs of the top candidates of a
+                                         step (only channels with a `robustness`
+                                         entry; reported only, never selects)
     artifacts/hpo/D/{channel}/{trial_id}/{fold}.parquet
                                          R2 / R3 candidates with in_active_pool
                                          (for the M4 check, proposal §5.7 item 4)
@@ -34,6 +38,7 @@ from hmrec.data.metadata import scan_processed_parquet
 from hmrec.eval.report import FoldEvaluator
 from hmrec.hpo.grid import PhaseGrid, RawConfig
 from hmrec.hpo.records import TrialRecord, append_record, read_records, result_columns
+from hmrec.hpo.robustness import find_report, robustness_rows, run_robustness
 from hmrec.hpo.runner import (
     FoldContext,
     StepReport,
@@ -225,6 +230,12 @@ def _run_one_channel(run: RunContext, channel: str) -> ChannelOutcome:
         channel, run.grid.channels[channel], default_raw, evaluate, run.rule
     )
     write_step_report(paths.d_phase_steps_file(channel), step_report_rows(reports))
+    if channel in run.grid.robustness:
+        settings = run.grid.robustness[channel]
+        results = run_robustness(reports, settings, evaluate, run.rule)
+        step_default = find_report(reports, settings.step).default_config or {}
+        rows = robustness_rows(results, step_default, settings.seed_key)
+        write_step_report(paths.d_phase_seeds_file(channel), rows)
     LOGGER.info("%s selected config (not locked): %s", channel, selected)
     return ChannelOutcome(channel, reports, selected)
 
