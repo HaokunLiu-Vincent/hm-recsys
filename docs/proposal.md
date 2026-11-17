@@ -567,6 +567,17 @@ Recency-only 的分数 = `1 / age_days`，`age_days` 取用户最近一次购买
 
 每周的 Recall@100 照常记录。如果某周比前 4 周的平均值低 10% 以上，在报告中标出，但**不改配置**。
 
+**实现（M6，`src/hmrec/recall/generate.py`、`scripts/m6_generate_candidates.py`）**：
+
+- **只从锁定文件构建**：六路都通过 `src/hmrec/recall/locked.py` 得到。R6 用 `load_locked_twotower_chain`，返回的就是 D 阶段训练链的那个类（`recall/twotower/chain.py` 的 `TwoTowerChainChannel`），所以每周 fine-tune 走的是同一段代码：这一周的购买 `[a, a + 7)` 加 1 : 1 的 replay、排除锁定的报警用户、每周重新初始化 Adam、锁定的 `E_update = 2` 和 fine-tune lr 1e-4。
+- **每个 fold 内的顺序**（R6）：① 取"预测这一周的模型"并核对 sha256；② 预测，保存向量和候选；③ 再用这一周 fine-tune，保存模型 `artifacts/models/twotower/chain_locked/{fold}.pt`，把 sha256 和 fine-tune 的行数、loss、报警用户 loss、耗时追加到 `results/m6_twotower_chain.csv`。**T4 只预测，不 fine-tune**，所以没有模型也没有记录。
+- **顺序由代码强制**（`src/hmrec/recall/chain_records.py`）：F1 用锁定文件中的 `f1_start`（即 M4）；之后每个 fold 用上一个 fold 保存的模型，这个模型必须存在、在 `results/m6_twotower_chain.csv` 中有记录、并且 sha256 与记录一致，否则报错。所以不能跳过一周，也不能用别的运行留下的模型。
+- **为特征保存的文件**（`features/` 不能 import `recall/`，只能读这些文件，见 §14.2）：R5 的向量（用户只存该 fold 的 query 用户）；R6 的向量（用户是该 fold 的 query 用户，商品是**商品目录中的全部商品**，不只是 `A(a)`，因为 R2 的候选可能在活跃池外；用**预测这一周时的模型**计算，即这一周 fine-tune 之前）；R1 完整的桶内分数表 `S(g, i)`（不受 Top-100 和活跃池限制）。R6 在 `A(a)` 内的商品向量就是生成候选时用的那一份，池外的商品另外编码后合并，所以候选和分数与只编码 `A(a)` 时完全相同。
+- **一致性检查**（每个 fold 都做，不通过就报错，候选不写盘）：把保存的文件读回来，R5、R6 每个候选的 `score` 必须与用保存的向量算出的点积逐位相同；R1 每个非补齐候选的 `score` 必须与分数表中的值逐位相同。
+- **每个 (fold, channel) 一个独立进程**，结束时把耗时和真实内存峰值（`ru_maxrss`）追加到 `results/m6_runs.csv`；`scripts/m6_run_folds.py` 按时间顺序逐个 fold 驱动。候选文件一旦存在就不覆盖，重跑时跳过并提示。
+- **监控**（`src/hmrec/eval/monitor.py`、`scripts/m6_monitor_candidates.py`，结果追加到 `results/m6_candidates.csv`；只记录，不做任何选择）：F、V 周记录每一路的 Recall@quota、六路 union recall、每个 query 去重后的候选数、没有任何一路命中的 query 比例；每一路的 recall 与它前 4 周的平均值比较（F1 的前 4 周是 D1–D4，分数取自锁定文件），低 10% 以上时在 `low_recall_flag` 一列标出。**T 周在 M6 中完全不读 label**，只记录候选行数和每个 query 的候选数；T 周的指标留到 M8。代码拒绝为 T fold 构建评估器（有测试）。
+- **停下由人决定的情况**（设置在 `configs/m6_candidates.yaml`）：任何进程的真实内存峰值超过 `memory.limit_gb`；schema 校验或一致性检查失败；模型的 sha256 与记录不一致；R6 fine-tune 的训练 loss 或报警用户 loss 不是有限值、或超过 `twotower_chain.max_fine_tune_loss`（7.0；D 阶段训练链每周的训练 loss 为 5.49–5.56，报警用户 loss 为 5.25–5.69）。
+
 ### 6.7 事后诊断（只报告，不改选择）
 
 在 V 和 T 阶段，额外计算 **HP drift regret**：如果用当周的 label 重新挑选 `E_update` 和 `replay`，最多能多拿多少 Recall。差距小，说明"超参数在几个月内保持稳定"这个假设成立。
@@ -848,6 +859,7 @@ hm-recsys/
 │   ├── catalog.yaml             # 活跃池 A(a)：window_days=28、min_purchase_lines=3（§2.4，冻结，不调）
 │   ├── queries.yaml             # query_id_fold_offset（§2.3 query_id 的编号规则）
 │   ├── m4_union_check.yaml      # M4：union recall 目标、R3 活跃池规则的阈值（预先登记）、人工选择
+│   ├── m6_candidates.yaml       # M6：监控和停止条件（前 4 周对比、fine-tune loss 上限）；不影响任何候选
 │   ├── recall/                  # 每路的默认配置
 │   │   ├── r1_popularity.yaml
 │   │   ├── r2_repurchase.yaml
@@ -875,6 +887,9 @@ hm-recsys/
 │   ├── threads.py               # 在 import polars 之前按 base.yaml 设置 POLARS_MAX_THREADS（只依赖标准库和 yaml）
 │   ├── vectors.py               # 用户 / 商品向量（WALS、Two-Tower 共用）：按 (customer_idx, article_idx) 批量点积、保存 / 读取
 │   ├── locks.py                 # 读取并校验 configs/locks/ 的锁定文件；文件 sha256 核对（底层，recall / features 都可以用）
+│   ├── csv_records.py           # 只追加、表头固定的结果表（results/*.csv）的读写
+│   ├── run_records.py           # results/m6_runs.csv：每个进程一行（耗时、采样峰值、真实峰值）；真实峰值超限时停下
+│   ├── pipeline.py              # M6：一个 fold 的各步各用一个进程依次运行；每个 fold 的一行摘要
 │   │
 │   ├── data/
 │   │   ├── preprocess.py        # 原始 CSV → Parquet；ID 映射成 int32；压缩 dtype
@@ -895,7 +910,10 @@ hm-recsys/
 │   │   ├── r5_wals.py
 │   │   ├── vector_scoring.py    # R5 / R6 共用：按向量点积取 Top-quota，score 用 vectors.dot_pairs
 │   │   ├── build.py             # 从原始配置构建 R1–R5（分块大小取自 base.yaml）；HPO 和锁定入口共用
-│   │   ├── locked.py            # M5 之后构建六路的唯一入口：只读 configs/locks/；R6 加载模型前核对 sha256
+│   │   ├── locked.py            # M5 之后构建六路的唯一入口：只读 configs/locks/；R6 加载模型前核对 sha256；锁定配置的训练链
+│   │   ├── inputs.py            # 一个 fold 的 channel 输入（表、活跃池、query 名单）；D 阶段和 M6 共用，不读 label
+│   │   ├── chain_records.py     # results/m6_twotower_chain.csv；强制训练链按周推进（上一周的模型存在且 sha256 一致）
+│   │   ├── generate.py          # M6：为一个 fold 生成一路候选，保存特征要用的文件，做一致性检查，写盘（不覆盖）
 │   │   └── twotower/
 │   │       ├── data.py          # 训练样本、用户历史数组 [N, 20]、商品特征表（末尾 padding 行）、在设备上取 batch
 │   │       ├── benchmark.py     # §1.4 的 200 步计时（占位模型；也用于真实模型的设备选择）
@@ -926,6 +944,7 @@ hm-recsys/
 │   │
 │   ├── eval/
 │   │   ├── metrics.py           # Recall@K、AP@12、NDCG@K、union recall
+│   │   ├── monitor.py           # M6 监控：候选数（不需要 label）；F、V 周的 recall / union recall；拒绝读 T 周的 label
 │   │   └── report.py            # 汇总每周 / 4 周结果，写 results/*.csv
 │   │
 │   └── hpo/
@@ -950,7 +969,9 @@ hm-recsys/
 │   ├── m3_twotower_chain.py
 │   ├── m4_union_check.py
 │   ├── m5_verify_locks.py          # --channel r1_popularity ...：锁定文件在 D1 上重现记录的分数（每路一个进程）
-│   ├── m6_generate_candidates.py   # --fold F1 ...
+│   ├── m6_generate_candidates.py   # --fold F1 [--channel ...]：用锁定配置生成一个 fold 的候选（不读 label）
+│   ├── m6_monitor_candidates.py    # --fold F1：监控一个 fold 的候选（F、V 周读 label，T 周不读）
+│   ├── m6_run_folds.py             # --first-fold F1 --last-fold T4：按时间顺序逐个 fold 运行，每步一个进程
 │   ├── m6_build_features.py        # --fold F1 ...
 │   ├── m7_ranker_hpo.py
 │   └── m8_final_eval.py
@@ -991,10 +1012,15 @@ hm-recsys/
 ├── artifacts/                   # 不进 git，全部可以由代码重新生成
 │   ├── queries/{fold}.parquet   # query_id, fold, customer_idx, anchor（M0 生成，生成后冻结）
 │   ├── labels/{fold}.parquet    # query_id, fold, article_idx（只有 eval/ 和 ranker/sampling.py 能读）
-│   ├── candidates/{fold}/{channel}.parquet
+│   ├── candidates/{fold}/{channel}.parquet        # channel = r1_popularity ... r6_twotower；生成后冻结，不覆盖
+│   ├── candidates/{fold}/r1_bucket_scores.parquet # R1 完整的桶内分数表 (age_bucket, article_idx, score)，特征用
 │   ├── features/{fold}/part-*.parquet
 │   ├── lgb_datasets/{run_id}/   # LightGBM binary dataset
-│   ├── models/{wals,twotower,ranker}/{fold}/
+│   ├── models/wals/{fold}/                        # R5 向量（vectors.py 的格式）：该 fold 的 query 用户，全部有向量的商品
+│   ├── models/twotower/vectors/{fold}/            # R6 向量：该 fold 的 query 用户，商品目录的全部商品；fine-tune 之前的模型
+│   ├── models/twotower/chain_locked/{fold}.pt     # 锁定配置的训练链：在该 fold 上 fine-tune 之后的模型（预测下一个 fold）
+│   ├── models/twotower/{base,chain}/              # base 的各个 epoch；D 阶段各条训练链的模型
+│   ├── models/ranker/{fold}/
 │   ├── hpo/D/{channel}/{trial_id}/{fold}.parquet  # R2 / R3 候选 + in_active_pool 标记（M4 的 §5.7 第 4 项用）
 │   ├── m5/lock_check/{fold}/{channel}.parquet     # M5 锁定核对生成的候选；后续步骤不读取这个目录
 │   └── runs/{run_id}/           # 每次运行的 config 快照、日志、指标
@@ -1003,6 +1029,9 @@ hm-recsys/
     ├── d_phase.csv
     ├── d_phase_steps/{channel}.csv   # 每一步的全部候选、是否通过、各周 / 合并 / 分组分数、选择结果
     ├── m5_lock_check.csv             # M5 锁定核对：每次运行一行（两个分数、是否一致、耗时、采样峰值和真实峰值）
+    ├── m6_runs.csv                   # M6：每个进程一行（fold、channel 或 monitor、耗时、采样峰值、真实峰值）
+    ├── m6_candidates.csv             # M6 监控：每个 fold 每一路和六路 union 各一行（T 周没有基于 label 的列）
+    ├── m6_twotower_chain.csv         # M6：训练链每个模型的 sha256 和 fine-tune 的行数、loss、耗时
     ├── v_phase.csv
     └── t_phase.csv
 ```
@@ -1010,12 +1039,14 @@ hm-recsys/
 ### 14.1 分层规则
 
 ```
-scripts/  →  src/hmrec/{recall, fusion, features, ranker, hpo}  →  src/hmrec/{data, eval, vectors}  →  config / paths
+scripts/  →  src/hmrec/{recall, fusion, features, ranker, hpo, pipeline}  →  src/hmrec/{data, eval, vectors, locks, csv_records, run_records}  →  config / paths
 ```
 
 - 上层可以调用下层，**下层不能 import 上层**。例如 `data/` 不能 import `recall/`。
 - `recall/`、`features/`、`ranker/` 之间互不 import，通过 `artifacts/` 里的文件交接。
 - `locks.py` 属于底层（只依赖 `config.py` 和标准库）：它只读取、校验 `configs/locks/` 的锁定文件。`recall/` 和 `features/` 都可以 import 它（特征需要某一路的锁定参数时从这里取，不经过 `recall/`）。从锁定文件**构建** channel 在 `recall/locked.py`。
+- `csv_records.py`（只追加、表头固定的结果表的读写）和 `run_records.py`（每个进程一行的运行记录：耗时、采样峰值、真实峰值）属于底层，只依赖标准库和 `memory.py`。
+- `pipeline.py`（一个 fold 的各步各用一个独立进程依次运行；每个 fold 的摘要）属于上层，与 `recall/`、`hpo/` 同层：它可以 import `eval/` 和底层模块，`recall/`、`features/`、`ranker/` 不能 import 它。
 - `vectors.py` 属于底层（只依赖 numpy 和标准库），`recall/` 和 `features/` 都可以 import 它：R5 / R6 训练后用它把向量存到 `artifacts/models/{wals,twotower}/{fold}/`，§8.3 的 `wals_dot`、`tt_dot` 用它读取并计算点积。召回分数和点积特征用同一个函数计算，所以同一个 (用户, 商品) 的 R5 `score` 与 `wals_dot` 完全相同。
 - 所有按时间取历史数据的操作都必须经过 `data/asof.py`。
 
@@ -1025,8 +1056,11 @@ scripts/  →  src/hmrec/{recall, fusion, features, ranker, hpo}  →  src/hmrec
 |---|---|---|---|
 | `data/queries.py` | `artifacts/queries/{fold}.parquet` | `query_id, fold, customer_idx, anchor` | 全部 |
 | `data/queries.py` | `artifacts/labels/{fold}.parquet` | `query_id, fold, article_idx` | `eval/`、`ranker/sampling.py` |
-| `recall/*` | `artifacts/candidates/{fold}/{channel}.parquet` | `query_id, article_idx, channel, rank, score` | `fusion/union.py` |
-| `recall/r5_wals.py`、`recall/twotower/`（通过 `vectors.py`） | `artifacts/models/{wals,twotower}/{fold}/`：`user_customer_idx.npy`、`user_vectors.npy`、`item_article_idx.npy`、`item_vectors.npy`、`vectors.json`（来源、fold） | 用户向量只存该 fold query 中的用户，商品向量全部保存 | `features/dense.py`（通过 `vectors.py`） |
+| `recall/generate.py`（六路） | `artifacts/candidates/{fold}/{channel}.parquet`，`channel` = `r1_popularity` … `r6_twotower` | `query_id, article_idx, channel, rank, score`（R1 另有 `pop_is_fallback`）；写入前按各路的 `OutputSpec` 校验，生成后不覆盖 | `fusion/union.py`、`eval/monitor.py` |
+| `recall/generate.py`（R1） | `artifacts/candidates/{fold}/r1_bucket_scores.parquet` | `age_bucket (str), article_idx (int32), score (float32)`：`[a − 7d, a)` 内每个 (年龄桶, 商品) 的 `S(g, i)`，**不受 Top-100 和活跃池限制**；R1 非补齐候选的 `score` 与它逐位相同 | `features/dense.py`（`pop_bucket_score`） |
+| `recall/generate.py`（R5，通过 `vectors.py`） | `artifacts/models/wals/{fold}/`：`user_customer_idx.npy`、`user_vectors.npy`、`item_article_idx.npy`、`item_vectors.npy`、`vectors.json`（来源、fold） | 用户向量只存该 fold 的 query 用户（其中没有向量的不出现），商品向量全部保存；R5 候选的 `score` 与这些向量的点积逐位相同 | `features/dense.py`（`wals_dot`，通过 `vectors.py`） |
+| `recall/generate.py`（R6，通过 `vectors.py`） | `artifacts/models/twotower/vectors/{fold}/`（同样的 5 个文件） | 用户向量：该 fold 的 query 用户；商品向量：**商品目录的全部商品**（R2 的候选可能在 `A(a)` 外）；用预测这一周时的模型计算（这一周 fine-tune **之前**）；R6 候选的 `score` 与这些向量的点积逐位相同 | `features/dense.py`（`tt_dot`，通过 `vectors.py`） |
+| `recall/generate.py`（R6 训练链） | `artifacts/models/twotower/chain_locked/{fold}.pt`，sha256 记在 `results/m6_twotower_chain.csv` | 在该 fold 上 fine-tune 之后的模型；T4 没有 | 下一个 fold 的 R6（加载前核对 sha256） |
 | `fusion/union.py` + `features/build.py` | `artifacts/features/{fold}/part-*.parquet` | `query_id, article_idx`，§8 的全部特征列 | `ranker/` |
 | `ranker/predict.py` | `artifacts/predictions/{run_id}/{fold}.parquet` | `query_id, article_idx, score, rank` | `eval/` |
 

@@ -414,3 +414,29 @@
 - **注意（M7 实现时处理，现在只记录）**：`ru_maxrss` 只升不降，是整个进程的峰值。如果多个 trial 在同一个进程里依次运行，后面的 trial 会带上前面 trial 的峰值，记录下来的数字就不是这个 trial 自己的。所以 **M7 的 Ranker HPO 要每个 trial 一个独立进程**。
 - **其他确认**：M0–M4 的脚本不补"最后一步"的 `log_process_peak_memory` 调用；`results/m5_lock_check.csv` 保留。
 - **proposal 已同步**：§1.3（新增"M5 锁定配置在 D1 上的单路实测"一表；R4 一行和候选生成一行指向它）、§1.4（每周推理的实测）。
+
+## 2026-11-17 M6 前半（候选生成）的实现决定
+
+以下都是在**运行任何 F / V / T fold 之前**确定的；没有看过 D 阶段之后任何一周的分数。六路的配置没有任何改动（全部来自 `configs/locks/`）。
+
+- **决定**：
+  1. **每个 (fold, channel) 一个独立进程**（`scripts/m6_generate_candidates.py --fold … --channel …`），监控是另一个进程（`scripts/m6_monitor_candidates.py`），`scripts/m6_run_folds.py` 按时间顺序驱动。原因：真实峰值 `ru_maxrss` 只升不降，一个进程只做一步，它的峰值才是这一步自己的；每一步也能用到全部内存预算。
+  2. **三个结果文件，分工不同**：`results/m6_runs.csv`（每个进程一行：耗时、采样峰值、真实峰值；由进程在最后一步写入）、`results/m6_candidates.csv`（监控：每个 fold 每一路和 union 各一行）、`results/m6_twotower_chain.csv`（训练链每个模型的 sha256 和 fine-tune 数字）。候选生成的进程不读 label，所以 recall 不能和耗时写在同一行里，这是把运行记录和监控分成两个文件的原因。
+  3. **R6 训练链接入锁定入口**：`recall/locked.py` 新增 `load_locked_twotower_chain`，返回 D 阶段的 `TwoTowerChainChannel`（配置、报警用户都来自锁定文件），每周 fine-tune 调用的就是 D 阶段的 `fine_tune_on_week`，没有另写一份。模型存到 `artifacts/models/twotower/chain_locked/{fold}.pt`，与 D 阶段各条链的 `chain/{trial_id}/` 分开。
+  4. **训练链的顺序规则**（`recall/chain_records.py`）：F1 的起点是锁定的 `f1_start`；之后每个 fold 的起点是上一个 fold 的模型，必须存在、有记录、sha256 一致。模型文件和记录必须同时存在或同时不存在，只有一个时报错（不自动修复）。**T4 只预测，不 fine-tune。**
+  5. **R6 保存全部商品的向量，但不改变候选**：`A(a)` 内的商品向量沿用生成候选时的那一份（与 D 阶段完全相同的计算），池外的商品另外编码后合并。所以 R6 的候选和分数与只编码 `A(a)` 时相同（有测试），同时 `tt_dot` 对活跃池外的候选（R2）也有值。
+  6. **R1 的分数表与候选来自同一次计算**：`PopularityChannel.generate_with_bucket_scores` 只算一次 `S(g, i)`，候选和分数表都从它得到，再用同样的 float64 → float32 转换。原因：Polars 多线程 group_by 的浮点求和顺序不固定，分两次算可能在最后一位不同。分数表存 float32，粒度是 (age_bucket, article_idx)。
+  7. **一致性检查在每个 fold 运行时都做**，不只是单元测试：保存的向量 / 分数表先读回来，再与候选的 `score` 逐位比较；不一致就报错，候选文件不写。候选文件最后写，它的存在表示这一步完成；只有附带文件、没有候选文件，视为没做完的一步，报错，不自动清理。
+  8. **监控的"前 4 周"**：F1 的前 4 周是 D1–D4，分数取自锁定文件里记录的 D 阶段分数；之后依次用已经写入 `results/m6_candidates.csv` 的周。只对单路的 recall 做这个比较（proposal §6.6 说的是每一路）；union recall 不设标记。标记只是结果表里的一列，不触发任何动作。
+  9. **T 周不读 label**：监控脚本只在 fold 的阶段是 F 或 V 时才通过 `eval.monitor.load_label_evaluator` 取评估器；这个函数先检查阶段，T（以及 D）直接报错，不打开文件。`monitor_rows` 收到 T fold 的评估器也报错。T 周的行只有候选行数和每个 query 的候选数。
+  10. **新增配置 `configs/m6_candidates.yaml`**：前 4 周对比的设置（4 周、10%，即 proposal §6.6 的数字），以及 fine-tune loss 的停止上限 **7.0**。7.0 是在没有任何 F 周结果时定的：D 阶段训练链每周的训练 loss 为 5.49–5.56，报警用户 loss 为 5.25–5.69，7.0 明显高于两者，达到它说明模型已经发散，而不是某一周略有波动。它只决定"停下来由人看"，不选择、不改变任何东西。
+  11. **`hpo/d_phase.py` 读取 fold 输入的代码移到 `recall/inputs.py`**，D 阶段和 M6 共用（表、活跃池、query 名单的读取方式只有一处）。`count_candidates_chunked` 从 `hpo/union_check.py` 移到 `eval/monitor.py`（M6 的监控不属于 HPO 代码路径，T fold 不能进入 HPO 代码）。两处都只是移动，行为不变，原有测试全部通过。
+- **新增模块在分层中的位置**：`csv_records.py`、`run_records.py` 属于底层（只依赖标准库和 `memory.py`）；`pipeline.py` 属于上层（它 import `eval/monitor.py` 的常量来写每个 fold 的摘要）；`recall/generate.py`、`recall/chain_records.py`、`recall/inputs.py` 在 `recall/` 内，不 import `eval/`，不读 label（有扫描测试）。
+- **没有做的**：`fusion/union.py`（合并去重成宽表）和特征是 M6 后半，不在这次范围内；`load_shared_tables`（读真实的 processed 表）没有单元测试，它会在 F1 的运行中第一次被执行。
+- **proposal 已同步**：§6.6（实现）、§14（目录）、§14.2（交接的文件）。
+
+## 2026-11-17 M6 运行之前：分层图补全；重构后先做一次锁定核对的回归检查
+
+- **AGENTS.md §5 和 proposal §14.1 的分层图**加入 `csv_records.py`、`run_records.py`（底层）和 `pipeline.py`（上层），两处一致。
+- **回归检查**：M6 前半把 `hpo/d_phase.py` 读取 fold 输入的代码移到了 `recall/inputs.py`，并调整了 R1（`generate_with_bucket_scores`）和 R6 推理（`candidates_from_query_vectors`）的内部结构。这些改动按设计不改变任何结果，但原有的验证只有单元测试。所以在运行 F1 之前，用重构后的代码重跑一次 M5 的锁定核对（六路在 D1 上，分数必须与记录逐位相同）；有任何不一致就不运行 F1。
+- **为此新增的一个参数**：`scripts/m5_verify_locks.py --run-name NAME` 把候选写到 `artifacts/m5/lock_check_{NAME}/D1/`，日志写到 `artifacts/runs/m5_verify_locks_{channel}_{NAME}/`，不碰第一次核对留下的 `artifacts/m5/lock_check/D1/`；`results/m5_lock_check.csv` 照常追加新行（用 `git_commit` 和 `finished_at` 区分两次核对）。不带这个参数时行为不变。
