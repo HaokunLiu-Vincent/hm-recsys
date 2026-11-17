@@ -377,3 +377,15 @@
 - **锁定后的核对**（`scripts/m5_verify_locks.py`，每路一个进程；在本次 commit 之后运行，结果另记一条）：只通过锁定文件构建六路，在 D1 上重新生成候选（R6 用 `base` 预测，不训练），每一路的分数必须与记录逐位相同（R1、R2、R4、R5、R6 对 `results/d_phase.csv`，R3 对 `results/m4_trials.csv`）。候选写到 `artifacts/m5/lock_check/`，后续步骤不读取这个目录。同时记录每一路的耗时和 `/usr/bin/time` 的真实内存峰值（R4 是新的分块大小，R6 是现场预测）。
 - **提醒**：D1–D4 上的分数偏乐观（各路配置都在这 4 周上决定），只作记录；F / V / T 的各路 recall 和 union recall 以实测为准。
 - **proposal 已同步**：§0.1（参考值旁边的 D 阶段实测值）、§1.3（每个 query 307 个候选、P90 364，以及由此重算的各项估算；R4 分块；4.78 GB 的说明）、§5（每一路表格的"M5 锁定"行）、§6.5（锁定内容）、§9.1、§11（M0–M5 标为完成）、§14（新模块）。§5 R2 的表格原来被一段说明文字从中间断开，这次把那段文字移到了表格之后，内容没有改。
+
+## 2026-11-17 真实内存峰值由 memory.py 记录（ru_maxrss）；4.78 GB 的来源
+
+- **4.78 GB 的来源**：上面两条记录（"R3 改为只输出 A(a) 之后的结果"、"M5：锁定全部 recall 配置"）和 proposal §1.3 中的 **4.78 GB** 来自 `/usr/bin/time -l` 的**终端输出**，**没有写入运行日志**（`artifacts/runs/m4_union_check_r3_active_pool/run.log` 里只有采样值，最大 4.72 GB）。所以这个数字现在无法从仓库或日志中核对，只能以当时的终端输出为准。此前记录中标为 `/usr/bin/time` 的其他数字（例如第一次 M4 运行的 6.66 GB）也是同样的来源。proposal §1.3 已注明。
+- **决定**：今后真实峰值由 `src/hmrec/memory.py` 自己记录，不再依赖终端输出。
+  1. 新增 `read_process_peak_memory` / `log_process_peak_memory`：用标准库 `resource.getrusage(RUSAGE_SELF).ru_maxrss` 读取进程启动以来的真实最大 RSS（与 `/usr/bin/time -l` 是同一个计数器）；单位由 `ru_maxrss_to_bytes` 处理（macOS 是字节，Linux 是 KB）。同时读取 `RUSAGE_CHILDREN`（已结束的子进程中最大的一个，不是总和），有子进程结束时才写进日志。
+  2. **两种峰值用不同的名字**：采样峰值（`MemoryTracker.peak_rss_bytes`，日志中的 `peak rss=… (sampled)`，结果中的 `sampled_peak_rss_gb`）可以分阶段，但只是下限；真实峰值（`process_max_rss_bytes` / `process_max_rss_gb`，日志中的 `process max rss=`）是真实值，但整个进程只有一个数，说不出出在哪个阶段。是否超过 6 GB 以真实峰值为准。
+  3. 每个 `MemoryTracker` 结束时两种数字都写进日志；脚本在最后一步调用 `log_process_peak_memory`（超过 `memory.limit_gb` 时记 WARNING），并把真实峰值写进这次运行的结果记录。
+  4. M5 的锁定核对每次运行向新文件 `results/m5_lock_check.csv` 追加一行：两个分数、是否逐位一致、耗时、`sampled_peak_rss_gb`、`process_max_rss_gb`、`children_max_rss_gb`、git commit。分数不一致的运行也照常记录，然后才报错。
+- **没有改的**：`results/d_phase.csv` / `results/m4_trials.csv` 的列（其中 `peak_rss_gb` 是采样峰值）保持不变，因为这两个文件的表头是固定的，D 阶段也已经结束；Two-Tower 每个 epoch / 每周 fine-tune 记录里的 `peak_rss_gb` 同样仍是采样峰值。M0–M4 的脚本没有加"最后一步"的调用，它们通过各自的 `MemoryTracker` 在日志里得到真实峰值。M6 之后新写的脚本和结果记录按第 3 点执行。
+- **原因**：采样峰值会漏掉短于采样间隔的尖峰（第一次 M4 运行采样只看到 5.22 GB，真实值是 6.66 GB），而真实值此前只存在于终端输出里，事后无法核对。
+- **同时更新的规则（AGENTS.md）**：§5 分层图加入 `locks.py`（底层，与 `vectors.py` 同层）；§3.3 写明 M5 之后六路 recall 的配置只能通过 `src/hmrec/recall/locked.py` 获取；§3.4 新增"新写或修改代码之后必须先停下等用户 commit，工作区干净后才能在全量数据上运行，即使这次运行已经获得许可"。

@@ -21,13 +21,19 @@ from hmrec.data.folds import load_fold_manifest
 from hmrec.eval.report import FoldEvaluator
 from hmrec.hpo.grid import load_phase_grid
 from hmrec.hpo.lock_check import (
+    RESULT_COLUMNS,
     LockCheckResult,
+    RunInfo,
+    append_lock_check_row,
     check_locked_channel,
+    lock_check_row,
     read_recorded_trial,
+    require_identical,
     results_file_of,
 )
 from hmrec.hpo.runner import FoldContext
 from hmrec.locks import ALL_CHANNELS
+from hmrec.memory import BYTES_PER_GB, ProcessPeakMemory
 from hmrec.paths import get_paths
 from hmrec.recall.build import build_statistical_channel
 from hmrec.recall.locked import load_locked_recall
@@ -63,6 +69,8 @@ def test_identical_score_passes_and_candidates_are_written(tmp_path: Path) -> No
     assert result.score == HAND_COMPUTED_RECALL
     assert (result.channel, result.fold, result.trial_id) == ("r2_repurchase", "D1", R2.trial_id)
     assert (result.metric, result.n_rows) == ("recall@30", 3)
+    assert result.identical
+    require_identical(result)  # no error
     written = pl.read_parquet(path).sort("query_id", "article_idx")
     assert written.select("query_id", "article_idx").rows() == [(1, 30), (1, 40), (2, 31)]
 
@@ -72,9 +80,11 @@ def test_any_difference_from_the_record_fails(tmp_path: Path) -> None:
     # One unit in the last place away from the hand-computed 0.25 is already a failure.
     almost = HAND_COMPUTED_RECALL + 2.0**-54
     assert almost != HAND_COMPUTED_RECALL
+    result = _check(path, almost)  # does not raise: the caller records the result first
+    assert not result.identical
     with pytest.raises(ValueError, match="but trial f562d598b0d6 recorded"):
-        _check(path, almost)
-    # The candidates were written before the comparison, so they can be inspected.
+        require_identical(result)
+    # The candidates were written, so they can be inspected.
     assert path.is_file()
 
 
@@ -83,6 +93,54 @@ def test_existing_candidates_are_never_replaced(tmp_path: Path) -> None:
     _check(path, HAND_COMPUTED_RECALL)
     with pytest.raises(FileExistsError, match="already exists"):
         _check(path, HAND_COMPUTED_RECALL)
+
+
+# ---------------------------------------------------------------- results/m5_lock_check.csv
+
+
+def _run_info(process_max_gb: float, children_max_gb: float) -> RunInfo:
+    peak = ProcessPeakMemory(
+        process_max_rss_bytes=int(process_max_gb * BYTES_PER_GB),
+        children_max_rss_bytes=int(children_max_gb * BYTES_PER_GB),
+    )
+    return RunInfo(1.5, peak, "abc123", False, "2026-11-17T21:00:00")
+
+
+def test_row_keeps_sampled_and_true_peak_in_separate_columns(tmp_path: Path) -> None:
+    result = _check(tmp_path / "r2.parquet", HAND_COMPUTED_RECALL)
+    result = dataclasses.replace(result, sampled_peak_rss_gb=2.5, generate_seconds=3.25)
+    row = lock_check_row(result, _run_info(process_max_gb=4.0, children_max_gb=0.5))
+    assert tuple(row) == RESULT_COLUMNS
+    # 2.5 GB was sampled during generate; the process as a whole peaked at 4 GB.
+    assert row["sampled_peak_rss_gb"] == "2.5"
+    assert row["process_max_rss_gb"] == "4.0"
+    assert row["children_max_rss_gb"] == "0.5"
+    assert (row["score"], row["recorded_score"], row["identical"]) == ("0.25", "0.25", "True")
+    assert (row["build_seconds"], row["generate_seconds"]) == ("1.5", "3.25")
+    assert (row["git_commit"], row["git_dirty"]) == ("abc123", "False")
+
+
+def test_rows_are_appended_and_failed_checks_are_recorded_too(tmp_path: Path) -> None:
+    passed = _check(tmp_path / "a.parquet", HAND_COMPUTED_RECALL)
+    failed = _check(tmp_path / "b.parquet", 0.5)
+    path = tmp_path / "results" / "m5_lock_check.csv"
+    run = _run_info(process_max_gb=4.0, children_max_gb=0.0)
+    append_lock_check_row(path, lock_check_row(passed, run))
+    append_lock_check_row(path, lock_check_row(failed, run))
+    table = pl.read_csv(path)
+    assert table.columns == list(RESULT_COLUMNS)
+    assert table["identical"].to_list() == [True, False]
+    assert table["recorded_score"].to_list() == [0.25, 0.5]
+
+
+def test_other_columns_are_refused(tmp_path: Path) -> None:
+    row = lock_check_row(_check(tmp_path / "a.parquet", HAND_COMPUTED_RECALL), _run_info(4.0, 0.0))
+    path = tmp_path / "m5_lock_check.csv"
+    with pytest.raises(ValueError, match="row has columns"):
+        append_lock_check_row(path, {**row, "peak_rss_gb": "4.0"})
+    path.write_text("channel,fold\n", encoding="utf-8")  # a file with another header
+    with pytest.raises(ValueError, match="has columns"):
+        append_lock_check_row(path, row)
 
 
 # ---------------------------------------------------------------- recorded trials (real files)

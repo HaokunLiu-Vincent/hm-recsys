@@ -349,6 +349,11 @@ class ProjectPaths:
         """results/m4_trials.csv: trials of M4 variants (rule outcomes; never select)."""
         return self.results_root / "m4_trials.csv"
 
+    @property
+    def m5_lock_check_results_file(self) -> Path:
+        """results/m5_lock_check.csv: one row per run of the M5 lock check (score, time, memory)."""
+        return self.results_root / "m5_lock_check.csv"
+
     def d_phase_seeds_file(self, channel: str) -> Path:
         """results/d_phase_steps/{channel}_seeds.csv: extra-seed runs (reported only)."""
         return self.results_root / "d_phase_steps" / f"{channel}_seeds.csv"

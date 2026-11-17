@@ -61,11 +61,14 @@ H&M 个性化时尚推荐（Kaggle H&M 数据集）。目标：预测每个用�
 
 需要改动以上内容时，停下来说明原因，等用户确认。
 
+**M5 之后，六路 recall 的配置只能通过 `src/hmrec/recall/locked.py` 获取**（它只读 `configs/locks/`；锁定文件的解析在 `src/hmrec/locks.py`）。M6 及之后的代码不能再读 `configs/recall/` 的默认值，也不能从 `results/d_phase.csv` 重放选择来得到配置。R6 的模型文件必须通过这个入口加载：它在加载权重之前核对 sha256，不一致就报错。`tests/unit/test_locked.py` 会扫描 M6–M8 的脚本和 `fusion/`、`features/`、`ranker/`。
+
 ### 3.4 其他禁止事项
 
 - 不要删除 `data/`、`artifacts/`、`results/` 下的文件。
 - 未经用户同意，不要新增依赖（修改 `pyproject.toml`）。
 - 未经用户同意，不要在完整数据上运行重任务（全量 recall、Two-Tower 训练、Ranker 训练）。开发和测试只用 `tests/fixtures/` 的小数据。
+- **新写或修改代码之后，必须先停下等用户 commit；工作区干净之后才能在全量数据上运行。**即使这次运行已经获得许可，也要先停下。原因：结果要能对应到一个确定的 commit（运行记录里的 `git_commit`，且 `git_dirty=False`）；在未提交的代码上跑出的结果无法复现，也无法事后核对是哪份代码产生的。
 - 不要用 `print` 调试后留在代码里。
 - 不要为了让测试通过而修改测试的预期值，除非你能说明原来的预期值是错的。
 - 修改 `.gitignore` 后，必须做两项检查，并在回复中报告结果：
@@ -103,12 +106,13 @@ H&M 个性化时尚推荐（Kaggle H&M 数据集）。目标：预测每个用�
 完整目录见 `docs/proposal.md` §14。关键规则：
 
 ```
-scripts/  →  src/hmrec/{recall, fusion, features, ranker, hpo}  →  src/hmrec/{data, eval, vectors}  →  config / paths
+scripts/  →  src/hmrec/{recall, fusion, features, ranker, hpo}  →  src/hmrec/{data, eval, vectors, locks}  →  config / paths
 ```
 
 - 上层可以 import 下层，**下层不能 import 上层**。
 - `recall/`、`features/`、`ranker/` 之间**互不 import**，通过 `artifacts/` 里的文件交接。
 - `src/hmrec/vectors.py`（用户 / 商品向量、批量点积、保存 / 读取）属于底层，`recall/` 和 `features/` 都可以 import 它（见 proposal §14.1）。R5 / R6 的召回分数和 §8.3 的 `wals_dot` / `tt_dot` 都只通过它计算。
+- `src/hmrec/locks.py`（读取并校验 `configs/locks/` 的锁定文件、核对文件 sha256）也属于底层，与 `vectors.py` 同层，只依赖 `config.py` 和标准库；`recall/` 和 `features/` 都可以 import 它。从锁定文件**构建** channel 在 `src/hmrec/recall/locked.py`（见 §3.3）。
 - `scripts/` 只做三件事：解析命令行参数、调用 `src/` 里的函数、写结果。**不在 scripts 里写业务逻辑。**
 - `notebooks/` 只做探索和画图，`src/` 不能依赖 notebook 中的任何代码。
 - 所有文件路径都从 `src/hmrec/paths.py` 获取，不要在代码里手写路径字符串。

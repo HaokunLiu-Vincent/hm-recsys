@@ -1,7 +1,7 @@
 """M5 check: the lock files must reproduce the recorded D-phase scores (proposal §11 M5).
 
 For ONE channel on ONE D fold (run by scripts/m5_verify_locks.py, one channel per
-process so that /usr/bin/time gives the true memory peak of each channel):
+process, so the process max RSS of the run is the true memory peak of that channel):
 
   1. the channel is built ONLY from configs/locks/ (hmrec.recall.locked);
   2. its candidates are generated again and written to
@@ -9,12 +9,17 @@ process so that /usr/bin/time gives the true memory peak of each channel):
      folder, so the check can never be mistaken for the F / V / T candidates;
   3. the channel's selection metric on the fold must equal, bit for bit, the
      score of the locked trial in the results file named by the lock
-     (results/d_phase.csv, or results/m4_trials.csv for R3). Otherwise the run fails.
+     (results/d_phase.csv, or results/m4_trials.csv for R3). Otherwise the run fails;
+  4. one row per run is appended to results/m5_lock_check.csv: both scores, time,
+     and memory. Memory has two differently named columns (see hmrec.memory):
+     sampled_peak_rss_gb (sampled during generate only, a lower bound) and
+     process_max_rss_gb (ru_maxrss: the true peak of the whole process).
 
 Nothing is selected or tuned here: the recorded score is only what the
 regenerated candidates are compared with. Labels stay inside eval/ (FoldEvaluator).
 """
 
+import csv
 import time
 from collections.abc import Sequence
 from dataclasses import dataclass
@@ -27,7 +32,7 @@ from hmrec.hpo.records import TrialRecord, read_records, result_columns
 from hmrec.hpo.runner import FoldContext, make_trial_id
 from hmrec.locks import LockedChannel
 from hmrec.logging_utils import get_logger
-from hmrec.memory import MemoryTracker, bytes_to_gb
+from hmrec.memory import MemoryTracker, ProcessPeakMemory, bytes_to_gb
 from hmrec.paths import ProjectPaths
 from hmrec.recall.base import RecallChannel, write_candidates
 
@@ -48,8 +53,9 @@ class LockCheckResult:
         n_rows: Candidate rows generated.
         generate_seconds: Wall time of channel.generate (fit + scoring; for R6
             the prediction, the model was loaded before).
-        peak_rss_gb: Sampled peak RSS during generate (a lower bound; the true
-            peak of the process comes from /usr/bin/time).
+        sampled_peak_rss_gb: SAMPLED peak RSS during generate only (a lower
+            bound). The true peak of the whole process is read at the end of
+            the run (RunInfo.peak).
     """
 
     channel: str
@@ -60,7 +66,17 @@ class LockCheckResult:
     recorded_score: float
     n_rows: int
     generate_seconds: float
-    peak_rss_gb: float
+    sampled_peak_rss_gb: float
+
+    @property
+    def identical(self) -> bool:
+        """True if the regenerated score is exactly the recorded one.
+
+        Exact comparison on purpose: the same code, config and data must give
+        the same float64 (metrics are summed in a fixed order, docs/decisions.md
+        2026-11-16).
+        """
+        return self.score == self.recorded_score
 
 
 def results_file_of(paths: ProjectPaths, source: str) -> Path:
@@ -141,8 +157,10 @@ def check_locked_channel(
 ) -> LockCheckResult:
     """Regenerate one channel's candidates on one fold and compare its score with the record.
 
-    The candidates are written BEFORE the comparison, so they can be inspected
-    when the scores differ. An existing file is never replaced.
+    The candidates are written BEFORE the score is computed, so they can be
+    inspected when the scores differ. An existing file is never replaced. This
+    function does not fail on a different score: the caller records the result
+    first and then calls require_identical.
 
     Args:
         recall_channel: The channel, built from the lock files.
@@ -154,7 +172,6 @@ def check_locked_channel(
 
     Raises:
         FileExistsError: If `candidates_file` already exists.
-        ValueError: If the score is not exactly the recorded one.
     """
     fold = context.fold.name
     if candidates_file.exists():
@@ -182,23 +199,126 @@ def check_locked_channel(
         recorded_score=recorded_score,
         n_rows=candidates.height,
         generate_seconds=generate_seconds,
-        peak_rss_gb=bytes_to_gb(tracker.peak_rss_bytes),
+        sampled_peak_rss_gb=bytes_to_gb(tracker.peak_rss_bytes),
     )
-    # Exact comparison on purpose: the same code, config and data must give the
-    # same float64 (metrics are summed in a fixed order, docs/decisions.md 2026-11-16).
-    if score != recorded_score:
-        raise ValueError(
-            f"{locked.channel} {fold}: {metric} from the lock files is {score!r}, but trial "
-            f"{locked.trial_id} recorded {recorded_score!r}. Candidates: {candidates_file}"
-        )
     LOGGER.info(
-        "%s %s: %s = %r, identical to the record (trial %s); %d rows, generate %.1f s",
+        "%s %s: %s = %r, recorded %r (trial %s), identical: %s; %d rows, generate %.1f s",
         locked.channel,
         fold,
         metric,
         score,
+        recorded_score,
         locked.trial_id,
+        result.identical,
         candidates.height,
         generate_seconds,
     )
     return result
+
+
+def require_identical(result: LockCheckResult) -> None:
+    """Fail unless the regenerated score is exactly the recorded one.
+
+    Raises:
+        ValueError: If the two scores differ in any bit.
+    """
+    if not result.identical:
+        raise ValueError(
+            f"{result.channel} {result.fold}: {result.metric} from the lock files is "
+            f"{result.score!r}, but trial {result.trial_id} recorded {result.recorded_score!r}"
+        )
+
+
+# ---------------------------------------------------------------- results/m5_lock_check.csv
+
+RESULT_COLUMNS: tuple[str, ...] = (
+    "channel",
+    "fold",
+    "trial_id",
+    "metric",
+    "score",
+    "recorded_score",
+    "identical",
+    "n_rows",
+    "build_seconds",
+    "generate_seconds",
+    "sampled_peak_rss_gb",
+    "process_max_rss_gb",
+    "children_max_rss_gb",
+    "git_commit",
+    "git_dirty",
+    "finished_at",
+)
+
+
+@dataclass(frozen=True)
+class RunInfo:
+    """What is known about a lock-check run only at its very end.
+
+    Attributes:
+        build_seconds: Wall time of building the channel from the lock files
+            (for R6: hashing and loading the model files and its tables).
+        peak: True peak RSS of the whole process and of its finished children,
+            read as the last step of the run (hmrec.memory.read_process_peak_memory).
+        git_commit: HEAD when the run started.
+        git_dirty: Uncommitted code / config changes when the run started.
+        finished_at: ISO timestamp.
+    """
+
+    build_seconds: float
+    peak: ProcessPeakMemory
+    git_commit: str
+    git_dirty: bool
+    finished_at: str
+
+
+def lock_check_row(result: LockCheckResult, run: RunInfo) -> dict[str, str]:
+    """One row of results/m5_lock_check.csv (all values as text; floats with repr()).
+
+    sampled_peak_rss_gb and process_max_rss_gb are different measurements and
+    must not be mixed up: the first covers generate only and is a lower bound,
+    the second is the true peak of the whole process (see hmrec.memory).
+    """
+    return {
+        "channel": result.channel,
+        "fold": result.fold,
+        "trial_id": result.trial_id,
+        "metric": result.metric,
+        "score": repr(result.score),
+        "recorded_score": repr(result.recorded_score),
+        "identical": str(result.identical),
+        "n_rows": str(result.n_rows),
+        "build_seconds": repr(run.build_seconds),
+        "generate_seconds": repr(result.generate_seconds),
+        "sampled_peak_rss_gb": repr(result.sampled_peak_rss_gb),
+        "process_max_rss_gb": repr(run.peak.process_max_rss_gb),
+        "children_max_rss_gb": repr(run.peak.children_max_rss_gb),
+        "git_commit": run.git_commit,
+        "git_dirty": str(run.git_dirty),
+        "finished_at": run.finished_at,
+    }
+
+
+def append_lock_check_row(path: Path, row: dict[str, str]) -> None:
+    """Append one row to results/m5_lock_check.csv (and the header if the file is new).
+
+    Existing rows are never changed. A run that failed (identical = False) is
+    recorded like any other, so the file is the full history of the check.
+
+    Raises:
+        ValueError: If the row or an existing file has other columns than RESULT_COLUMNS.
+    """
+    if tuple(row) != RESULT_COLUMNS:
+        raise ValueError(f"row has columns {list(row)}, expected {list(RESULT_COLUMNS)}")
+    is_new = not path.exists()
+    if not is_new:
+        with path.open(newline="") as handle:
+            header = next(csv.reader(handle), [])
+        if tuple(header) != RESULT_COLUMNS:
+            raise ValueError(f"{path} has columns {header}, expected {list(RESULT_COLUMNS)}")
+    path.parent.mkdir(parents=True, exist_ok=True)
+    with path.open("a", newline="") as handle:
+        writer = csv.DictWriter(handle, fieldnames=list(RESULT_COLUMNS))
+        if is_new:
+            writer.writeheader()
+        writer.writerow(row)

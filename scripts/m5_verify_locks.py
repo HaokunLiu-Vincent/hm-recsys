@@ -1,8 +1,9 @@
 """CLI for M5: check that the lock files reproduce the recorded D1 scores (one channel).
 
-Usage (one process per channel, so /usr/bin/time reports each channel's true peak):
-    /usr/bin/time -l caffeinate -i uv run python scripts/m5_verify_locks.py --channel r1_popularity
+Usage (one process per channel, so the process max RSS is each channel's true peak):
+    caffeinate -i uv run python scripts/m5_verify_locks.py --channel r1_popularity
     ... --channel r2_repurchase | r3_sibling | r4_itemcf | r5_wals | r6_twotower
+Put `/usr/bin/time -l` in front to cross-check the recorded process max RSS.
 
 The channel is built ONLY from configs/locks/ (hmrec.recall.locked). Its D1
 candidates are generated again and written to artifacts/m5/lock_check/D1/, a
@@ -10,6 +11,11 @@ folder no later step reads. Its selection metric must equal the D1 score of the
 locked trial exactly (R1, R2, R4, R5, R6: results/d_phase.csv; R3:
 results/m4_trials.csv), otherwise the script fails. R6 predicts with the locked
 base checkpoint (the model that predicted D1 in the chain); nothing is trained.
+
+Each run appends one row to results/m5_lock_check.csv (also when the scores
+differ) and logs, as its last step, the true memory peak of the process
+(ru_maxrss, column process_max_rss_gb; the sampled peak of generate is the
+separate column sampled_peak_rss_gb).
 
 Run it on a clean working tree (after the lock files are committed).
 """
@@ -23,6 +29,7 @@ configure_polars_threads()
 import argparse  # noqa: E402  (after the thread setup above, see comment)
 import logging  # noqa: E402
 import time  # noqa: E402
+from datetime import datetime  # noqa: E402
 
 import torch  # noqa: E402
 
@@ -34,11 +41,18 @@ from hmrec.config import (  # noqa: E402
 from hmrec.data.folds import load_fold_manifest  # noqa: E402
 from hmrec.hpo.d_phase import PHASE, load_fold_contexts  # noqa: E402
 from hmrec.hpo.grid import load_phase_grid  # noqa: E402
-from hmrec.hpo.lock_check import check_locked_channel, read_recorded_trial  # noqa: E402
+from hmrec.hpo.lock_check import (  # noqa: E402
+    RunInfo,
+    append_lock_check_row,
+    check_locked_channel,
+    lock_check_row,
+    read_recorded_trial,
+    require_identical,
+)
 from hmrec.hpo.runner import git_state, warn_uncommitted_changes  # noqa: E402
 from hmrec.locks import ALL_CHANNELS, BASE_CHECKPOINT  # noqa: E402
 from hmrec.logging_utils import get_logger, setup_logging  # noqa: E402
-from hmrec.memory import MemoryTracker  # noqa: E402
+from hmrec.memory import MemoryTracker, log_process_peak_memory  # noqa: E402
 from hmrec.paths import get_paths  # noqa: E402
 from hmrec.recall.locked import build_locked_channel, load_locked_recall  # noqa: E402
 
@@ -88,9 +102,8 @@ def main() -> None:
         recall_channel = build_locked_channel(
             channel, locked, base, paths, preprocess, r6_start=BASE_CHECKPOINT
         )
-        LOGGER.info(
-            "%s: built from the lock files in %.1f s", channel, time.perf_counter() - started
-        )
+        build_seconds = time.perf_counter() - started
+        LOGGER.info("%s: built from the lock files in %.1f s", channel, build_seconds)
         result = check_locked_channel(
             recall_channel,
             locked_channel,
@@ -99,6 +112,15 @@ def main() -> None:
             paths.lock_check_candidates_file(fold.name, channel),
             base.memory,
         )
+    # Last step of the run: the true peak of the whole process (it also covers what
+    # happened outside the trackers above), written to the log and to the result row.
+    peak = log_process_peak_memory(LOGGER, f"m5 lock check {channel}", base.memory.limit_gb)
+    finished_at = datetime.now().isoformat(timespec="seconds")
+    run = RunInfo(build_seconds, peak, commit, dirty, finished_at)
+    append_lock_check_row(paths.m5_lock_check_results_file, lock_check_row(result, run))
+    LOGGER.info("result row -> %s", paths.m5_lock_check_results_file)
+    # The row is written first, so a failed check is on record too.
+    require_identical(result)
     LOGGER.info("lock check passed: %s", result)
 
 

@@ -89,7 +89,7 @@
 | R4 ItemCF 共现矩阵（365 天） | 不分块可能远超 8 GB | **D1（CF3，α=0.7）：整体峰值 2.95 GB**（`/usr/bin/time` 最大 RSS，含读数据；MemoryTracker 采样 2.62 GB）；耗时 17.2 秒（建图 + 邻居 15.5 秒，打分 1.8 秒）。图规模：1,540 万条购买行 → 1,325 万个 (用户, 商品) 对，98.8 万用户，7.2 万商品，`Σ d_u²` ≈ 5.1 亿；28,110 个 seed，分 15 块。**D 阶段（D1–D4 四周，9 个配置）：最重的 trial 峰值 4.76 GB**（MemoryTracker 采样，整个进程，含已加载的 4 周数据；配置 seed 窗口 365 天、衰减关，4 周共 115 秒）；seed 窗口越长，要算邻居的 seed 越多，峰值越高（其余 trial 3.9–4.6 GB） | **按 seed item 分块**，每块算完只保留 Top-`K_n` 邻居就释放。D 阶段每块 2,000 个 item；4.76 GB 离 6 GB 上限太近，所以 **M5 把 `chunking.item_chunk_size` 从 2000 改为 1000**（分块只影响内存和速度，不影响结果：分块和不分块的 `C_w` 逐位相同，有测试）。新分块下的峰值和耗时在锁定后的 D1 核对（`scripts/m5_verify_locks.py`）中实测 |
 | R5 WALS（180 天） | ~0.5–1 GB | **D1（W2，默认配置）：整体峰值 3.10 GB**（`/usr/bin/time` 最大 RSS；MemoryTracker 采样：拟合 0.96 GB，打分 2.11 GB）；耗时 63.8 秒（拟合 53.0 秒，打分 10.8 秒）。矩阵 71.1 万用户 × 5.2 万商品，590 万个非零值。**峰值来自打分**而不是拟合：打分按 `chunking.dense_score_query_chunk_size` = 5,000 个 query 分块，每块 5,000 × 20,764 个活跃商品的 float32 分数矩阵约 0.41 GB，再加 `np.partition` 的副本（分块为 1 万时整体峰值 4.05 GB；两种分块的 Recall@100 都是 11.36%，候选行数相同）。当前 `implicit` 的 macOS wheel 没有链接 OpenMP，拟合实际是**单线程**（`num_threads=6` 不起作用） | 稀疏 CSR，没问题 |
 | R6 Two-Tower 训练 | ~1.5–2 GB | **训练数组生成（base 窗口，2026-11-17）：峰值 4.70 GB**（取较保守的值：两次运行 MemoryTracker 采样分别为 3.35 GB 和 4.70 GB，任务只有约 4.5 秒，0.5 秒的采样间隔误差大；`/usr/bin/time` 最大 RSS 4.15 GB，含读数据），耗时 4.6 秒；616 万个样本，数组共 670 MB（`history` int32 470 MB、`history_mask` 118 MB）。**200 步 benchmark（占位模型，batch 512）**：MPS 进程最大 RSS 2.00 GB，MPS 张量占用 1.17 GB（驱动共持有 2.02 GB，统一内存，与 RSS 部分重叠）；CPU 进程最大 RSS 2.34 GB。真实模型（训练全程）待测 | 用户历史预先存成 int32 数组 `[N, 20]`；商品特征表（~10.5 万 × 896 维，约 380 MB）整块放进 MPS 显存；batch 直接按下标取，不用 DataLoader |
-| 候选生成（每周） | 合并前最多约 3,940 万行，全部放在内存约 0.73 GB（D3 约 1.07 GB）；单个 channel 最多约 0.15 GB；合并去重后约 **2,520 万行**（每个 query 平均 307 个；计算见表下 ①） | **M4 实测（D1–D4，2026-11-17，M5 锁定的配置，即 R3 只输出 `A(a)`）**：合并前 D1 3,219 万行、D3 4,947 万行（只保留 `query_id`、`article_idx`、`rank` 三列时约 0.36 / 0.55 GB）；去重后每个 query 平均 **307** 个候选（P50 320，P90 364；上限 480），D1 约 2,440 万行、D3 约 3,661 万行。R3 切换之前：平均 313（P50 327，P90 373），合并前 D1 3,268 万行、D3 5,015 万行。**内存**：第一次 M4 union 检查（四周一起处理）整个进程的真实峰值 6.66 GB（`/usr/bin/time`；0.5 秒采样只看到 5.22 GB），超过 6 GB；改为一次只处理一个 fold 后（R3 切换后的重跑）降到 **4.78 GB**（`/usr/bin/time`；采样 4.72 GB）。**这个 4.78 GB 不包含 R6 现场预测**：那次运行 R1、R2、R4、R5、R6 的候选都从已有文件读回，只有 R3 是现场生成的。候选生成（含 R6 预测）加合并的峰值留到 M6 的 F1 实测 | 每个 channel 单独写 Parquet，再按 query 分块合并去重 |
+| 候选生成（每周） | 合并前最多约 3,940 万行，全部放在内存约 0.73 GB（D3 约 1.07 GB）；单个 channel 最多约 0.15 GB；合并去重后约 **2,520 万行**（每个 query 平均 307 个；计算见表下 ①） | **M4 实测（D1–D4，2026-11-17，M5 锁定的配置，即 R3 只输出 `A(a)`）**：合并前 D1 3,219 万行、D3 4,947 万行（只保留 `query_id`、`article_idx`、`rank` 三列时约 0.36 / 0.55 GB）；去重后每个 query 平均 **307** 个候选（P50 320，P90 364；上限 480），D1 约 2,440 万行、D3 约 3,661 万行。R3 切换之前：平均 313（P50 327，P90 373），合并前 D1 3,268 万行、D3 5,015 万行。**内存**：第一次 M4 union 检查（四周一起处理）整个进程的真实峰值 6.66 GB（`/usr/bin/time`；0.5 秒采样只看到 5.22 GB），超过 6 GB；改为一次只处理一个 fold 后（R3 切换后的重跑）降到 **4.78 GB**（来源：`/usr/bin/time -l` 的终端输出，**没有写入运行日志**；日志里采样到的最大值是 4.72 GB）。**这个 4.78 GB 不包含 R6 现场预测**：那次运行 R1、R2、R4、R5、R6 的候选都从已有文件读回，只有 R3 是现场生成的。候选生成（含 R6 预测）加合并的峰值留到 M6 的 F1 实测 | 每个 channel 单独写 Parquet，再按 query 分块合并去重 |
 | 特征宽表（每周，§8） | 一周全放进内存约 **5.4 GB**（2,520 万行 × 232 B），不可行；按 1 万 query 分块后每块约 **0.66 GB**，P90 的块约 0.79 GB（计算见表下 ④）。12 周（F、V、T）的特征 Parquet 未压缩约 **61 GB**，压缩后估计 18–37 GB（计算见表下 ⑤） | 待测 | **按 query 分块计算**（每块 1 万个 query），每块算完直接写成一个 Parquet row group / part 文件，不在内存中保留整周 |
 | Ranker 训练（4 周） | 负采样 1:40 约 1,100 万行，1:80 约 2,170 万行（上限）；原始 float32 特征约 2.3–4.5 GB，分箱后约 0.6–1.1 GB（计算见表下 ②） | 待测 | **流式加载（stream loading）**：每周特征按 row group 存 Parquet，用 LightGBM 的 `lgb.Sequence` 分批读入构建 `Dataset`，原始特征不必一次性放进内存；构建后的分箱数据（每个值 1 字节）约 0.5–1 GB，存成 LightGBM binary 文件复用 |
 | Ranker 推理（每周，不采样） | 一次全放进内存约 **5.3 GB**；按 1 万 query 分块后每块约 **0.64 GB**，P90 的块约 0.76 GB（计算见表下 ③） | 待测 | **按 query 分块打分**（每块 1 万个 query） |
@@ -105,7 +105,12 @@
 
 以上除"实测"列外都是估算值，后续各阶段实测后继续填写"实测"列。M0 query / label 生成实测于 2026-11-16（`scripts/m0_build_queries.py`）。M0 预处理实测（2026-11-15）：常驻内存是读回 Parquet 后的 Polars `estimated_size()`；峰值是 `MemoryTracker` 的采样 RSS（间隔 0.5 秒，是下限，见下一段）。其他 M0 产物的常驻内存：customers 37 MB，articles 3 MB，customer ID 映射 89 MB，按 `article_idx` 对齐的图像 / 文本 embedding 206 MB / 155 MB。
 
-**内存峰值怎么测**：macOS 上 psutil 拿不到进程的历史峰值，所以 `src/hmrec/memory.py` 用后台线程定时采样 RSS（间隔见 `configs/base.yaml` 的 `memory.sample_interval_seconds`），峰值取所有采样值和开始、结束读数中的最大值。比采样间隔还短的瞬时峰值可能测不到；MPS 张量占用的统一内存也不一定全部计入 RSS。因此实测峰值是**下限**，6 GB 上限要留余量：实测峰值接近 6 GB 时就应该当作超限处理。
+**内存峰值怎么测**：`src/hmrec/memory.py` 记录两种峰值，字段名不同，回答的问题也不同：
+
+- **采样峰值**（`MemoryTracker`，`peak_rss` / `sampled_peak_rss_gb`）：后台线程用 psutil 定时采样 RSS（间隔见 `configs/base.yaml` 的 `memory.sample_interval_seconds`），取所有采样值和开始、结束读数中的最大值。可以**分阶段**测（每个阶段一个 tracker），用来定位内存用在哪里；但比采样间隔还短的瞬时峰值测不到，所以只是**下限**。
+- **真实峰值**（`read_process_peak_memory`，`process_max_rss_gb`）：标准库 `resource.getrusage(RUSAGE_SELF).ru_maxrss`，操作系统记录的、进程启动以来的最大 RSS，不会漏掉瞬时峰值，与 `/usr/bin/time -l` 读的是同一个计数器。但它**只有整个进程的一个数**，不能清零，所以说不出峰值出在哪个阶段。单位随系统不同（macOS 是字节，Linux 是 KB），由 `ru_maxrss_to_bytes` 换算。子进程不计入本进程的 RSS，另外记录 `RUSAGE_CHILDREN`（已结束的子进程中最大的一个，不是总和）。
+
+是否超过 6 GB **以真实峰值为准**；采样峰值用来找出是哪个阶段造成的。每个 `MemoryTracker` 结束时两种数字都写进日志（真实峰值在相邻两个阶段的日志之间变大，说明尖峰出在后一个阶段）；脚本在最后一步调用 `log_process_peak_memory`，并把真实峰值写进这次运行的结果记录（M5 的锁定核对写到 `results/m5_lock_check.csv`）。**2026-11-17（M5）之前的数字**：上表中标为"采样"或 MemoryTracker 的都是采样峰值（下限）；标为 `/usr/bin/time` 的是真实峰值，但只出现在终端输出里，没有写入运行日志。MPS 张量占用的统一内存不一定全部计入 RSS，两种峰值都受此影响。6 GB 上限仍要留余量。
 
 ### 1.4 Two-Tower 速度估算（M1 Max）
 
@@ -849,7 +854,7 @@ hm-recsys/
 │   ├── config.py                # 读 YAML → 带类型的 dataclass
 │   ├── paths.py                 # 所有文件路径都从这里拿，不在别处拼路径
 │   ├── logging_utils.py         # 统一的 logger 设置
-│   ├── memory.py                # 内存监控、分块迭代工具
+│   ├── memory.py                # 内存监控：分阶段的采样峰值（下限）和整个进程的真实峰值（ru_maxrss）
 │   ├── threads.py               # 在 import polars 之前按 base.yaml 设置 POLARS_MAX_THREADS（只依赖标准库和 yaml）
 │   ├── vectors.py               # 用户 / 商品向量（WALS、Two-Tower 共用）：按 (customer_idx, article_idx) 批量点积、保存 / 读取
 │   ├── locks.py                 # 读取并校验 configs/locks/ 的锁定文件；文件 sha256 核对（底层，recall / features 都可以用）
@@ -980,6 +985,7 @@ hm-recsys/
 └── results/                     # 进 git：小的汇总表
     ├── d_phase.csv
     ├── d_phase_steps/{channel}.csv   # 每一步的全部候选、是否通过、各周 / 合并 / 分组分数、选择结果
+    ├── m5_lock_check.csv             # M5 锁定核对：每次运行一行（两个分数、是否一致、耗时、采样峰值和真实峰值）
     ├── v_phase.csv
     └── t_phase.csv
 ```
