@@ -29,6 +29,7 @@ import pytest
 import torch
 from conftest import FIXTURE_DAY_ZERO, make_transactions
 
+from hmrec.config import TrainingWindow
 from hmrec.data.day_index import day_index_to_date
 from hmrec.recall.twotower.data import (
     TrainingArrays,
@@ -38,6 +39,8 @@ from hmrec.recall.twotower.data import (
     build_item_feature_arrays,
     build_samples,
     build_training_arrays,
+    build_window_arrays,
+    check_window_before_tuning,
     daily_purchases,
     encode_category,
     get_batch,
@@ -46,6 +49,7 @@ from hmrec.recall.twotower.data import (
     profiles_to_device,
     read_training_arrays,
     samples_to_device,
+    summarize_training_arrays,
     write_training_arrays,
 )
 
@@ -163,6 +167,32 @@ def test_build_histories_rejects_negative_days() -> None:
         build_histories(
             events, np.array([1], dtype=np.int32), np.array([-1], dtype=np.int32), 2, N_ARTICLES
         )
+
+
+def test_build_window_arrays_matches_the_step_by_step_build() -> None:
+    window = TrainingWindow(end_anchor=END_ANCHOR, window_days=3)
+    arrays = build_window_arrays(
+        make_transactions(LINES + POISON).lazy(), window, FIXTURE_DAY_ZERO, 4, N_ARTICLES
+    )
+    assert np.array_equal(arrays.history, _arrays(LINES).history)
+    assert arrays.article_idx.tolist() == [20, 15, 40, 50]
+
+
+def test_window_may_not_reach_into_the_tuning_folds() -> None:
+    window = TrainingWindow(end_anchor=END_ANCHOR, window_days=3)
+    check_window_before_tuning(window, END_ANCHOR)  # ends exactly at the anchor: fine
+    with pytest.raises(ValueError, match="would see tuning weeks"):
+        check_window_before_tuning(window, day_index_to_date(9, FIXTURE_DAY_ZERO))
+
+
+def test_summarize_training_arrays_hand_computed() -> None:
+    summary = summarize_training_arrays(_arrays(LINES))
+    assert (summary.n_samples, summary.n_groups, summary.n_users) == (4, 3, 2)
+    assert summary.n_articles == 4
+    assert (summary.first_day, summary.last_day) == (7, 9)
+    # Filled slots per sample: 2, 3, 3, 0 -> mean 2; one of four is empty.
+    assert summary.mean_history_length == 2.0
+    assert summary.empty_history_share == 0.25
 
 
 # ---------------------------------------------------------------- files

@@ -49,7 +49,7 @@ import numpy as np
 import polars as pl
 import torch
 
-from hmrec.config import PreprocessConfig
+from hmrec.config import PreprocessConfig, TrainingWindow
 from hmrec.data.asof import TRANSACTION_DAY, history_window
 from hmrec.data.day_index import date_to_day_index
 from hmrec.data.id_maps import ARTICLE_IDX, CUSTOMER_IDX
@@ -338,6 +338,83 @@ def read_training_arrays(directory: Path) -> TrainingArrays:
     return TrainingArrays(**loaded)
 
 
+def check_window_before_tuning(window: TrainingWindow, first_tuning_anchor: date) -> None:
+    """Fail if a training window reaches into the first tuning fold (proposal §6.2).
+
+    The base model must never see D1-D4, so its window must end on or before
+    the D1 anchor (end_anchor is exclusive).
+    """
+    if window.end_anchor > first_tuning_anchor:
+        raise ValueError(
+            f"training window ends at {window.end_anchor}, after the first tuning anchor "
+            f"{first_tuning_anchor}: the model would see tuning weeks"
+        )
+
+
+def build_window_arrays(
+    transactions: pl.LazyFrame,
+    window: TrainingWindow,
+    day_zero: date,
+    history_length: int,
+    n_articles: int,
+) -> TrainingArrays:
+    """Read the purchase lines of a window (through asof) and build its training arrays.
+
+    Args:
+        transactions: data/processed/transactions.parquet (scan_processed_parquet).
+        window: Sample window [end_anchor - window_days, end_anchor).
+        day_zero: PreprocessConfig.day_zero.
+        history_length: L (20).
+        n_articles: Number of real articles (the padding index).
+    """
+    window_lines = load_window_lines(transactions, window.end_anchor, day_zero, window.window_days)
+    all_lines = load_all_lines_before(transactions, window.end_anchor, day_zero)
+    return build_training_arrays(window_lines, all_lines, history_length, n_articles)
+
+
+@dataclass(frozen=True)
+class TrainingArraysSummary:
+    """Numbers reported after building a window's arrays.
+
+    Attributes:
+        n_samples: Positives N.
+        n_groups: Distinct (customer, day) groups.
+        n_users: Distinct customers.
+        n_articles: Distinct positive articles.
+        first_day: Smallest t_dat_day.
+        last_day: Largest t_dat_day.
+        mean_history_length: Mean number of filled history slots per sample.
+        empty_history_share: Share of samples with no purchase before their day.
+        array_bytes: Total size of the arrays in memory.
+    """
+
+    n_samples: int
+    n_groups: int
+    n_users: int
+    n_articles: int
+    first_day: int
+    last_day: int
+    mean_history_length: float
+    empty_history_share: float
+    array_bytes: int
+
+
+def summarize_training_arrays(arrays: TrainingArrays) -> TrainingArraysSummary:
+    """Count samples, groups, users and articles, and describe the histories."""
+    filled_slots = arrays.history_mask.sum(axis=1)
+    return TrainingArraysSummary(
+        n_samples=arrays.n_samples,
+        n_groups=int(np.unique(arrays.group_id).size),
+        n_users=int(np.unique(arrays.customer_idx).size),
+        n_articles=int(np.unique(arrays.article_idx).size),
+        first_day=int(arrays.t_dat_day.min()),
+        last_day=int(arrays.t_dat_day.max()),
+        mean_history_length=float(filled_slots.mean()),
+        empty_history_share=float((filled_slots == 0).mean()),
+        array_bytes=sum(int(getattr(arrays, f.name).nbytes) for f in fields(arrays)),
+    )
+
+
 # ---------------------------------------------------------------- category codes
 
 
@@ -553,31 +630,41 @@ class Batch:
     profile: torch.Tensor
 
 
+def to_device_tensor(array: np.ndarray, device: torch.device) -> torch.Tensor:
+    """Move a numpy array to the device without changing its dtype.
+
+    np.require copies the array only when it is read-only or not contiguous
+    (e.g. a zero-copy view from Polars): torch must not share read-only memory.
+    """
+    writable = np.require(array, requirements=["C_CONTIGUOUS", "WRITEABLE"])
+    return torch.from_numpy(writable).to(device)
+
+
 def samples_to_device(arrays: TrainingArrays, device: torch.device) -> DeviceSamples:
     """Copy the sample arrays to the device once (int32 / bool, no float64)."""
     return DeviceSamples(
-        customer_idx=torch.from_numpy(arrays.customer_idx.astype(np.int32)).to(device),
-        article_idx=torch.from_numpy(arrays.article_idx.astype(np.int32)).to(device),
-        group_id=torch.from_numpy(arrays.group_id.astype(np.int32)).to(device),
-        history=torch.from_numpy(arrays.history.astype(np.int32)).to(device),
-        history_mask=torch.from_numpy(arrays.history_mask).to(device),
+        customer_idx=to_device_tensor(arrays.customer_idx.astype(np.int32, copy=False), device),
+        article_idx=to_device_tensor(arrays.article_idx.astype(np.int32, copy=False), device),
+        group_id=to_device_tensor(arrays.group_id.astype(np.int32, copy=False), device),
+        history=to_device_tensor(arrays.history.astype(np.int32, copy=False), device),
+        history_mask=to_device_tensor(arrays.history_mask, device),
     )
 
 
 def items_to_device(features: ItemFeatureArrays, device: torch.device) -> DeviceItemFeatures:
     """Copy the item feature table (padding row included) to the device once (~0.4 GB)."""
     return DeviceItemFeatures(
-        image=torch.from_numpy(features.image).to(device),
-        image_mask=torch.from_numpy(features.image_mask).to(device),
-        text=torch.from_numpy(features.text).to(device),
-        text_mask=torch.from_numpy(features.text_mask).to(device),
-        codes=torch.from_numpy(features.codes.codes).to(device),
+        image=to_device_tensor(features.image, device),
+        image_mask=to_device_tensor(features.image_mask, device),
+        text=to_device_tensor(features.text, device),
+        text_mask=to_device_tensor(features.text_mask, device),
+        codes=to_device_tensor(features.codes.codes, device),
     )
 
 
 def profiles_to_device(profiles: CategoryCodes, device: torch.device) -> torch.Tensor:
     """Profile codes int32 [n_customers, 3] on the device; row i = customer_idx i."""
-    return torch.from_numpy(profiles.codes).to(device)
+    return to_device_tensor(profiles.codes, device)
 
 
 def get_batch(samples: DeviceSamples, profiles: torch.Tensor, indices: torch.Tensor) -> Batch:

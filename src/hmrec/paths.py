@@ -103,11 +103,6 @@ class ProjectPaths:
         return self.configs_dir / "recall" / f"{channel_file_stem}.yaml"
 
     @property
-    def twotower_config_file(self) -> Path:
-        """configs/twotower.yaml."""
-        return self.configs_dir / "twotower.yaml"
-
-    @property
     def locks_dir(self) -> Path:
         """configs/locks/ (append-only)."""
         return self.configs_dir / "locks"

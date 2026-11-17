@@ -1,0 +1,26 @@
+# R6 Two-Tower settings, proposal §5 R6 and §6. Read by hmrec.config.load_twotower_config.
+#
+# Only the data and benchmark settings exist so far (M3, step 7). Model, loss
+# and training settings are added when that code is written.
+
+# Fixed, not tuned (proposal §5 R6): the user history is the last 20 purchases
+# before the purchase day.
+history_length: 20
+
+base_window:
+  # Base-model training samples (proposal §6.2): purchase days
+  # [end_anchor - window_days, end_anchor). end_anchor is the D1 anchor, so the
+  # base model never sees D1-D4 (checked against configs/fold_manifest.yaml).
+  end_anchor: 2020-06-03
+  window_days: 182        # 26 weeks: purchase days 2019-12-03 .. 2020-06-02
+
+# Speed benchmark before training (proposal §1.4) with a PLACEHOLDER model
+# (hmrec.recall.twotower.benchmark). These numbers are not the real model's settings.
+benchmark:
+  steps: 200
+  warmup_steps: 10        # first steps (MPS kernel compilation) are reported separately
+  batch_size: 512         # = the fixed batch size of §5 R6
+  embedding_dim: 128      # = the fixed output width of §5 R6
+  learning_rate: 0.001
+  temperature: 0.05
+  seed: 42

@@ -976,7 +976,7 @@ def load_wals_config(path: Path) -> WalsConfig:
     return parse_wals_config(load_yaml(path))
 
 
-# ---------------------------------------------------------------- twotower.yaml
+# ---------------------------------------------------------------- recall/r6_twotower.yaml
 
 
 @dataclass(frozen=True)
@@ -993,40 +993,97 @@ class TrainingWindow:
 
 
 @dataclass(frozen=True)
+class TwoTowerBenchmarkConfig:
+    """Settings of the 200-step speed benchmark with a placeholder model (proposal §1.4).
+
+    Attributes:
+        steps: Training steps per device.
+        warmup_steps: First steps reported separately (MPS compiles kernels then).
+        batch_size: Samples per step.
+        embedding_dim: Output width of both towers.
+        learning_rate: Adam learning rate.
+        temperature: Softmax temperature of the in-batch loss.
+        seed: Seed of the sample order and the weight initialisation.
+    """
+
+    steps: int
+    warmup_steps: int
+    batch_size: int
+    embedding_dim: int
+    learning_rate: float
+    temperature: float
+    seed: int
+
+
+@dataclass(frozen=True)
 class TwoTowerConfig:
-    """Settings from configs/twotower.yaml (proposal §5 R6, §6).
+    """Settings from configs/recall/r6_twotower.yaml (proposal §5 R6, §6).
 
     Attributes:
         history_length: Number of past purchases in a user history (20).
         base_window: Training samples of the base model (§6.2).
+        benchmark: The pre-training speed benchmark (§1.4).
     """
 
     history_length: int
     base_window: TrainingWindow
+    benchmark: TwoTowerBenchmarkConfig
+
+
+BENCHMARK_KEYS = {
+    "steps",
+    "warmup_steps",
+    "batch_size",
+    "embedding_dim",
+    "learning_rate",
+    "temperature",
+    "seed",
+}
+
+
+def _parse_twotower_benchmark(raw: Mapping[str, Any]) -> TwoTowerBenchmarkConfig:
+    """Parse and check the benchmark section."""
+    where = "r6_twotower.benchmark"
+    check_keys(raw, BENCHMARK_KEYS, where)
+    config = TwoTowerBenchmarkConfig(
+        steps=get_int(raw, "steps", where),
+        warmup_steps=get_int(raw, "warmup_steps", where),
+        batch_size=get_int(raw, "batch_size", where),
+        embedding_dim=get_int(raw, "embedding_dim", where),
+        learning_rate=get_float(raw, "learning_rate", where),
+        temperature=get_float(raw, "temperature", where),
+        seed=get_int(raw, "seed", where),
+    )
+    for key in ("steps", "batch_size", "embedding_dim", "learning_rate", "temperature"):
+        require_positive(getattr(config, key), f"{where}.{key}")
+    if not 0 <= config.warmup_steps < config.steps:
+        raise ValueError(f"{where}.warmup_steps must be in [0, steps), got {config.warmup_steps}")
+    return config
 
 
 def parse_twotower_config(raw: Mapping[str, Any]) -> TwoTowerConfig:
-    """Build a TwoTowerConfig from the parsed content of configs/twotower.yaml.
+    """Build a TwoTowerConfig from the parsed content of configs/recall/r6_twotower.yaml.
 
     Raises:
-        ValueError: If a key is missing or unknown, or a number is not positive.
+        ValueError: If a key is missing or unknown, or a number is out of range.
     """
-    check_keys(raw, {"history_length", "base_window"}, "twotower")
-    raw_window = get_mapping(raw, "base_window", "twotower")
-    where = "twotower.base_window"
+    check_keys(raw, {"history_length", "base_window", "benchmark"}, "r6_twotower")
+    raw_window = get_mapping(raw, "base_window", "r6_twotower")
+    where = "r6_twotower.base_window"
     check_keys(raw_window, {"end_anchor", "window_days"}, where)
     config = TwoTowerConfig(
-        history_length=get_int(raw, "history_length", "twotower"),
+        history_length=get_int(raw, "history_length", "r6_twotower"),
         base_window=TrainingWindow(
             end_anchor=get_date(raw_window, "end_anchor", where),
             window_days=get_int(raw_window, "window_days", where),
         ),
+        benchmark=_parse_twotower_benchmark(get_mapping(raw, "benchmark", "r6_twotower")),
     )
-    require_positive(config.history_length, "twotower.history_length")
+    require_positive(config.history_length, "r6_twotower.history_length")
     require_positive(config.base_window.window_days, f"{where}.window_days")
     return config
 
 
 def load_twotower_config(path: Path) -> TwoTowerConfig:
-    """Read and validate configs/twotower.yaml."""
+    """Read and validate configs/recall/r6_twotower.yaml."""
     return parse_twotower_config(load_yaml(path))

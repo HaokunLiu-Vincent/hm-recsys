@@ -390,25 +390,43 @@ def test_wals_config_rejects_bad_values() -> None:
         parse_wals_config({**VALID_WALS, "random_seed": -1})
 
 
-# ---------------------------------------------------------------- twotower.yaml
+# ---------------------------------------------------------------- recall/r6_twotower.yaml
+
+VALID_TWOTOWER: dict[str, Any] = {
+    "history_length": 20,
+    "base_window": {"end_anchor": date(2020, 6, 3), "window_days": 1},
+    "benchmark": {
+        "steps": 20,
+        "warmup_steps": 2,
+        "batch_size": 8,
+        "embedding_dim": 4,
+        "learning_rate": 0.01,
+        "temperature": 0.1,
+        "seed": 1,
+    },
+}
 
 
-def test_repo_twotower_yaml_matches_proposal_6_2() -> None:
-    config = load_twotower_config(REPO_CONFIGS / "twotower.yaml")
+def test_repo_twotower_yaml_matches_proposal() -> None:
+    config = load_twotower_config(REPO_CONFIGS / "recall" / "r6_twotower.yaml")
     assert config.history_length == 20
-    # Purchase days 2019-12-03 .. 2020-06-02 = [2020-06-03 - 182 days, 2020-06-03).
+    # Purchase days 2019-12-03 .. 2020-06-02 = [2020-06-03 - 182 days, 2020-06-03) (§6.2).
     assert config.base_window.end_anchor == date(2020, 6, 3)
     assert config.base_window.window_days == 182
+    # §1.4: 200 steps; §5 R6: batch 512, embedding 128.
+    assert (config.benchmark.steps, config.benchmark.batch_size) == (200, 512)
+    assert config.benchmark.embedding_dim == 128
 
 
-def test_twotower_config_rejects_typo_and_non_positive() -> None:
-    valid = {
-        "history_length": 20,
-        "base_window": {"end_anchor": date(2020, 6, 3), "window_days": 1},
-    }
+def test_twotower_config_rejects_typo_and_bad_numbers() -> None:
+    assert parse_twotower_config(VALID_TWOTOWER).benchmark.warmup_steps == 2
     with pytest.raises(ValueError, match="history_lenght"):
-        parse_twotower_config({**valid, "history_lenght": 20})
+        parse_twotower_config({**VALID_TWOTOWER, "history_lenght": 20})
+    bad_window = copy.deepcopy(VALID_TWOTOWER)
+    bad_window["base_window"]["window_days"] = 0
     with pytest.raises(ValueError, match="window_days"):
-        parse_twotower_config(
-            {**valid, "base_window": {"end_anchor": date(2020, 6, 3), "window_days": 0}}
-        )
+        parse_twotower_config(bad_window)
+    bad_warmup = copy.deepcopy(VALID_TWOTOWER)
+    bad_warmup["benchmark"]["warmup_steps"] = 20
+    with pytest.raises(ValueError, match="warmup_steps"):
+        parse_twotower_config(bad_warmup)
