@@ -68,7 +68,7 @@
 | 数据处理 | CPU | 只用 Polars（优先 lazy API / streaming），不用 pandas；中间结果一律存 Parquet |
 | R1–R4 | CPU | 向量化计算，按需分块 |
 | R5 WALS | CPU | `implicit` CPU 版，`num_threads=6`（GPU 版只支持 CUDA） |
-| R6 Two-Tower | GPU（MPS） | PyTorch，`device="mps"`，全部 float32（MPS 不支持 float64） |
+| R6 Two-Tower | **CPU** | PyTorch，`device="cpu"`（`configs/recall/r6_twotower.yaml` 的 `training.device`），`torch.set_num_threads(6)`，全部 float32。原计划用 MPS；真实模型的 200 步 benchmark 中 CPU 每步 30.4 ms、MPS 45.2 ms，不满足"MPS 快 1.3 倍以上才用 MPS"的规则，而且 CPU 结果可以逐位复现（`docs/decisions.md` 2026-11-17） |
 | Ranker | CPU | LightGBM，`num_threads=6` |
 | 随机种子 | 全部 | 每个配置固定 seed，写进 config |
 | Python 环境 | — | **Python 3.12**（`.python-version`），由 **uv** 管理（`.venv`）；依赖写在 `pyproject.toml`，精确版本由 **`uv.lock`** 锁定（进 git） |
@@ -105,7 +105,7 @@
 
 | 步骤 | 估算耗时 | 实测 |
 |---|---|---|
-| Base 1 个 epoch（26 周，约 700–800 万样本，batch 512） | 约 2–5 分钟 | **占位模型：MPS 约 9.2 分钟，CPU 约 7.5 分钟**（实际 616 万个样本 = 12,033 步；按 200 步 benchmark 去掉前 10 步后的平均每步时间外推；真实模型待测） |
+| Base 1 个 epoch（26 周，约 700–800 万样本，batch 512） | 约 2–5 分钟 | 占位模型：MPS 约 9.2 分钟，CPU 约 7.5 分钟。**真实模型（2026-11-17，200 步）：CPU 每步 30.4 ms（P90 31.1）→ 约 6.1 分钟 / epoch，6 个 epoch 约 37 分钟；MPS 每步 45.2 ms（P90 54.4）→ 约 9.1 分钟 / epoch**（616 万个样本 = 12,033 步；去掉 1% 报警用户后实际约 1.19 万步）。选用 CPU |
 | 每周 fine-tune（约 30 万样本） | 约 10 秒 – 1 分钟 | 待测 |
 | 每周推理（平均约 8.2 万 query，最多 12.0 万（D3）× 约 10 万商品，取 Top-100） | 几秒到十几秒（分块矩阵乘法 + `torch.topk`） | 待测 |
 
@@ -120,7 +120,7 @@
 
 - 取 batch 远低于一半，**数据管道不需要优化**。
 - 两个设备的 loss 逐步一致（7.860 → 6.388），说明计算相同。
-- 占位模型在 **MPS 上比 CPU 慢约 20%**。占位模型每步的矩阵很小，MPS 的 kernel 启动和 embedding 反向（scatter）开销占主要部分；真实模型更大时结论可能不同。正式训练前用真实模型重新比较两个设备，再决定 R6 在哪个设备上训练（§1.2 目前写的是 MPS）。
+- 占位模型在 **MPS 上比 CPU 慢约 20%**。占位模型每步的矩阵很小，MPS 的 kernel 启动和 embedding 反向（scatter）开销占主要部分；真实模型更大时结论可能不同。正式训练前用真实模型重新比较了两个设备：**CPU 仍然更快**（真实模型每步 30.4 ms vs MPS 45.2 ms，取 batch 占比 0.9% / 1.2%），R6 用 CPU 训练（§1.2）。
 
 ---
 

@@ -267,3 +267,16 @@
   8. **训练设置**：Adam（β = 0.9, 0.999，ε = 1e-8），lr 1e-3 固定不衰减（fine-tune 1e-4），weight decay 0（输出 L2 归一化，权重大小不影响分数，decay 只会让少见商品的 ID 行变小），不做梯度裁剪；batch 512，每个 epoch 用 `(seed, epoch)` 在 CPU 上生成打乱顺序，保留最后一个不满的 batch；6 个 epoch；seed 42；1% 的用户留作报警，只记录 loss。
   9. **实现**：R5 的"按向量点积取 Top-quota、score 用 `dot_pairs` 重新计算"移到 `src/hmrec/recall/vector_scoring.py`，R5 和 R6 共用（R5 的结果不变，R5 测试全部通过）；`make_trial_id` 和 `results/d_phase.csv` 的 JSON 序列化加上 `default=str`（R6 配置中有日期；R1–R5 的 trial_id 不变）。
 - **proposal 已同步**：§5 R6（完整结构和数值）、§1.3（base 训练数组的内存峰值改为更保守的 4.70 GB）、§14（`vector_scoring.py`、`benchmark.py` 的说明）。
+
+## 2026-11-17 Two-Tower 训练设备：CPU（真实模型 200 步 benchmark）
+
+- **结果**（`scripts/m0_benchmark_twotower.py --model real`，HEAD e91b5cb，工作区干净；base 窗口数组，batch 512，200 步，每个设备单独一个进程，去掉前 10 步）：
+
+  | 设备 | 每步平均 | 每步 P90 | 取 batch 占比 | 前 10 步合计 | 内存峰值 |
+  |---|---|---|---|---|---|
+  | CPU（6 线程） | **30.4 ms** | 31.1 ms | 0.9% | 0.34 秒 | RSS 2.18 GB（`/usr/bin/time` 2.18 GB） |
+  | MPS | 45.2 ms | 54.4 ms | 1.2% | 2.94 秒 | RSS 2.15 GB；MPS 张量 1.15 GB（驱动共持有 2.03 GB） |
+
+- **决定**：按上一条记录的规则（MPS 快 1.3 倍以上才用 MPS），**R6 用 CPU 训练和推理**。MPS 的速度只有 CPU 的 0.67 倍。`configs/recall/r6_twotower.yaml` 的 `training.device` 本来就是 `cpu`，不用改；proposal §1.2、§1.4 已同步。
+- **推算**：每个 epoch 约 1.19 万步（去掉 1% 报警用户）× 30.4 ms ≈ **6.0 分钟**，6 个 epoch 约 **36–37 分钟**（另加每个 epoch 末尾的报警用户 loss 和 checkpoint 保存，各几秒）。内存峰值约 2.2–2.5 GB。
+- **附带核对**：R5 的打分代码移到 `recall/vector_scoring.py` 之后，用 R5 在 D 阶段选中的配置（trial 3261309f8e8f）在 D1 上重新运行一次：Recall@100 = 0.12295079519167419、候选 6,398,300 行，与 `results/d_phase.csv` 的记录逐位相同（没有写入 results，也没有写候选文件）。
