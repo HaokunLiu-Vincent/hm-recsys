@@ -16,6 +16,7 @@ from hmrec.config import (
     load_repurchase_config,
     load_selection_rule,
     load_sibling_config,
+    load_twotower_config,
     load_wals_config,
     load_yaml,
     parse_base_config,
@@ -26,6 +27,7 @@ from hmrec.config import (
     parse_queries_config,
     parse_selection_rule,
     parse_sibling_config,
+    parse_twotower_config,
     parse_wals_config,
     preprocess_config_hash,
 )
@@ -386,3 +388,27 @@ def test_wals_config_rejects_bad_values() -> None:
         parse_wals_config({**VALID_WALS, "alpha_conf": 0})
     with pytest.raises(ValueError, match="random_seed"):
         parse_wals_config({**VALID_WALS, "random_seed": -1})
+
+
+# ---------------------------------------------------------------- twotower.yaml
+
+
+def test_repo_twotower_yaml_matches_proposal_6_2() -> None:
+    config = load_twotower_config(REPO_CONFIGS / "twotower.yaml")
+    assert config.history_length == 20
+    # Purchase days 2019-12-03 .. 2020-06-02 = [2020-06-03 - 182 days, 2020-06-03).
+    assert config.base_window.end_anchor == date(2020, 6, 3)
+    assert config.base_window.window_days == 182
+
+
+def test_twotower_config_rejects_typo_and_non_positive() -> None:
+    valid = {
+        "history_length": 20,
+        "base_window": {"end_anchor": date(2020, 6, 3), "window_days": 1},
+    }
+    with pytest.raises(ValueError, match="history_lenght"):
+        parse_twotower_config({**valid, "history_lenght": 20})
+    with pytest.raises(ValueError, match="window_days"):
+        parse_twotower_config(
+            {**valid, "base_window": {"end_anchor": date(2020, 6, 3), "window_days": 0}}
+        )

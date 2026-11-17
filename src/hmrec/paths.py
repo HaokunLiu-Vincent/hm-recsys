@@ -103,6 +103,11 @@ class ProjectPaths:
         return self.configs_dir / "recall" / f"{channel_file_stem}.yaml"
 
     @property
+    def twotower_config_file(self) -> Path:
+        """configs/twotower.yaml."""
+        return self.configs_dir / "twotower.yaml"
+
+    @property
     def locks_dir(self) -> Path:
         """configs/locks/ (append-only)."""
         return self.configs_dir / "locks"
@@ -265,6 +270,10 @@ class ProjectPaths:
     def run_dir(self, run_id: str) -> Path:
         """artifacts/runs/{run_id}/: config snapshot, logs, metrics."""
         return self.artifacts_root / "runs" / run_id
+
+    def twotower_data_dir(self, window_name: str) -> Path:
+        """artifacts/twotower/data/{window_name}/: Two-Tower training arrays, e.g. "base"."""
+        return self.artifacts_root / "twotower" / "data" / window_name
 
     def hpo_trial_dir(self, phase: str, channel: str, trial_id: str) -> Path:
         """artifacts/hpo/{phase}/{channel}/{trial_id}/: per-trial side files (pool flags)."""
