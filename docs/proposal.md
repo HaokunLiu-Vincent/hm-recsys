@@ -86,7 +86,7 @@
 | R1–R3 候选生成（D1，默认配置） | — | **整体峰值 1.77 GB**（`/usr/bin/time` 最大 RSS，整个脚本：读 queries / labels、算活跃池、跑 3 路、评估）；耗时 R1 0.6 秒、R2 0.2 秒、R3 0.5 秒，全程 2.2 秒。单个 channel 的运行时间短于 0.5 秒的采样间隔，**单路峰值不可靠**，不单独列出 | 每路只读需要的列；R2 / R3 的历史先按 query 用户 semi-join |
 | R4 ItemCF 共现矩阵（365 天） | 不分块可能远超 8 GB | **D1（CF3，α=0.7）：整体峰值 2.95 GB**（`/usr/bin/time` 最大 RSS，含读数据；MemoryTracker 采样 2.62 GB）；耗时 17.2 秒（建图 + 邻居 15.5 秒，打分 1.8 秒）。图规模：1,540 万条购买行 → 1,325 万个 (用户, 商品) 对，98.8 万用户，7.2 万商品，`Σ d_u²` ≈ 5.1 亿；28,110 个 seed，分 15 块。**D 阶段（D1–D4 四周，9 个配置）：最重的 trial 峰值 4.76 GB**（MemoryTracker 采样，整个进程，含已加载的 4 周数据；配置 seed 窗口 365 天、衰减关，4 周共 115 秒）；seed 窗口越长，要算邻居的 seed 越多，峰值越高（其余 trial 3.9–4.6 GB） | **按 seed item 分块**（每块约 2,000 个 item），每块算完只保留 Top-`K_n` 邻居就释放。4.76 GB 离 6 GB 上限太近：**M6 之前把 `chunking.item_chunk_size` 从 2000 调到 1000**（分块只影响内存和速度，不影响结果：分块和不分块的 `C_w` 逐位相同，有测试） |
 | R5 WALS（180 天） | ~0.5–1 GB | **D1（W2，默认配置）：整体峰值 3.10 GB**（`/usr/bin/time` 最大 RSS；MemoryTracker 采样：拟合 0.96 GB，打分 2.11 GB）；耗时 63.8 秒（拟合 53.0 秒，打分 10.8 秒）。矩阵 71.1 万用户 × 5.2 万商品，590 万个非零值。**峰值来自打分**而不是拟合：打分按 `chunking.dense_score_query_chunk_size` = 5,000 个 query 分块，每块 5,000 × 20,764 个活跃商品的 float32 分数矩阵约 0.41 GB，再加 `np.partition` 的副本（分块为 1 万时整体峰值 4.05 GB；两种分块的 Recall@100 都是 11.36%，候选行数相同）。当前 `implicit` 的 macOS wheel 没有链接 OpenMP，拟合实际是**单线程**（`num_threads=6` 不起作用） | 稀疏 CSR，没问题 |
-| R6 Two-Tower 训练 | ~1.5–2 GB | **训练数组生成（base 窗口，2026-11-17）：峰值 3.35 GB**（MemoryTracker 采样；`/usr/bin/time` 最大 RSS 4.15 GB，含读数据），耗时 4.6 秒；616 万个样本，数组共 670 MB（`history` int32 470 MB、`history_mask` 118 MB）。**200 步 benchmark（占位模型，batch 512）**：MPS 进程最大 RSS 2.00 GB，MPS 张量占用 1.17 GB（驱动共持有 2.02 GB，统一内存，与 RSS 部分重叠）；CPU 进程最大 RSS 2.34 GB。真实模型（训练全程）待测 | 用户历史预先存成 int32 数组 `[N, 20]`；商品特征表（~10.5 万 × 896 维，约 380 MB）整块放进 MPS 显存；batch 直接按下标取，不用 DataLoader |
+| R6 Two-Tower 训练 | ~1.5–2 GB | **训练数组生成（base 窗口，2026-11-17）：峰值 4.70 GB**（取较保守的值：两次运行 MemoryTracker 采样分别为 3.35 GB 和 4.70 GB，任务只有约 4.5 秒，0.5 秒的采样间隔误差大；`/usr/bin/time` 最大 RSS 4.15 GB，含读数据），耗时 4.6 秒；616 万个样本，数组共 670 MB（`history` int32 470 MB、`history_mask` 118 MB）。**200 步 benchmark（占位模型，batch 512）**：MPS 进程最大 RSS 2.00 GB，MPS 张量占用 1.17 GB（驱动共持有 2.02 GB，统一内存，与 RSS 部分重叠）；CPU 进程最大 RSS 2.34 GB。真实模型（训练全程）待测 | 用户历史预先存成 int32 数组 `[N, 20]`；商品特征表（~10.5 万 × 896 维，约 380 MB）整块放进 MPS 显存；batch 直接按下标取，不用 DataLoader |
 | 候选生成（每周） | 合并前最多约 3,940 万行，全部放在内存约 0.73 GB（D3 约 1.07 GB）；单个 channel 最多约 0.15 GB；合并去重后约 2,050 万行（计算见表下 ①） | 待测 | 每个 channel 单独写 Parquet，再按 query 分块合并去重 |
 | Ranker 训练（4 周） | 负采样 1:40 约 1,100 万行，1:80 约 2,170 万行（上限）；原始 float32 特征约 2.3–4.5 GB，分箱后约 0.6–1.1 GB（计算见表下 ②） | 待测 | **流式加载（stream loading）**：每周特征按 row group 存 Parquet，用 LightGBM 的 `lgb.Sequence` 分批读入构建 `Dataset`，原始特征不必一次性放进内存；构建后的分箱数据（每个值 1 字节）约 0.5–1 GB，存成 LightGBM binary 文件复用 |
 | Ranker 推理（每周，不采样） | 一次全放进内存约 4.3 GB；按 1 万 query 分块后每块约 0.52 GB（计算见表下 ③） | 待测 | **按 query 分块打分**（每块 1 万个 query） |
@@ -385,14 +385,47 @@ Recency-only 的分数 = `1 / age_days`，`age_days` 取用户最近一次购买
 
 ### R6 — Two-Tower（训练方式详见 §6）
 
-**模型**：
-- **Item tower**：冻结的 CLIP（512 维）和 MiniLM（384 维）向量，经过可训练的投影层；加上可训练的 `article_id`、`product_code` 和类目 embedding；有缺失时用 mask。
-  - 没有图像向量的 442 个商品（见 §2.1）：图像输入用 mask 遮掉（不填 0 向量当作真实输入），商品向量由文本、ID 和类目部分得到。这些商品**照常参与训练和召回**，不从商品目录或活跃池中删除。
-- **User tower**：用户在 anchor 之前**最近 20 件购买**（不限时间窗口）经过 item tower 编码后做 pooling，再加上用户 profile（年龄桶、会员状态、news 频率）。
-- 两边输出 128 维向量，L2 归一化。
-- **Loss**：in-batch softmax，加 LogQ 修正（按商品被采样的频率扣分）。同一用户同一天买的多个商品，在同一个 batch 里都算正样本（multi-positive），不能互相当作负样本。
-- 推理：用户向量点乘活跃池内所有商品向量，取 Top-100。
-- 固定（不调）：batch 512、embedding 128、温度、LR、history 长度 20。
+**模型**（全部数值固定、不调；写在 `configs/recall/r6_twotower.yaml`，实现在 `src/hmrec/recall/twotower/`；理由见 `docs/decisions.md` 2026-11-17 "Two-Tower 模型结构"）：
+
+**类别特征的编码规则**（两个塔都适用）：取值数（含缺失编码 0）≤ 20 的字段用 one-hot；> 20 的字段用 embedding，维度 16，`padding_idx = 0`，初始化 N(0, 0.02²)。article ID 和 product_code 例外（见下表）。按实际数据的取值数：
+
+| 字段 | 取值数（含 0） | 编码 | 维度 |
+|---|---|---|---|
+| product_type_no | 133 | embedding | 16 |
+| product_group_name | 20 | one-hot | 20 |
+| garment_group_no | 22 | embedding | 16 |
+| index_group_no | 6 | one-hot | 6 |
+| section_no | 58 | embedding | 16 |
+| colour_group_code | 51 | embedding | 16 |
+| age_bucket | 8 | one-hot | 8 |
+| club_member_status | 4 | one-hot | 4 |
+| fashion_news_frequency | 4 | one-hot | 4 |
+
+- **Item tower**（历史商品和目标商品共用同一个 item tower，参数完全共享）：下列各部分**拼接**：
+
+  | 部分 | 结构 | 维度 |
+  |---|---|---|
+  | 图像 | `Linear(512 → 128)`，输出乘以 `image_mask`（没有图像时这一部分包括 bias 全为 0） | 128 |
+  | 文本 | `Linear(384 → 128)`，输出乘以 `text_mask` | 128 |
+  | article ID | `Embedding(n_articles + 1, 64, padding_idx = n_articles)`，初始化为 0 | 64 |
+  | product_code | `Embedding(47,225, 32, padding_idx = 0)`，初始化为 0 | 32 |
+  | 6 个类目字段 | 按上面的规则：16 + 20 + 16 + 6 + 16 + 16 | 90 |
+  | **合计** | | **442** |
+
+  拼接后 → `Linear(442 → 256)` → ReLU → `Linear(256 → 128)` → L2 归一化。
+  - 没有图像向量的 442 个商品（见 §2.1）：图像部分乘以 mask 后为 0（不填 0 向量当作真实输入），商品向量由文本、ID 和类目部分得到。这些商品**照常参与训练和召回**，不从商品目录或活跃池中删除。
+  - article ID 和 product_code 初始化为 0：训练中没出现过的商品（或款式），这一部分保持 0，向量只由内容和类目决定，不引入随机噪声。
+- **User tower**：用户在 anchor（训练时为购买日）之前**最近 20 件购买**（不限时间窗口；去重、排序、padding 规则见 §6.1）经过同一个 item tower 编码（padding 位置不参与编码）。**按位置加权 pooling**：为 20 个位置各学一个标量 `w_j`（初始为 0，即开始时等于 masked mean），`pooled = Σ_j a_j · h_j`，`a = softmax(w)` 只在 mask 为 True 的位置上计算；历史为空时 `pooled = 0`。Profile：三个字段都是 one-hot，共 16 维。`[pooled 128 ; profile 16]`（144 维）→ `Linear(144 → 256)` → ReLU → `Linear(256 → 128)` → L2 归一化。
+- **Loss**：multi-positive、duplicate-aware 的 in-batch softmax 加 LogQ 修正：
+  - 列 = batch 中**去重后**的目标商品（同一商品在 batch 中出现多次只算一列，不会被当成两个负样本）；
+  - `logit[i, k] = u_i · v_k / τ − log Q(k)`，**τ = 0.05**，对所有列（包括目标列）都做 LogQ 修正；
+  - `Q(k)` = 当前训练集中以 k 为目标的样本占比：base 用全部 base 训练样本（不含报警用户）统计，每周 fine-tune 用该次的训练集（新一周 + replay）统计；
+  - 同一 group（同一用户同一天）的其他正样本所在的列，在该行置为 −∞（既不是目标也不是负样本）；loss = 每行对其目标列的交叉熵的平均。
+- **训练**：batch 512；每个 epoch 用 `(seed, epoch)` 在 CPU 上生成随机打乱顺序，保留最后一个不满的 batch；Adam（β = 0.9, 0.999；ε = 1e-8），lr **1e-3 固定不衰减**（fine-tune 1e-4），weight decay 0，不做梯度裁剪；训练 **6 个 epoch**，每个 epoch 存一个 checkpoint（`artifacts/models/twotower/base/epoch_{k}.pt`）；seed 42；留出 1% 的用户只记录 loss 作为报警，不用于任何选择。每一步只对 batch 中出现的不同商品（目标 + 历史，去掉 padding）编码一次，再按下标取回。
+- **设备**：真实模型在 mps 和 cpu 上各跑 200 步（各自一个进程，前 10 步不计时），只有 MPS 的平均每步时间比 CPU 快 1.3 倍以上时才用 MPS，否则用 CPU（MPS 上 embedding 反向传播不是确定性的，结果无法精确复现）。结果记入 `docs/decisions.md`。
+- **推理**：R6 是普通的 `RecallChannel`（`recall/twotower/infer.py`）。历史为 anchor 之前最近 20 件（规则与训练相同，数据先裁剪到当周 query 用户）；没有历史的用户使用只含 profile 的向量。只对活跃池 `A(a)` 中的商品计算向量，按 `chunking.dense_score_query_chunk_size` 分块取 Top-100（与 R5 共用 `recall/vector_scoring.py`）；`score` 用 `vectors.dot_pairs` 重新计算，保证与 §8.3 的 `tt_dot` 逐位相同；排序 `score DESC, article_idx ASC`。
+- **E_base 的选择**：默认 epoch 1，候选 epoch 2–6，epoch 少的优先（`configs/hpo/d_phase.yaml` 的 `r6_twotower.base_epoch` 步骤），按 §4.2 的多候选规则选择；每个 checkpoint 不做任何更新，直接预测 D1–D4，结果写入 `results/d_phase.csv` 和 `results/d_phase_steps/r6_twotower.csv`。选中 epoch 6 时停下，由人决定。
+- 固定（不调）：以上全部，包括 batch 512、输出 128、温度 0.05、LR、history 长度 20、epoch 数 6。
 
 | 类型 | 内容 | 成本 |
 |---|---|---|
@@ -796,11 +829,12 @@ hm-recsys/
 │   │   ├── r3_sibling.py
 │   │   ├── r4_itemcf.py
 │   │   ├── r5_wals.py
+│   │   ├── vector_scoring.py    # R5 / R6 共用：按向量点积取 Top-quota，score 用 vectors.dot_pairs
 │   │   └── twotower/
 │   │       ├── data.py          # 训练样本、用户历史数组 [N, 20]、商品特征表（末尾 padding 行）、在设备上取 batch
-│   │       ├── benchmark.py     # §1.4 的占位模型和 200 步计时（不是 R6 正式模型）
+│   │       ├── benchmark.py     # §1.4 的 200 步计时（占位模型；也用于真实模型的设备选择）
 │   │       ├── model.py         # ItemTower、UserTower
-│   │       ├── loss.py          # multi-positive in-batch softmax + LogQ
+│   │       ├── loss.py          # multi-positive、duplicate-aware 的 in-batch softmax + LogQ
 │   │       ├── train.py         # base 训练、每周 fine-tune
 │   │       ├── infer.py         # 生成用户 / 商品向量，取 Top-100
 │   │       └── chain.py         # §6 的训练链：先预测、再 fine-tune

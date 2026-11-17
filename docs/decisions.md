@@ -251,3 +251,19 @@
   - 200 步 benchmark：取 batch 占每步时间的 1.7%（MPS）和 0.7%（CPU），数据管道不需要优化。占位模型在 MPS 上每步 45.0 ms，**比 CPU（37.1 ms）慢约 20%**；按此外推 1 个 epoch 约 9.2 分钟（MPS）/ 7.5 分钟（CPU），高于 §1.4 原估算的 2–5 分钟。
 - **未决定**：R6 用哪个设备训练。§1.2 仍写 MPS；用真实模型重新比较后再定。
 - **说明**：数组生成和 benchmark 运行时，Part 3 的新代码尚未 commit（`metadata.json` 记录 `git_dirty: true`，HEAD 9e34ba1）；数据构建的核心逻辑（`data.py` 的样本、历史、padding）在 9e34ba1 中已 commit。
+
+## 2026-11-17 Two-Tower 模型结构、loss、训练设置和 E_base 选择（M3 第 8 步）
+
+完整结构和全部固定数值见 proposal §5 R6 和 `configs/recall/r6_twotower.yaml`。以下是相对 proposal 原文新增或具体化的决定，都在**看到任何 R6 分数之前**做出。
+
+- **决定与理由**：
+  1. **Item tower 各部分拼接，而不是相加**：图像 128、文本 128、article ID 64、product_code 32、6 个类目字段 90（按下一条规则），共 442 维。理由：相加要求每个字段都是 128 维，取值很少的字段也要占 128 维；拼接后每个字段可以用合适的维度，由后面的层决定怎么组合。
+  2. **类别特征编码规则**（两个塔都适用）：取值数（含缺失编码 0）≤ 20 的字段用 one-hot，> 20 的用 16 维 embedding（`padding_idx = 0`，初始化 N(0, 0.02²)）；article ID（64 维，`padding_idx = n_articles`）和 product_code（32 维）例外，都初始化为 0。按实际数据：product_group_name（20）、index_group_no（6）、age_bucket（8）、club_member_status（4）、fashion_news_frequency（4）用 one-hot；product_type_no（133）、garment_group_no（22）、section_no（58）、colour_group_code（51）用 embedding。理由：取值很少的字段，embedding 维度超过取值数没有意义，后面的 Linear 会把多余的维度合并掉，只会增加参数和噪声。ID 初始化为 0：训练中没出现过的商品，这一部分保持 0，不引入随机噪声。
+  3. **两个塔都加一层非线性**：拼接后 → `Linear(→ 256)` → ReLU → `Linear(256 → 128)` → L2 归一化。理由：拼接后各部分只经过线性组合就无法表达字段之间的交互（例如某个类目下图像的重要性不同）。
+  4. **按位置加权的 pooling**：20 个历史位置各学一个标量权重，只在有购买的位置上做 softmax（初始全为 0，即从 masked mean 开始）；历史为空时 pooled = 0。理由：历史按从近到远排序；R4 加入 seed 时间衰减后提升了 14.5%，说明新旧很重要，而 masked mean 对所有位置一视同仁。
+  5. **Duplicate-aware**（**proposal 原文没有，这是新增的要求**）：loss 的列是 batch 中去重后的目标商品，同一商品出现多次只算一列。理由：热门商品在同一 batch 中常被多个用户购买；不去重时，它对其他用户会被当作多个负样本，惩罚被重复计算。同组的其他正样本所在列置为 −∞（multi-positive，proposal 原文已有）。τ = 0.05；LogQ 的 `Q(k)` 只用当前训练集统计（base：全部 base 训练样本，不含报警用户；fine-tune：该次的新一周 + replay）。
+  6. **设备选择规则**：真实模型在 mps 和 cpu 上各跑 200 步（各自一个进程，前 10 步不计时），只有 MPS 的平均每步时间比 CPU 快 **1.3 倍以上**时才用 MPS，否则用 CPU。理由：MPS 上 embedding 的反向传播不是确定性的，训练结果无法精确复现；CPU 上的结果可以逐位复现（有测试）。`configs/recall/r6_twotower.yaml` 的 `training.device` 先写为 `cpu`，benchmark 之后按此规则确定，结果另记一条。
+  7. **E_base 的选择方式**（proposal §6.3 只写了"按 §4 规则"）：默认 epoch 1，候选 epoch 2–6，epoch 少的优先（训练更少 = 更便宜），按 §4.2 的多候选规则选择，写在 `configs/hpo/d_phase.yaml` 的 `r6_twotower.base_epoch`。选中 epoch 6（最后一个 checkpoint）时停下，由人决定（`stop_at_boundary`）。
+  8. **训练设置**：Adam（β = 0.9, 0.999，ε = 1e-8），lr 1e-3 固定不衰减（fine-tune 1e-4），weight decay 0（输出 L2 归一化，权重大小不影响分数，decay 只会让少见商品的 ID 行变小），不做梯度裁剪；batch 512，每个 epoch 用 `(seed, epoch)` 在 CPU 上生成打乱顺序，保留最后一个不满的 batch；6 个 epoch；seed 42；1% 的用户留作报警，只记录 loss。
+  9. **实现**：R5 的"按向量点积取 Top-quota、score 用 `dot_pairs` 重新计算"移到 `src/hmrec/recall/vector_scoring.py`，R5 和 R6 共用（R5 的结果不变，R5 测试全部通过）；`make_trial_id` 和 `results/d_phase.csv` 的 JSON 序列化加上 `default=str`（R6 配置中有日期；R1–R5 的 trial_id 不变）。
+- **proposal 已同步**：§5 R6（完整结构和数值）、§1.3（base 训练数组的内存峰值改为更保守的 4.70 GB）、§14（`vector_scoring.py`、`benchmark.py` 的说明）。
