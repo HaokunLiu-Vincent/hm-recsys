@@ -447,6 +447,13 @@ Recency-only 的分数 = `1 / age_days`，`age_days` 取用户最近一次购买
 
 如果 union recall 明显低于 24%，**先改 recall，不进入 F 阶段**。是否删掉某一路，由 V 阶段的系统级 ablation（MAP@12）决定，不在这里决定。
 
+**实现**（`src/hmrec/hpo/union_check.py`、`scripts/m4_union_check.py`，设置在 `configs/m4_union_check.yaml`）：
+- 六路使用 D 阶段的选择（从 `results/d_phase.csv` 重放规则，不运行新的 trial），加上 `manual_selection` 中的人工选择（R6 采用 (E_update = 2, replay = 50%)，见 `docs/decisions.md`）。
+- R1–R5 的候选优先复用预检查的文件（`artifacts/hpo/D/union_precheck/`，trial_id 相同即配置相同）；R6 **不重新训练**，每一周用训练链在这一周 fine-tune **之前**保存的模型预测（D1 用 base 的 E_base checkpoint，D2 用 `chain/{trial_id}/D1.pt`，依此类推）。候选写到 `artifacts/m4/candidates/`，结果写到 `results/m4_union_check.csv`。
+- 每一路每一周的选择指标必须与 `results/d_phase.csv` 中的记录**逐位相同**，否则报错停下。
+- 内存：union 只用**命中 label 的候选**计算（先把每一路的候选与 label 做一次 semi join，命中的行约占 1/400），union recall 和 leave-one-out 都在这些小表上做；每个 query 的候选数按 query 分块统计。结果与直接在全部候选上计算完全一致（有测试）。
+- 第 4 项的决策标准用 **4 周合并（query-weighted）的 union recall**，阈值 0.001（0.1 个百分点）写在 `configs/m4_union_check.yaml`，严格小于才改。M4 的运行只计算并报告规则的结论；如果结论是"改"，R3 的配置修改和候选重新生成在锁定（M5）之前另行完成。
+
 ### 5.8 D 阶段工作量汇总
 
 | Channel | 配置数 | 成本 |
@@ -497,6 +504,7 @@ Recency-only 的分数 = `1 / age_days`，`age_days` 取用户最近一次购买
 - 所有链在 D1 上的分数相同（都是 base 的预测），真正区分配置的是 D2–D4：§4.2 的"4 周中至少 3 周严格更好"实际要求 D2、D3、D4 都更好，这是预期的行为。
 - **稳健性**：按 §4.2 规则排名前 2 的配置（第 1 名是规则选中的；第 2 名是去掉第 1 名后规则会选中的；没有候选通过时按合并分数排）各再用 seed 43、44 跑一遍（只影响 fine-tune 的打乱顺序和 replay 抽样），汇报均值和波动（`results/d_phase_steps/r6_twotower_seeds.csv`）。**选择仍以 seed 42 的结果为准**，额外的 seed 只用于汇报。
 - 内存：训练链按 fold 逐个处理，每周的 fine-tune 数组用完就释放；历史只读取涉及的用户的购买。
+- **D 阶段结果**（2026-11-17）：规则选中 (E_update = 2, replay = 0)（合并 Recall@100 14.576%，frozen 为 11.843%）；**人工采用 (2, 50%)**（14.634%），这是偏离规则的决定，理由见 `docs/decisions.md`。
 
 ### 6.5 第 3 步：锁定
 
@@ -790,6 +798,7 @@ hm-recsys/
 │   ├── preprocess.yaml          # M0：day_zero、年龄桶边界、embedding 维数、交易表 row group 大小
 │   ├── catalog.yaml             # 活跃池 A(a)：window_days=28、min_purchase_lines=3（§2.4，冻结，不调）
 │   ├── queries.yaml             # query_id_fold_offset（§2.3 query_id 的编号规则）
+│   ├── m4_union_check.yaml      # M4：union recall 目标、R3 活跃池规则的阈值（预先登记）、人工选择
 │   ├── recall/                  # 每路的默认配置
 │   │   ├── r1_popularity.yaml
 │   │   ├── r2_repurchase.yaml
@@ -872,7 +881,10 @@ hm-recsys/
 │       ├── selection.py         # 实现 §4 的选择规则（含多候选规则、R5 收敛检查）
 │       ├── records.py           # 一个 trial 的结果；results/d_phase.csv 的读写（可断点续跑）
 │       ├── runner.py            # 逐个 trial 在每个 fold 上运行、记录，并逐步应用选择规则
-│       └── d_phase.py           # D 阶段：加载 D1–D4，按 channel 运行，写结果和每一步的报告
+│       ├── d_phase.py           # D 阶段：加载 D1–D4，按 channel 运行，写结果和每一步的报告
+│       ├── robustness.py        # 一步中排名靠前的配置再跑额外的 seed（只汇报，不参与选择）
+│       ├── union_precheck.py    # 重放规则得到各路的选择；R1–R5 的 union 预检查
+│       └── union_check.py       # M4：六路 union 检查（只用命中的候选计算）、R3 活跃池规则
 │
 ├── scripts/                     # 命令行入口，只做"读参数 → 调用 src → 写结果"
 │   ├── m0_preprocess.py
