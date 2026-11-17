@@ -1,0 +1,21 @@
+# Candidate generation for F1-T4 with the locked recall configuration (M6, proposal §6.6).
+# Read by hmrec.config.load_candidate_run_config.
+#
+# NOTHING here changes a candidate. The recall configuration comes only from
+# configs/locks/ (hmrec.recall.locked). These are monitoring and stop settings.
+
+monitoring:
+  # Proposal §6.6: a week whose recall is more than 10% below the mean of the 4
+  # weeks before it is FLAGGED in the report. The configuration is never changed.
+  # For F1 the 4 weeks before are D1-D4 (the scores recorded in the lock files).
+  previous_folds: 4
+  max_relative_recall_drop: 0.10
+
+twotower_chain:
+  # The R6 chain stops for a human decision if a weekly fine-tune ends with a
+  # training loss or an alarm-user loss that is not finite or above this value.
+  # For scale: the D-phase chain (E_update 2, replay 50%) ended each week with a
+  # training loss of 5.49-5.56 and an alarm loss of 5.25-5.69
+  # (results/d_phase.csv, trial 835ef201ee4d). 7.0 is far above both, so reaching
+  # it means the model has clearly diverged, not that a week was unusual.
+  max_fine_tune_loss: 7.0

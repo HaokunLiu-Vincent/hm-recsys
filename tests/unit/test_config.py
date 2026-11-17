@@ -8,6 +8,7 @@ import pytest
 from hmrec.config import (
     ActivePoolConfig,
     load_base_config,
+    load_candidate_run_config,
     load_catalog_config,
     load_itemcf_config,
     load_popularity_config,
@@ -21,6 +22,7 @@ from hmrec.config import (
     load_wals_config,
     load_yaml,
     parse_base_config,
+    parse_candidate_run_config,
     parse_catalog_config,
     parse_itemcf_config,
     parse_popularity_config,
@@ -483,3 +485,26 @@ def test_sibling_active_pool_only_is_optional_and_a_bool() -> None:
     assert parse_sibling_config({**raw, "active_pool_only": True}).active_pool_only is True
     with pytest.raises(ValueError, match="active_pool_only"):
         parse_sibling_config({**raw, "active_pool_only": "yes"})
+
+
+def test_repo_candidate_run_config() -> None:
+    config = load_candidate_run_config(REPO_CONFIGS / "m6_candidates.yaml")
+    # Proposal §6.6: flagged if more than 10% below the mean of the previous 4 weeks.
+    assert (config.previous_folds, config.max_relative_recall_drop) == (4, 0.10)
+    assert config.max_fine_tune_loss == 7.0
+
+
+def test_candidate_run_config_errors() -> None:
+    raw = {
+        "monitoring": {"previous_folds": 4, "max_relative_recall_drop": 0.1},
+        "twotower_chain": {"max_fine_tune_loss": 7.0},
+    }
+    assert parse_candidate_run_config(raw).previous_folds == 4
+    with pytest.raises(ValueError, match="unknown keys"):
+        parse_candidate_run_config({**raw, "channels": {}})
+    for drop in (0.0, 1.0):
+        bad = {**raw, "monitoring": {"previous_folds": 4, "max_relative_recall_drop": drop}}
+        with pytest.raises(ValueError, match=r"must be in \(0, 1\)"):
+            parse_candidate_run_config(bad)
+    with pytest.raises(ValueError, match="must be > 0"):
+        parse_candidate_run_config({**raw, "twotower_chain": {"max_fine_tune_loss": 0.0}})

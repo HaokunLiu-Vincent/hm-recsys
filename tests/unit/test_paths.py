@@ -77,12 +77,29 @@ def test_build_paths_derives_everything_from_roots(tmp_path: Path) -> None:
         tmp_path / "results" / "m4_union_check_r3_active_pool.csv"
     )
     assert paths.m4_trials_file == tmp_path / "results" / "m4_trials.csv"
+    # M6: candidates, the files the features read, the locked chain models, results.
+    assert paths.m6_config_file == tmp_path / "configs" / "m6_candidates.yaml"
+    assert paths.r1_bucket_scores_file("F1") == Path(
+        "/abs/artifacts/candidates/F1/r1_bucket_scores.parquet"
+    )
+    assert paths.wals_vectors_dir("F1") == Path("/abs/artifacts/models/wals/F1")
+    assert paths.twotower_vectors_dir("V2") == Path("/abs/artifacts/models/twotower/vectors/V2")
+    assert paths.twotower_locked_chain_checkpoint_file("T3") == Path(
+        "/abs/artifacts/models/twotower/chain_locked/T3.pt"
+    )
+    assert paths.m6_runs_file == tmp_path / "results" / "m6_runs.csv"
+    assert paths.m6_candidates_results_file == tmp_path / "results" / "m6_candidates.csv"
+    assert paths.m6_twotower_chain_results_file == tmp_path / "results" / "m6_twotower_chain.csv"
     assert paths.m5_lock_check_results_file == tmp_path / "results" / "m5_lock_check.csv"
     assert paths.channels_lock_file == tmp_path / "configs" / "locks" / "channels.lock.yaml"
     assert paths.twotower_lock_file == tmp_path / "configs" / "locks" / "twotower.lock.yaml"
     # The M5 lock check writes its candidates away from artifacts/candidates/.
     assert paths.lock_check_candidates_file("D1", "r4_itemcf") == Path(
         "/abs/artifacts/m5/lock_check/D1/r4_itemcf.parquet"
+    )
+    # A repeated check gets its own folder, so the first check's files stay untouched.
+    assert paths.lock_check_candidates_file("D1", "r4_itemcf", "after_m6_refactor") == Path(
+        "/abs/artifacts/m5/lock_check_after_m6_refactor/D1/r4_itemcf.parquet"
     )
     assert paths.d_phase_seeds_file("r6_twotower") == (
         tmp_path / "results" / "d_phase_steps" / "r6_twotower_seeds.csv"

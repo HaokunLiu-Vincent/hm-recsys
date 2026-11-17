@@ -1432,3 +1432,60 @@ def parse_union_check_config(raw: Mapping[str, Any]) -> UnionCheckConfig:
 def load_union_check_config(path: Path) -> UnionCheckConfig:
     """Read and validate configs/m4_union_check.yaml."""
     return parse_union_check_config(load_yaml(path))
+
+
+# ---------------------------------------------------------------- m6_candidates.yaml
+
+
+@dataclass(frozen=True)
+class CandidateRunConfig:
+    """Settings from configs/m6_candidates.yaml (proposal §6.6; candidate generation, M6).
+
+    Nothing here changes a candidate: these are monitoring and stop settings only.
+
+    Attributes:
+        previous_folds: A channel's recall is compared with the mean of this
+            many folds before it (4).
+        max_relative_recall_drop: A fold is FLAGGED (reported, nothing is
+            changed) if its recall is more than this share below that mean (0.10).
+        max_fine_tune_loss: The R6 chain stops for a human if a weekly
+            fine-tune's training loss or alarm-user loss is not finite or above this.
+    """
+
+    previous_folds: int
+    max_relative_recall_drop: float
+    max_fine_tune_loss: float
+
+
+def parse_candidate_run_config(raw: Mapping[str, Any]) -> CandidateRunConfig:
+    """Build a CandidateRunConfig from the parsed content of configs/m6_candidates.yaml.
+
+    Raises:
+        ValueError: If a key is missing or unknown, or a number is out of range.
+    """
+    where = "m6_candidates"
+    check_keys(raw, {"monitoring", "twotower_chain"}, where)
+    monitoring = get_mapping(raw, "monitoring", where)
+    check_keys(monitoring, {"previous_folds", "max_relative_recall_drop"}, f"{where}.monitoring")
+    chain = get_mapping(raw, "twotower_chain", where)
+    check_keys(chain, {"max_fine_tune_loss"}, f"{where}.twotower_chain")
+    config = CandidateRunConfig(
+        previous_folds=get_int(monitoring, "previous_folds", f"{where}.monitoring"),
+        max_relative_recall_drop=get_float(
+            monitoring, "max_relative_recall_drop", f"{where}.monitoring"
+        ),
+        max_fine_tune_loss=get_float(chain, "max_fine_tune_loss", f"{where}.twotower_chain"),
+    )
+    require_positive(config.previous_folds, f"{where}.monitoring.previous_folds")
+    require_positive(config.max_fine_tune_loss, f"{where}.twotower_chain.max_fine_tune_loss")
+    if not 0 < config.max_relative_recall_drop < 1:
+        raise ValueError(
+            f"{where}.monitoring.max_relative_recall_drop must be in (0, 1), "
+            f"got {config.max_relative_recall_drop}"
+        )
+    return config
+
+
+def load_candidate_run_config(path: Path) -> CandidateRunConfig:
+    """Read and validate configs/m6_candidates.yaml."""
+    return parse_candidate_run_config(load_yaml(path))

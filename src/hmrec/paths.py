@@ -103,6 +103,11 @@ class ProjectPaths:
         """configs/m4_union_check.yaml."""
         return self.configs_dir / "m4_union_check.yaml"
 
+    @property
+    def m6_config_file(self) -> Path:
+        """configs/m6_candidates.yaml: monitoring and stop settings of M6 candidate generation."""
+        return self.configs_dir / "m6_candidates.yaml"
+
     def recall_config_file(self, channel_file_stem: str) -> Path:
         """configs/recall/{channel_file_stem}.yaml, e.g. "r1_popularity"."""
         return self.configs_dir / "recall" / f"{channel_file_stem}.yaml"
@@ -261,6 +266,34 @@ class ProjectPaths:
         """artifacts/candidates/{fold}/{channel}.parquet."""
         return self.candidates_dir(fold) / f"{channel}.parquet"
 
+    def r1_bucket_scores_file(self, fold: str) -> Path:
+        """artifacts/candidates/{fold}/r1_bucket_scores.parquet: R1's full S(g, i) table.
+
+        One row per (age_bucket, article_idx), not cut to Top-100 and not limited to
+        A(a); read by features/ for pop_bucket_score (proposal §8.3). It is NOT a
+        channel's candidate file.
+        """
+        return self.candidates_dir(fold) / "r1_bucket_scores.parquet"
+
+    def wals_vectors_dir(self, fold: str) -> Path:
+        """artifacts/models/wals/{fold}/: R5 vectors of the fold (hmrec.vectors files)."""
+        return self.model_dir("wals", fold)
+
+    def twotower_vectors_dir(self, fold: str) -> Path:
+        """artifacts/models/twotower/vectors/{fold}/: R6 vectors of the fold (hmrec.vectors files).
+
+        Computed with the model that PREDICTED the fold, i.e. before the fold's fine-tune.
+        """
+        return self.artifacts_root / "models" / "twotower" / "vectors" / fold
+
+    def twotower_locked_chain_checkpoint_file(self, fold: str) -> Path:
+        """artifacts/models/twotower/chain_locked/{fold}.pt: chain model after the fold's fine-tune.
+
+        The F / V / T continuation of the training chain (proposal §6.6). The model
+        of fold k predicts fold k + 1; its sha256 is in results/m6_twotower_chain.csv.
+        """
+        return self.artifacts_root / "models" / "twotower" / "chain_locked" / f"{fold}.pt"
+
     def features_dir(self, fold: str) -> Path:
         """artifacts/features/{fold}/ (holds part-*.parquet)."""
         return self.artifacts_root / "features" / fold
@@ -289,14 +322,19 @@ class ProjectPaths:
         """artifacts/m4/candidates/{fold}/{channel}_{trial_id}.parquet (M4 union check)."""
         return self.artifacts_root / "m4" / "candidates" / fold / f"{channel}_{trial_id}.parquet"
 
-    def lock_check_candidates_file(self, fold: str, channel: str) -> Path:
+    def lock_check_candidates_file(self, fold: str, channel: str, run_name: str = "") -> Path:
         """artifacts/m5/lock_check/{fold}/{channel}.parquet: candidates of the M5 lock check.
 
         Kept apart from artifacts/candidates/ on purpose: these files only prove
         that the lock files reproduce the recorded D-phase scores. No later step
         reads them.
+
+        A REPEATED check (e.g. a regression check after a refactor) passes a
+        `run_name` and writes to artifacts/m5/lock_check_{run_name}/{fold}/..., so
+        the files of the first check are never touched.
         """
-        return self.artifacts_root / "m5" / "lock_check" / fold / f"{channel}.parquet"
+        folder = "lock_check" if run_name == "" else f"lock_check_{run_name}"
+        return self.artifacts_root / "m5" / folder / fold / f"{channel}.parquet"
 
     def twotower_checkpoint_file(self, epoch: int) -> Path:
         """artifacts/models/twotower/base/epoch_{epoch}.pt: base model after `epoch` epochs."""
@@ -348,6 +386,21 @@ class ProjectPaths:
     def m4_trials_file(self) -> Path:
         """results/m4_trials.csv: trials of M4 variants (rule outcomes; never select)."""
         return self.results_root / "m4_trials.csv"
+
+    @property
+    def m6_runs_file(self) -> Path:
+        """results/m6_runs.csv: one row per M6 process (fold, step): time and true memory peak."""
+        return self.results_root / "m6_runs.csv"
+
+    @property
+    def m6_candidates_results_file(self) -> Path:
+        """results/m6_candidates.csv: per fold, monitoring rows of each channel and of the union."""
+        return self.results_root / "m6_candidates.csv"
+
+    @property
+    def m6_twotower_chain_results_file(self) -> Path:
+        """results/m6_twotower_chain.csv: one row per saved chain model (sha256, losses)."""
+        return self.results_root / "m6_twotower_chain.csv"
 
     @property
     def m5_lock_check_results_file(self) -> Path:
