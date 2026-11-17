@@ -389,3 +389,28 @@
 - **没有改的**：`results/d_phase.csv` / `results/m4_trials.csv` 的列（其中 `peak_rss_gb` 是采样峰值）保持不变，因为这两个文件的表头是固定的，D 阶段也已经结束；Two-Tower 每个 epoch / 每周 fine-tune 记录里的 `peak_rss_gb` 同样仍是采样峰值。M0–M4 的脚本没有加"最后一步"的调用，它们通过各自的 `MemoryTracker` 在日志里得到真实峰值。M6 之后新写的脚本和结果记录按第 3 点执行。
 - **原因**：采样峰值会漏掉短于采样间隔的尖峰（第一次 M4 运行采样只看到 5.22 GB，真实值是 6.66 GB），而真实值此前只存在于终端输出里，事后无法核对。
 - **同时更新的规则（AGENTS.md）**：§5 分层图加入 `locks.py`（底层，与 `vectors.py` 同层）；§3.3 写明 M5 之后六路 recall 的配置只能通过 `src/hmrec/recall/locked.py` 获取；§3.4 新增"新写或修改代码之后必须先停下等用户 commit，工作区干净后才能在全量数据上运行，即使这次运行已经获得许可"。
+
+## 2026-11-17 M5 锁定核对通过；V 阶段的 trial 记录要带真实峰值（M7 之前实现）
+
+- **锁定核对的结果**（`scripts/m5_verify_locks.py`，HEAD `0ce824a`，工作区干净，`git_dirty=False`；每路一个进程；记录在 `results/m5_lock_check.csv`）：只通过锁定文件（`hmrec.recall.locked`）构建六路，在 D1 上重新生成候选。R6 用锁定的 `base`（base epoch 4，sha256 核对通过）现场预测，没有训练。
+
+  | Channel | trial_id | D1 分数（重新生成） | 与记录 | generate 耗时 | 真实峰值（整个进程） |
+  |---|---|---|---|---|---|
+  | R1 Popularity | `d2094d455698` | Recall@100 0.07497200996179279 | 逐位相同（`results/d_phase.csv`） | 0.5 秒 | 1.98 GB |
+  | R2 Repurchase | `f562d598b0d6` | Recall@30 0.05336155656120723 | 逐位相同（`results/d_phase.csv`） | 0.3 秒 | 0.99 GB |
+  | R3 Sibling | `06025cc3d129` | Recall@50 0.03526219660601794 | 逐位相同（`results/m4_trials.csv`） | 0.4 秒 | 1.06 GB |
+  | R4 ItemCF | `df281d91d7c1` | Recall@100 0.10543883432792314 | 逐位相同（`results/d_phase.csv`） | 25.8 秒 | 4.20 GB |
+  | R5 WALS | `3261309f8e8f` | Recall@100 0.12295079519167419 | 逐位相同（`results/d_phase.csv`） | 169.6 秒 | 3.78 GB |
+  | R6 Two-Tower | `835ef201ee4d` | Recall@100 0.14477651846610332 | 逐位相同（`results/d_phase.csv` 中 (2, 50%) trial 的 D1） | 13.6 秒 | 3.53 GB |
+
+  - **候选文件逐字节相同**：`artifacts/m5/lock_check/D1/` 下的六个文件与此前的文件（R1、R2、R4、R5：`artifacts/hpo/D/union_precheck/D1/`；R3、R6：`artifacts/m4/candidates/D1/`）用 `cmp` 比较完全相同。这比分数相同更强：R4 用新的 `item_chunk_size = 1000` 生成的候选，与分块 2000 时的文件一字节不差。
+  - **真实峰值的记录是对的**：六路的 `process_max_rss_gb`（`ru_maxrss`）与 `/usr/bin/time -l` 的 maximum resident set size 逐字节相等（差 0 字节）。
+  - **R4（新分块）**：generate 25.8 秒；真实峰值到 generate 结束时 3.72 GB，整个进程 4.20 GB。没有同一配置、同一 fold、分块 2000 的真实峰值可比，所以不给出"省了多少"。
+  - **R6 现场预测**：核对 sha256、加载模型和表 0.4 秒，预测 13.6 秒；真实峰值到 generate 结束时 2.33 GB，整个进程 3.53 GB。
+  - **generate 之后峰值还会升高**：R4、R5、R6 在 `generate` 返回之后又升高 0.48 / 1.06 / 1.20 GB，来自候选的校验、写盘和评估（没有分开测）。M6 估算单路峰值时看"整个进程"的数字。六路在一个流程里生成再合并的峰值仍留到 M6 的 F1 实测。
+  - 核对生成的候选在 `artifacts/m5/lock_check/`，后续步骤不读取；`artifacts/candidates/` 仍然不存在。
+- **结论**：锁定文件能重现记录的结果，M5 完成。建议的 tag：`lock-channels-v1`（由用户打）。
+- **决定（V 阶段的 trial 记录）**：V 阶段的 trial 记录要带真实峰值（`ru_maxrss`），字段名与采样峰值分开；**在 M7 之前修改 `TrialRecord`**。D 阶段和 M4 的结果文件（`results/d_phase.csv`、`results/m4_trials.csv`）**不动**，它们的 `peak_rss_gb` 仍是采样峰值。
+- **注意（M7 实现时处理，现在只记录）**：`ru_maxrss` 只升不降，是整个进程的峰值。如果多个 trial 在同一个进程里依次运行，后面的 trial 会带上前面 trial 的峰值，记录下来的数字就不是这个 trial 自己的。所以 **M7 的 Ranker HPO 要每个 trial 一个独立进程**。
+- **其他确认**：M0–M4 的脚本不补"最后一步"的 `log_process_peak_memory` 调用；`results/m5_lock_check.csv` 保留。
+- **proposal 已同步**：§1.3（新增"M5 锁定配置在 D1 上的单路实测"一表；R4 一行和候选生成一行指向它）、§1.4（每周推理的实测）。
