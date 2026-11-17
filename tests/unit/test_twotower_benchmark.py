@@ -12,6 +12,7 @@ from hmrec.recall.twotower.benchmark import (
     BenchmarkTimes,
     in_batch_softmax_loss,
     make_placeholder_model,
+    placeholder_step_function,
     run_benchmark,
     summarize_benchmark,
 )
@@ -86,7 +87,8 @@ def test_short_cpu_run_records_every_step_and_learns() -> None:
     device_items = items_to_device(items, device)
     profiles = torch.tensor([[1, 1], [2, 1], [1, 2]], dtype=torch.int32)
     model = make_placeholder_model(device_items, items.codes.cardinalities, (3, 3), CONFIG)
-    times = run_benchmark(model, samples_to_device(arrays, device), profiles, CONFIG, device)
+    step = placeholder_step_function(model, CONFIG.learning_rate, CONFIG.temperature)
+    times = run_benchmark(step, samples_to_device(arrays, device), profiles, CONFIG, device)
     assert len(times.fetch_seconds) == len(times.compute_seconds) == CONFIG.steps
     assert all(math.isfinite(loss) for loss in times.losses)
     # The padding row's ID embedding stays zero (padding_idx), even after training.

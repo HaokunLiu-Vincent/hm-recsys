@@ -113,6 +113,20 @@ def load_all_lines_before(
     )
 
 
+def load_customer_lines_before(
+    transactions: pl.LazyFrame, customer_idx: np.ndarray, end_anchor: date, day_zero: date
+) -> pl.DataFrame:
+    """Every purchase line before end_anchor of the given customers only (inference histories).
+
+    Filtering by customer first (not by date, so asof still does every date
+    filter) keeps the table small: one fold's ~82k query customers instead of
+    all 1.37M customers.
+    """
+    customers = pl.Series(CUSTOMER_IDX, customer_idx, dtype=pl.Int32).implode()
+    of_customers = transactions.filter(pl.col(CUSTOMER_IDX).is_in(customers))
+    return load_all_lines_before(of_customers, end_anchor, day_zero)
+
+
 # ---------------------------------------------------------------- samples and groups
 
 
@@ -665,6 +679,15 @@ def items_to_device(features: ItemFeatureArrays, device: torch.device) -> Device
 def profiles_to_device(profiles: CategoryCodes, device: torch.device) -> torch.Tensor:
     """Profile codes int32 [n_customers, 3] on the device; row i = customer_idx i."""
     return to_device_tensor(profiles.codes, device)
+
+
+def synchronize(device: torch.device) -> None:
+    """Wait until all queued work on the device is done (no-op on CPU).
+
+    MPS runs asynchronously; timing without this would measure only the queueing.
+    """
+    if device.type == "mps":
+        torch.mps.synchronize()
 
 
 def get_batch(samples: DeviceSamples, profiles: torch.Tensor, indices: torch.Tensor) -> Batch:

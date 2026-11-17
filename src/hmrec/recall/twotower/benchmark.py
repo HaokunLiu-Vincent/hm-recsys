@@ -1,6 +1,7 @@
 """Pre-training speed benchmark with a PLACEHOLDER Two-Tower model (proposal §1.4).
 
-Not the R6 model (that is model.py / loss.py, still to be written). The
+Not the R6 model (model.py / loss.py); run_benchmark also times the real
+model's training step (scripts/m0_benchmark_twotower.py --model real). The
 placeholder has the same inputs and roughly the same shape of work, so it shows
 whether fetching batches or the model itself is the slow part:
 
@@ -22,6 +23,7 @@ so asynchronous MPS work is counted in the part that queued it.
 """
 
 import time
+from collections.abc import Callable
 from dataclasses import dataclass
 
 import torch
@@ -29,13 +31,13 @@ import torch.nn.functional as functional
 from torch import nn
 
 from hmrec.config import TwoTowerBenchmarkConfig
-from hmrec.recall.twotower.data import Batch, DeviceItemFeatures, DeviceSamples, get_batch
-
-
-def synchronize(device: torch.device) -> None:
-    """Wait until all queued work on the device is done (no-op on CPU)."""
-    if device.type == "mps":
-        torch.mps.synchronize()
+from hmrec.recall.twotower.data import (
+    Batch,
+    DeviceItemFeatures,
+    DeviceSamples,
+    get_batch,
+    synchronize,
+)
 
 
 class PlaceholderTwoTower(nn.Module):
@@ -148,36 +150,48 @@ class BenchmarkTimes:
     losses: list[float]
 
 
-def _train_step(
-    model: PlaceholderTwoTower,
-    optimizer: torch.optim.Optimizer,
-    batch: Batch,
-    temperature: float,
-) -> torch.Tensor:
-    """One forward + backward + update; returns the loss (still on the device)."""
-    optimizer.zero_grad(set_to_none=True)
-    loss = model(batch, temperature)
-    loss.backward()
-    optimizer.step()
-    return loss.detach()
+StepFunction = Callable[[Batch], torch.Tensor]  # batch -> loss after one update
+
+
+def placeholder_step_function(
+    model: PlaceholderTwoTower, learning_rate: float, temperature: float
+) -> StepFunction:
+    """A training step of the placeholder: forward + backward + Adam update."""
+    optimizer = torch.optim.Adam(model.parameters(), lr=learning_rate)
+
+    def step(batch: Batch) -> torch.Tensor:
+        optimizer.zero_grad(set_to_none=True)
+        loss = model(batch, temperature)
+        loss.backward()
+        optimizer.step()
+        return loss.detach()
+
+    return step
 
 
 def run_benchmark(
-    model: PlaceholderTwoTower,
+    step_function: StepFunction,
     samples: DeviceSamples,
     profiles: torch.Tensor,
     config: TwoTowerBenchmarkConfig,
     device: torch.device,
 ) -> BenchmarkTimes:
-    """Train `config.steps` steps on random batches and time fetch and compute separately.
+    """Run `config.steps` steps on random batches and time fetch and compute separately.
 
-    The sample order is one random permutation (seeded, made on the CPU so it is
-    the same on every device), created before timing starts.
+    Works for the placeholder and for the real model (any step_function). The
+    sample order is one random permutation (seeded, made on the CPU so it is the
+    same on every device), created before timing starts.
+
+    Args:
+        step_function: batch -> loss; must do forward, backward and the update.
+        samples: Training arrays on the device.
+        profiles: Profile codes on the device.
+        config: steps, batch_size, seed.
+        device: The device of everything.
     """
     generator = torch.Generator().manual_seed(config.seed)
     n_samples = int(samples.article_idx.shape[0])
     order = torch.randperm(n_samples, generator=generator).to(device)
-    optimizer = torch.optim.Adam(model.parameters(), lr=config.learning_rate)
     times = BenchmarkTimes([], [], [])
     for step in range(config.steps):
         start = (step * config.batch_size) % max(n_samples - config.batch_size, 1)
@@ -186,7 +200,7 @@ def run_benchmark(
         batch = get_batch(samples, profiles, order[start : start + config.batch_size])
         synchronize(device)
         fetched = time.perf_counter()
-        loss = _train_step(model, optimizer, batch, config.temperature)
+        loss = step_function(batch)
         synchronize(device)
         finished = time.perf_counter()
         times.fetch_seconds.append(fetched - began)

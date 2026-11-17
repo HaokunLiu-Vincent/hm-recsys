@@ -392,19 +392,7 @@ def test_wals_config_rejects_bad_values() -> None:
 
 # ---------------------------------------------------------------- recall/r6_twotower.yaml
 
-VALID_TWOTOWER: dict[str, Any] = {
-    "history_length": 20,
-    "base_window": {"end_anchor": date(2020, 6, 3), "window_days": 1},
-    "benchmark": {
-        "steps": 20,
-        "warmup_steps": 2,
-        "batch_size": 8,
-        "embedding_dim": 4,
-        "learning_rate": 0.01,
-        "temperature": 0.1,
-        "seed": 1,
-    },
-}
+VALID_TWOTOWER: dict[str, Any] = load_yaml(REPO_CONFIGS / "recall" / "r6_twotower.yaml")
 
 
 def test_repo_twotower_yaml_matches_proposal() -> None:
@@ -418,8 +406,21 @@ def test_repo_twotower_yaml_matches_proposal() -> None:
     assert config.benchmark.embedding_dim == 128
 
 
+def test_repo_twotower_model_and_training_values() -> None:
+    config = load_twotower_config(REPO_CONFIGS / "recall" / "r6_twotower.yaml")
+    model, training = config.model, config.training
+    assert (model.output_dim, model.hidden_dim) == (128, 256)
+    assert (model.image_projection_dim, model.text_projection_dim) == (128, 128)
+    assert (model.article_embedding_dim, model.product_code_embedding_dim) == (64, 32)
+    assert (model.category_embedding_dim, model.one_hot_max_cardinality) == (16, 20)
+    assert (training.batch_size, training.temperature, training.learning_rate) == (512, 0.05, 1e-3)
+    assert (training.epochs, training.seed, training.weight_decay) == (6, 42, 0.0)
+    assert training.fine_tune_learning_rate == pytest.approx(0.1 * training.learning_rate)
+    assert (config.quota, config.base_epoch) == (100, 1)
+
+
 def test_twotower_config_rejects_typo_and_bad_numbers() -> None:
-    assert parse_twotower_config(VALID_TWOTOWER).benchmark.warmup_steps == 2
+    assert parse_twotower_config(VALID_TWOTOWER).benchmark.warmup_steps == 10
     with pytest.raises(ValueError, match="history_lenght"):
         parse_twotower_config({**VALID_TWOTOWER, "history_lenght": 20})
     bad_window = copy.deepcopy(VALID_TWOTOWER)
@@ -427,6 +428,12 @@ def test_twotower_config_rejects_typo_and_bad_numbers() -> None:
     with pytest.raises(ValueError, match="window_days"):
         parse_twotower_config(bad_window)
     bad_warmup = copy.deepcopy(VALID_TWOTOWER)
-    bad_warmup["benchmark"]["warmup_steps"] = 20
+    bad_warmup["benchmark"]["warmup_steps"] = 200
     with pytest.raises(ValueError, match="warmup_steps"):
         parse_twotower_config(bad_warmup)
+    with pytest.raises(ValueError, match="no such checkpoint"):
+        parse_twotower_config({**VALID_TWOTOWER, "base_epoch": 7})
+    bad_device = copy.deepcopy(VALID_TWOTOWER)
+    bad_device["training"]["device"] = "cuda"
+    with pytest.raises(ValueError, match="device"):
+        parse_twotower_config(bad_device)

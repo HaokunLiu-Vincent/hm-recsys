@@ -1,11 +1,13 @@
 # R6 Two-Tower settings, proposal §5 R6 and §6. Read by hmrec.config.load_twotower_config.
 #
-# Only the data and benchmark settings exist so far (M3, step 7). Model, loss
-# and training settings are added when that code is written.
+# FIXED, NOT TUNED (proposal §5 R6): everything below except base_epoch.
+# base_epoch is E_base, selected in the D phase (configs/hpo/d_phase.yaml, §6.3).
+# Structure and reasons: docs/decisions.md 2026-11-17 (Two-Tower model).
 
-# Fixed, not tuned (proposal §5 R6): the user history is the last 20 purchases
-# before the purchase day.
+# The user history is the last 20 purchases before the purchase day (§5 R6, §6.1).
 history_length: 20
+quota: 100                # Top-100 per query (§5 R6, Recall@100)
+base_epoch: 1             # which base checkpoint the channel uses; D-phase step selects 1..6
 
 base_window:
   # Base-model training samples (proposal §6.2): purchase days
@@ -14,8 +16,39 @@ base_window:
   end_anchor: 2020-06-03
   window_days: 182        # 26 weeks: purchase days 2019-12-03 .. 2020-06-02
 
+model:
+  output_dim: 128                  # both towers, L2-normalised (§5 R6)
+  image_projection_dim: 128        # Linear(512 -> 128), output x image_mask
+  text_projection_dim: 128         # Linear(384 -> 128), output x text_mask
+  article_embedding_dim: 64        # Embedding(n_articles + 1, 64, padding_idx = n_articles), init 0
+  product_code_embedding_dim: 32   # Embedding(K + 1, 32, padding_idx = 0), init 0
+  # Category fields with <= one_hot_max_cardinality codes (missing code 0 included)
+  # are one-hot; larger ones use an embedding of category_embedding_dim.
+  category_embedding_dim: 16
+  one_hot_max_cardinality: 20
+  hidden_dim: 256                  # concat -> Linear(-> 256) -> ReLU -> Linear(256 -> 128)
+  embedding_init_std: 0.02         # N(0, 0.02^2) for the category embeddings
+
+training:
+  batch_size: 512                  # fixed (§5 R6)
+  temperature: 0.05                # logits = u.v / 0.05 - log Q(k)
+  learning_rate: 0.001             # constant, no decay (§6.2)
+  fine_tune_learning_rate: 0.0001  # 0.1 x base (§6.4)
+  adam_beta1: 0.9
+  adam_beta2: 0.999
+  adam_epsilon: 1.0e-8
+  weight_decay: 0.0                # outputs are L2-normalised; decay would only shrink rare ID rows
+  epochs: 6                        # one checkpoint per epoch -> E_base candidates 1..6 (§6.2)
+  seed: 42
+  alarm_user_share: 0.01           # 1% of users: loss logged only, never used to choose (§6.2)
+  log_every_steps: 1000
+  # Chosen by the device benchmark: mps only if it is > 1.3x faster than cpu,
+  # because embedding backward on mps is not deterministic (decisions.md).
+  device: cpu
+
 # Speed benchmark before training (proposal §1.4) with a PLACEHOLDER model
-# (hmrec.recall.twotower.benchmark). These numbers are not the real model's settings.
+# (hmrec.recall.twotower.benchmark). These numbers are not the real model's settings;
+# the real-model benchmark uses `model` and `training` above.
 benchmark:
   steps: 200
   warmup_steps: 10        # first steps (MPS kernel compilation) are reported separately

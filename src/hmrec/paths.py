@@ -270,6 +270,10 @@ class ProjectPaths:
         """artifacts/twotower/data/{window_name}/: Two-Tower training arrays, e.g. "base"."""
         return self.artifacts_root / "twotower" / "data" / window_name
 
+    def twotower_checkpoint_file(self, epoch: int) -> Path:
+        """artifacts/models/twotower/base/epoch_{epoch}.pt: base model after `epoch` epochs."""
+        return self.model_dir("twotower", "base") / f"epoch_{epoch}.pt"
+
     def hpo_trial_dir(self, phase: str, channel: str, trial_id: str) -> Path:
         """artifacts/hpo/{phase}/{channel}/{trial_id}/: per-trial side files (pool flags)."""
         return self.artifacts_root / "hpo" / phase / channel / trial_id

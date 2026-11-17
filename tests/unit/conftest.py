@@ -6,6 +6,7 @@ See tests/fixtures/asof/README.md for the rows and the hand-computed expectation
 from datetime import date
 from pathlib import Path
 
+import numpy as np
 import polars as pl
 import pytest
 
@@ -107,3 +108,59 @@ def make_recall_inputs(
             {"article_idx": active_pool or []}, schema={"article_idx": pl.Int32}
         ),
     )
+
+
+# ---------------------------------------------------------------- two-tower helpers
+
+TINY_N_ARTICLES = 6
+
+
+def make_tiny_articles() -> pl.DataFrame:
+    """Six articles for the two-tower tests.
+
+    With one_hot_max_cardinality = 3 (TINY_MODEL), the category codes are:
+    product_type_no 7 codes -> embedding, product_group_name 3 -> one-hot,
+    garment_group_no 2 -> one-hot, index_group_no 3 -> one-hot,
+    section_no 7 -> embedding, colour_group_code 7 -> embedding (codes include 0).
+    """
+    return pl.DataFrame(
+        {
+            "article_idx": list(range(TINY_N_ARTICLES)),
+            "product_code": [1, 1, 2, 2, 3, 3],
+            "product_type_no": [1, 2, 3, 4, 5, 6],
+            "product_group_name": ["a", "a", "b", "b", "a", "b"],
+            "garment_group_no": [1] * TINY_N_ARTICLES,
+            "index_group_no": [1, 2, 1, 2, 1, 2],
+            "section_no": [1, 2, 3, 4, 5, 6],
+            "colour_group_code": [1, 2, 3, 4, 5, 6],
+        },
+        schema_overrides={"article_idx": pl.Int32},
+    )
+
+
+def make_tiny_customers(n_customers: int = 4) -> pl.DataFrame:
+    """Customers 0..n-1 with small profile vocabularies (one null each)."""
+    statuses = ["ACTIVE", None, "ACTIVE", "PRE-CREATE"]
+    news = ["NONE", "Regularly", None, "NONE"]
+    return pl.DataFrame(
+        {
+            "customer_idx": list(range(n_customers)),
+            "age_bucket": ["AGE_18_24", "AGE_25_34", "AGE_UNKNOWN", "AGE_18_24"][:n_customers],
+            "club_member_status": statuses[:n_customers],
+            "fashion_news_frequency": news[:n_customers],
+        },
+        schema_overrides={"customer_idx": pl.Int32},
+    )
+
+
+def make_tiny_embeddings(seed: int = 0) -> dict:
+    """Image (width 4) and text (width 3) vectors; article 2 has no image."""
+    rng = np.random.default_rng(seed)
+    image = rng.standard_normal((TINY_N_ARTICLES, 4)).astype(np.float32)
+    image[2] = 0.0
+    return {
+        "image": image,
+        "image_mask": np.array([True, True, False, True, True, True]),
+        "text": rng.standard_normal((TINY_N_ARTICLES, 3)).astype(np.float32),
+        "text_mask": np.ones(TINY_N_ARTICLES, dtype=np.bool_),
+    }

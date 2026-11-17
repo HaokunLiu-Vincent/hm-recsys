@@ -1015,18 +1015,95 @@ class TwoTowerBenchmarkConfig:
     seed: int
 
 
+TWOTOWER_DEVICES = ("cpu", "mps")
+
+
+@dataclass(frozen=True)
+class TwoTowerModelConfig:
+    """Layer sizes of the two towers (proposal §5 R6). Fixed, not tuned.
+
+    Attributes:
+        output_dim: Width of the L2-normalised user and item vectors (128).
+        image_projection_dim: Linear(512 -> this) on the CLIP vector.
+        text_projection_dim: Linear(384 -> this) on the MiniLM vector.
+        article_embedding_dim: article ID embedding width (initialised to 0).
+        product_code_embedding_dim: product_code embedding width (initialised to 0).
+        category_embedding_dim: Embedding width of a category field with more
+            than one_hot_max_cardinality codes.
+        one_hot_max_cardinality: A category field with at most this many codes
+            (missing code 0 included) is one-hot coded instead of embedded.
+        hidden_dim: Width of the hidden ReLU layer of both towers.
+        embedding_init_std: Std of the N(0, std^2) init of category embeddings.
+    """
+
+    output_dim: int
+    image_projection_dim: int
+    text_projection_dim: int
+    article_embedding_dim: int
+    product_code_embedding_dim: int
+    category_embedding_dim: int
+    one_hot_max_cardinality: int
+    hidden_dim: int
+    embedding_init_std: float
+
+
+@dataclass(frozen=True)
+class TwoTowerTrainingConfig:
+    """Training settings (proposal §5 R6, §6.2). Fixed, not tuned.
+
+    Attributes:
+        batch_size: Samples per step (512).
+        temperature: tau of the in-batch softmax (logits = u.v / tau - log Q).
+        learning_rate: Adam learning rate of the base model; constant (no decay).
+        fine_tune_learning_rate: Weekly fine-tune learning rate (0.1 x base, §6.4).
+        adam_beta1: Adam beta1.
+        adam_beta2: Adam beta2.
+        adam_epsilon: Adam epsilon.
+        weight_decay: Adam weight decay (0).
+        epochs: Base epochs; one checkpoint per epoch (E_base candidates 1..epochs).
+        seed: Seed of the weights, the shuffles and the alarm-user split.
+        alarm_user_share: Share of users kept out of training; their loss is
+            only logged as an alarm (§6.2), never used to choose anything.
+        log_every_steps: Progress log interval.
+        device: "cpu" or "mps"; chosen once by the device benchmark (decisions.md).
+    """
+
+    batch_size: int
+    temperature: float
+    learning_rate: float
+    fine_tune_learning_rate: float
+    adam_beta1: float
+    adam_beta2: float
+    adam_epsilon: float
+    weight_decay: float
+    epochs: int
+    seed: int
+    alarm_user_share: float
+    log_every_steps: int
+    device: str
+
+
 @dataclass(frozen=True)
 class TwoTowerConfig:
     """Settings from configs/recall/r6_twotower.yaml (proposal §5 R6, §6).
 
     Attributes:
         history_length: Number of past purchases in a user history (20).
+        quota: Candidates per query (Top-100).
+        base_epoch: Which base checkpoint (epoch) the channel predicts with;
+            the D-phase step "base_epoch" selects it (E_base, §6.3).
         base_window: Training samples of the base model (§6.2).
+        model: Layer sizes.
+        training: Optimiser, loss and device settings.
         benchmark: The pre-training speed benchmark (§1.4).
     """
 
     history_length: int
+    quota: int
+    base_epoch: int
     base_window: TrainingWindow
+    model: TwoTowerModelConfig
+    training: TwoTowerTrainingConfig
     benchmark: TwoTowerBenchmarkConfig
 
 
@@ -1061,26 +1138,136 @@ def _parse_twotower_benchmark(raw: Mapping[str, Any]) -> TwoTowerBenchmarkConfig
     return config
 
 
+MODEL_INT_KEYS = (
+    "output_dim",
+    "image_projection_dim",
+    "text_projection_dim",
+    "article_embedding_dim",
+    "product_code_embedding_dim",
+    "category_embedding_dim",
+    "one_hot_max_cardinality",
+    "hidden_dim",
+)
+
+
+def _parse_twotower_model(raw: Mapping[str, Any]) -> TwoTowerModelConfig:
+    """Parse the model section; every size must be a positive integer."""
+    where = "r6_twotower.model"
+    check_keys(raw, {*MODEL_INT_KEYS, "embedding_init_std"}, where)
+    sizes = {key: get_int(raw, key, where) for key in MODEL_INT_KEYS}
+    for key, value in sizes.items():
+        require_positive(value, f"{where}.{key}")
+    init_std = get_float(raw, "embedding_init_std", where)
+    require_positive(init_std, f"{where}.embedding_init_std")
+    return TwoTowerModelConfig(
+        output_dim=sizes["output_dim"],
+        image_projection_dim=sizes["image_projection_dim"],
+        text_projection_dim=sizes["text_projection_dim"],
+        article_embedding_dim=sizes["article_embedding_dim"],
+        product_code_embedding_dim=sizes["product_code_embedding_dim"],
+        category_embedding_dim=sizes["category_embedding_dim"],
+        one_hot_max_cardinality=sizes["one_hot_max_cardinality"],
+        hidden_dim=sizes["hidden_dim"],
+        embedding_init_std=init_std,
+    )
+
+
+TRAINING_KEYS = {
+    "batch_size",
+    "temperature",
+    "learning_rate",
+    "fine_tune_learning_rate",
+    "adam_beta1",
+    "adam_beta2",
+    "adam_epsilon",
+    "weight_decay",
+    "epochs",
+    "seed",
+    "alarm_user_share",
+    "log_every_steps",
+    "device",
+}
+
+
+def _check_twotower_training(config: TwoTowerTrainingConfig, where: str) -> None:
+    """Range checks of the training section."""
+    for key in ("batch_size", "temperature", "learning_rate", "fine_tune_learning_rate"):
+        require_positive(getattr(config, key), f"{where}.{key}")
+    for key in ("adam_epsilon", "epochs", "log_every_steps"):
+        require_positive(getattr(config, key), f"{where}.{key}")
+    for key in ("adam_beta1", "adam_beta2", "alarm_user_share"):
+        if not 0 <= getattr(config, key) < 1:
+            raise ValueError(f"{where}.{key} must be in [0, 1), got {getattr(config, key)}")
+    if config.weight_decay < 0:
+        raise ValueError(f"{where}.weight_decay must be >= 0, got {config.weight_decay}")
+    if config.device not in TWOTOWER_DEVICES:
+        raise ValueError(f"{where}.device must be one of {TWOTOWER_DEVICES}, got {config.device!r}")
+
+
+def _parse_twotower_training(raw: Mapping[str, Any]) -> TwoTowerTrainingConfig:
+    """Parse and check the training section."""
+    where = "r6_twotower.training"
+    check_keys(raw, TRAINING_KEYS, where)
+    config = TwoTowerTrainingConfig(
+        batch_size=get_int(raw, "batch_size", where),
+        temperature=get_float(raw, "temperature", where),
+        learning_rate=get_float(raw, "learning_rate", where),
+        fine_tune_learning_rate=get_float(raw, "fine_tune_learning_rate", where),
+        adam_beta1=get_float(raw, "adam_beta1", where),
+        adam_beta2=get_float(raw, "adam_beta2", where),
+        adam_epsilon=get_float(raw, "adam_epsilon", where),
+        weight_decay=get_float(raw, "weight_decay", where),
+        epochs=get_int(raw, "epochs", where),
+        seed=get_int(raw, "seed", where),
+        alarm_user_share=get_float(raw, "alarm_user_share", where),
+        log_every_steps=get_int(raw, "log_every_steps", where),
+        device=get_str(raw, "device", where),
+    )
+    _check_twotower_training(config, where)
+    return config
+
+
+TWOTOWER_KEYS = {
+    "history_length",
+    "quota",
+    "base_epoch",
+    "base_window",
+    "model",
+    "training",
+    "benchmark",
+}
+
+
 def parse_twotower_config(raw: Mapping[str, Any]) -> TwoTowerConfig:
     """Build a TwoTowerConfig from the parsed content of configs/recall/r6_twotower.yaml.
 
     Raises:
         ValueError: If a key is missing or unknown, or a number is out of range.
     """
-    check_keys(raw, {"history_length", "base_window", "benchmark"}, "r6_twotower")
-    raw_window = get_mapping(raw, "base_window", "r6_twotower")
-    where = "r6_twotower.base_window"
-    check_keys(raw_window, {"end_anchor", "window_days"}, where)
+    where = "r6_twotower"
+    check_keys(raw, TWOTOWER_KEYS, where)
+    raw_window = get_mapping(raw, "base_window", where)
+    check_keys(raw_window, {"end_anchor", "window_days"}, f"{where}.base_window")
     config = TwoTowerConfig(
-        history_length=get_int(raw, "history_length", "r6_twotower"),
+        history_length=get_int(raw, "history_length", where),
+        quota=get_int(raw, "quota", where),
+        base_epoch=get_int(raw, "base_epoch", where),
         base_window=TrainingWindow(
-            end_anchor=get_date(raw_window, "end_anchor", where),
-            window_days=get_int(raw_window, "window_days", where),
+            end_anchor=get_date(raw_window, "end_anchor", f"{where}.base_window"),
+            window_days=get_int(raw_window, "window_days", f"{where}.base_window"),
         ),
-        benchmark=_parse_twotower_benchmark(get_mapping(raw, "benchmark", "r6_twotower")),
+        model=_parse_twotower_model(get_mapping(raw, "model", where)),
+        training=_parse_twotower_training(get_mapping(raw, "training", where)),
+        benchmark=_parse_twotower_benchmark(get_mapping(raw, "benchmark", where)),
     )
-    require_positive(config.history_length, "r6_twotower.history_length")
-    require_positive(config.base_window.window_days, f"{where}.window_days")
+    for key in ("history_length", "quota", "base_epoch"):
+        require_positive(getattr(config, key), f"{where}.{key}")
+    require_positive(config.base_window.window_days, f"{where}.base_window.window_days")
+    if config.base_epoch > config.training.epochs:
+        raise ValueError(
+            f"{where}.base_epoch={config.base_epoch} is larger than training.epochs="
+            f"{config.training.epochs} (no such checkpoint)"
+        )
     return config
 
 
