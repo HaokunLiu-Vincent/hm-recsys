@@ -20,6 +20,7 @@ from hmrec.config import (
     load_base_config,
     load_preprocess_config,
 )
+from hmrec.data.folds import FoldManifest, load_fold_manifest
 from hmrec.locks import (
     ALL_CHANNELS,
     BASE_CHECKPOINT,
@@ -41,6 +42,7 @@ from hmrec.recall.locked import (
     load_locked_recall,
     load_verified_checkpoint,
     locked_checkpoint_file,
+    post_lock_folds,
 )
 from hmrec.recall.r1_popularity import PopularityChannel
 from hmrec.recall.r2_repurchase import RepurchaseChannel
@@ -246,7 +248,16 @@ POST_LOCK_FILES = (
     "src/hmrec/locks.py",
     "src/hmrec/recall/locked.py",
     "src/hmrec/recall/build.py",
+    "src/hmrec/recall/generate.py",
+    "src/hmrec/recall/chain_records.py",
+    "src/hmrec/recall/inputs.py",
+    "src/hmrec/eval/monitor.py",
+    "src/hmrec/pipeline.py",
+    "src/hmrec/run_records.py",
+    "src/hmrec/csv_records.py",
     "scripts/m6_generate_candidates.py",
+    "scripts/m6_monitor_candidates.py",
+    "scripts/m6_run_folds.py",
     "scripts/m6_build_features.py",
     "scripts/m7_ranker_hpo.py",
     "scripts/m8_final_eval.py",
@@ -290,3 +301,54 @@ def test_r6_is_never_built_without_a_model_file_check() -> None:
 def test_locked_recall_is_a_plain_pair_of_the_two_lock_files() -> None:
     assert isinstance(LOCKED, LockedRecall)
     assert LOCKED.channels.stamp.git_commit == LOCKED.twotower.stamp.git_commit
+
+
+# ---------------------------------------------------------------- post-lock folds, no labels
+
+
+def test_post_lock_folds_are_f1_to_t4_right_after_d4() -> None:
+    manifest = load_fold_manifest(PATHS.fold_manifest_file)
+    folds = post_lock_folds(manifest)
+    assert [fold.name for fold in folds] == [
+        "F1", "F2", "F3", "F4", "V1", "V2", "V3", "V4", "T1", "T2", "T3", "T4",
+    ]  # fmt: skip
+    # Without D4 in front of F1 the locked f1_start model would predict the wrong week.
+    without_d4 = FoldManifest(tuple(fold for fold in manifest.folds if fold.name != "D4"))
+    with pytest.raises(ValueError, match="the fold before F1 is D3, expected D4"):
+        post_lock_folds(without_d4)
+    only_d = FoldManifest(tuple(fold for fold in manifest.folds if fold.phase == "D"))
+    with pytest.raises(ValueError, match="no folds of phases"):
+        post_lock_folds(only_d)
+
+
+# Candidate generation: everything under recall/, its script and the fold driver.
+# None of it may read labels (AGENTS.md §3.1). In M6 only the monitor script does,
+# and only through hmrec.eval.monitor.load_label_evaluator (F and V folds).
+LABEL_NAMES = ("labels_file", "FoldEvaluator", "load_label_evaluator", "label_week_transactions")
+
+
+def test_candidate_generation_code_never_reads_labels() -> None:
+    files = sorted((REPO / "src" / "hmrec" / "recall").rglob("*.py"))
+    files += [
+        REPO / "scripts" / "m6_generate_candidates.py",
+        REPO / "scripts" / "m6_run_folds.py",
+        REPO / "src" / "hmrec" / "pipeline.py",
+        REPO / "src" / "hmrec" / "run_records.py",
+        REPO / "src" / "hmrec" / "locks.py",
+    ]
+    offenders = [
+        f"{path.relative_to(REPO)}: {name}"
+        for path in files
+        for name in LABEL_NAMES
+        if name in path.read_text(encoding="utf-8")
+    ]
+    assert offenders == []
+
+
+def test_the_monitor_script_gets_labels_only_through_the_phase_guard() -> None:
+    script = (REPO / "scripts" / "m6_monitor_candidates.py").read_text(encoding="utf-8")
+    # It may name the labels file, but it must hand it to load_label_evaluator (which
+    # refuses T folds) and never build a FoldEvaluator itself.
+    assert "load_label_evaluator(" in script
+    assert "FoldEvaluator" not in script
+    assert "label_week_transactions" not in script
