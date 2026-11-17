@@ -31,10 +31,13 @@ import polars as pl
 from hmrec.config import (
     BaseConfig,
     SelectionRule,
+    TwoTowerConfig,
+    load_preprocess_config,
     parse_itemcf_config,
     parse_popularity_config,
     parse_repurchase_config,
     parse_sibling_config,
+    parse_twotower_config,
     parse_wals_config,
 )
 from hmrec.data.folds import Fold
@@ -50,12 +53,14 @@ from hmrec.hpo.records import TrialRecord
 from hmrec.hpo.selection import STOP, StepDecision, choose_winner, convergence_decision
 from hmrec.logging_utils import get_logger
 from hmrec.memory import MemoryTracker, bytes_to_gb
+from hmrec.paths import get_paths
 from hmrec.recall.base import ARTICLE_IDX, QUERY_ID, RecallChannel, RecallInputs
 from hmrec.recall.r1_popularity import IS_FALLBACK, PopularityChannel, fallback_diagnostics
 from hmrec.recall.r2_repurchase import RepurchaseChannel
 from hmrec.recall.r3_sibling import SiblingChannel
 from hmrec.recall.r4_itemcf import ItemCFChannel
 from hmrec.recall.r5_wals import WalsChannel
+from hmrec.recall.twotower.infer import TwoTowerChannel, load_twotower_resources
 
 ALLOWED_PHASES = ("D", "V")
 IN_ACTIVE_POOL = "in_active_pool"
@@ -87,7 +92,20 @@ def build_channel(channel: str, raw_config: Mapping[str, Any], base: BaseConfig)
             chunking.dense_score_query_chunk_size,
             chunking.pair_chunk_size,
         )
+    if channel == "r6_twotower":
+        return _build_twotower_channel(parse_twotower_config(raw_config), base)
     raise ValueError(f"unknown channel {channel!r}")
+
+
+def _build_twotower_channel(config: TwoTowerConfig, base: BaseConfig) -> TwoTowerChannel:
+    """R6 loads its checkpoint (config.base_epoch), item features and profiles once."""
+    paths = get_paths()
+    preprocess = load_preprocess_config(paths.preprocess_config_file)
+    resources = load_twotower_resources(paths, preprocess, config)
+    chunking = base.chunking
+    return TwoTowerChannel(
+        config, resources, chunking.dense_score_query_chunk_size, chunking.pair_chunk_size
+    )
 
 
 def parsed_config(channel: str, raw_config: Mapping[str, Any]) -> dict[str, Any]:
@@ -98,6 +116,7 @@ def parsed_config(channel: str, raw_config: Mapping[str, Any]) -> dict[str, Any]
         "r3_sibling": parse_sibling_config,
         "r4_itemcf": parse_itemcf_config,
         "r5_wals": parse_wals_config,
+        "r6_twotower": parse_twotower_config,
     }
     if channel not in parsers:
         raise ValueError(f"unknown channel {channel!r}")
@@ -109,8 +128,11 @@ def make_trial_id(channel: str, raw_config: Mapping[str, Any]) -> str:
 
     The PARSED config is hashed, so 3 and 3.0 give the same id.
     """
+    # default=str: R6 has a date (base_window.end_anchor); R1-R5 ids are unchanged.
     text = json.dumps(
-        {"channel": channel, "config": parsed_config(channel, raw_config)}, sort_keys=True
+        {"channel": channel, "config": parsed_config(channel, raw_config)},
+        sort_keys=True,
+        default=str,
     )
     return hashlib.sha256(text.encode()).hexdigest()[:12]
 

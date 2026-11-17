@@ -167,3 +167,20 @@ channels:
         - {iterations: 10}
         - {iterations: 15}
         - {iterations: 25}
+
+  r6_twotower:                   # proposal §5 R6 / §6.3: E_base, 1 + 5 = 6 configurations
+    # Each candidate is a checkpoint of the ONE base training run, predicting
+    # D1-D4 with no update. Default epoch 1; fewer epochs = cheaper, so the
+    # listed order 2 < 3 < ... < 6 is the priority (docs/decisions.md 2026-11-17).
+    # Selecting epoch 6 (the last checkpoint) stops for a human decision.
+    - name: base_epoch
+      kind: select
+      order: listed
+      stop_at_boundary: true
+      candidates:
+        - {base_epoch: 1}
+        - {base_epoch: 2}
+        - {base_epoch: 3}
+        - {base_epoch: 4}
+        - {base_epoch: 5}
+        - {base_epoch: 6}

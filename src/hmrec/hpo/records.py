@@ -99,7 +99,8 @@ def result_columns(
 
 def _json(value: Any) -> str:
     """Stable JSON text (sorted keys) for config / params / diagnostics columns."""
-    return json.dumps(value, sort_keys=True)
+    # default=str: R6 configs hold a date (base_window.end_anchor).
+    return json.dumps(value, sort_keys=True, default=str)
 
 
 def record_to_row(record: TrialRecord) -> dict[str, str]:

@@ -37,6 +37,7 @@ def test_configuration_counts_match_proposal() -> None:
         "r3_sibling": 7,
         "r4_itemcf": 9,
         "r5_wals": 11,
+        "r6_twotower": 6,  # E_base: checkpoints 1..6 (proposal §6.3)
     }
     for channel, count in expected.items():
         default = _default(channel)
@@ -136,6 +137,7 @@ def test_stop_at_boundary_flags_and_edges() -> None:
     assert flagged == {
         ("r4_itemcf", "alpha"),
         ("r5_wals", "regularization"),
+        ("r6_twotower", "base_epoch"),  # epoch 6 selected -> stop for a human decision
     }
     alpha = _step("r4_itemcf", "alpha")
     assert is_on_boundary(alpha, {"alpha": 0.9})
