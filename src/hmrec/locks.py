@@ -1,7 +1,8 @@
-"""Read the locked recall configuration (configs/locks/, proposal §6.5 and §11 M5).
+"""Read the locked configuration (configs/locks/, proposal §6.5, §8.7 and §11).
 
     configs/locks/channels.lock.yaml  -> ChannelsLock   (R1-R5)
     configs/locks/twotower.lock.yaml  -> TwoTowerLock   (R6: config, alarm users, model files)
+    configs/locks/features.lock.yaml  -> FeaturesLock   (the 71 Ranker features)
 
 This module belongs to the bottom layer (it needs only hmrec.config and the
 standard library), so recall/ and features/ may both import it. It only READS
@@ -24,12 +25,15 @@ from pathlib import Path
 from typing import Any
 
 from hmrec.config import (
+    FEATURE_DTYPES,
+    FeaturesConfig,
     check_keys,
     get_date,
     get_float,
     get_int,
     get_mapping,
     get_str,
+    get_str_list,
     load_yaml,
     parse_itemcf_config,
     parse_popularity_config,
@@ -65,6 +69,20 @@ GIT_COMMIT_LENGTH = 40  # a full git commit hash
 SHA256_LENGTH = 64  # hex characters of a sha256 digest
 HASH_READ_BYTES = 1024 * 1024  # files are hashed 1 MB at a time, never read whole
 
+# The numbers of configs/features.yaml that define feature values and are therefore
+# in features.lock.yaml: two fixed values, then four settings (three window lengths).
+# Attribute names of both FeaturesConfig and FeaturesLock.
+LOCKED_FEATURE_NUMBERS = (
+    "decay_tau_days",
+    "history_similarity_top_k",
+    "history_length",
+    "rrf_k",
+    "online_sales_channel_id",
+    "week_days",
+    "four_week_days",
+    "year_days",
+)
+
 # The parser every locked config must pass. Each raises ValueError on a missing
 # key, an unknown key or a value out of range.
 _CONFIG_PARSERS: dict[str, Callable[[Mapping[str, Any]], Any]] = {
@@ -85,7 +103,7 @@ class LockStamp:
     """When a lock file was written.
 
     Attributes:
-        name: "channels" or "twotower".
+        name: "channels", "twotower" or "features".
         locked_on: The day the file was written.
         git_commit: HEAD at that time (full hash). The commit that adds the lock
             file is a child of this commit.
@@ -214,6 +232,52 @@ class TwoTowerLock:
     channel: LockedChannel
     alarm_users: AlarmUsersLock
     checkpoints: dict[str, LockedCheckpoint]
+
+
+@dataclass(frozen=True)
+class LockedFeature:
+    """One feature of configs/locks/features.lock.yaml.
+
+    Attributes:
+        name: Feature name, as in proposal §8.
+        dtype: "float32" (a number, missing = NaN) or "int16" (a category code,
+            0 = missing).
+    """
+
+    name: str
+    dtype: str
+
+
+@dataclass(frozen=True)
+class FeaturesLock:
+    """configs/locks/features.lock.yaml: the locked Ranker features (proposal §8.7).
+
+    Attributes:
+        stamp: When the file was written.
+        features: The 71 features in wide-table column order.
+        categorical_features: Names of the categorical features, in column order.
+        decay_tau_days: Time constant of the ui_decay_* features (fixed, not tuned).
+        history_similarity_top_k: tt_sim_top5_hist averages this many of the
+            largest similarities (fixed, not tuned).
+        history_length: Past purchases used by the *_hist features.
+        rrf_k: The constant of rrf_score = sum of 1 / (rrf_k + rank).
+        online_sales_channel_id: sales_channel_id of the online channel.
+        week_days: Length in days of the 1w and prev_1w windows.
+        four_week_days: Length in days of the 4w window.
+        year_days: Length in days of the 52w window.
+    """
+
+    stamp: LockStamp
+    features: tuple[LockedFeature, ...]
+    categorical_features: tuple[str, ...]
+    decay_tau_days: float
+    history_similarity_top_k: int
+    history_length: int
+    rrf_k: int
+    online_sales_channel_id: int
+    week_days: int
+    four_week_days: int
+    year_days: int
 
 
 # ---------------------------------------------------------------- field checks
@@ -442,6 +506,155 @@ def parse_twotower_lock(raw: Mapping[str, Any]) -> TwoTowerLock:
 def load_twotower_lock(path: Path) -> TwoTowerLock:
     """Read and check configs/locks/twotower.lock.yaml."""
     return parse_twotower_lock(load_yaml(path))
+
+
+# ---------------------------------------------------------------- features.lock.yaml
+
+
+def _parse_locked_feature(raw: Any, position: int) -> LockedFeature:
+    """Parse one entry of `features`: a mapping with exactly `name` and `dtype`."""
+    where = f"features.lock.features[{position}]"
+    if not isinstance(raw, Mapping):
+        raise ValueError(f"{where}: expected a mapping, got {raw!r}")
+    check_keys(raw, {"name", "dtype"}, where)
+    feature = LockedFeature(name=get_str(raw, "name", where), dtype=get_str(raw, "dtype", where))
+    if feature.dtype not in FEATURE_DTYPES:
+        raise ValueError(f"{where}.dtype must be one of {FEATURE_DTYPES}, got {feature.dtype!r}")
+    return feature
+
+
+def _parse_locked_features(raw_features: Any, where: str) -> tuple[LockedFeature, ...]:
+    """Parse the `features` list; every feature name may appear only once."""
+    if not isinstance(raw_features, list):
+        raise ValueError(f"{where}: expected a list, got {type(raw_features).__name__}")
+    features = tuple(_parse_locked_feature(item, i) for i, item in enumerate(raw_features))
+    names = [feature.name for feature in features]
+    repeated = sorted({name for name in names if names.count(name) > 1})
+    if repeated:
+        raise ValueError(f"{where}: repeated feature names {repeated}")
+    return features
+
+
+def _parse_categorical_features(
+    raw: Mapping[str, Any], features: tuple[LockedFeature, ...], where: str
+) -> tuple[str, ...]:
+    """Parse `categorical_features`; it must be exactly the int16 features in column order."""
+    categorical = get_str_list(raw, "categorical_features", where)
+    # A category code is stored as int16 and every int16 column is a category
+    # code (proposal §8.1), so the two parts of the file must say the same thing.
+    int16_names = tuple(feature.name for feature in features if feature.dtype == "int16")
+    if categorical != int16_names:
+        raise ValueError(
+            f"{where}.categorical_features must be the int16 features in column order "
+            f"{int16_names}, got {categorical}"
+        )
+    return categorical
+
+
+def parse_features_lock(raw: Mapping[str, Any]) -> FeaturesLock:
+    """Build a FeaturesLock from the parsed content of configs/locks/features.lock.yaml.
+
+    Raises:
+        ValueError: If the file is not a "features" lock, a key is missing or
+            unknown, a number has the wrong type, a feature name is repeated,
+            or `categorical_features` is not exactly the int16 features in
+            column order.
+    """
+    where = "features.lock"
+    expected = {"lock", "fixed_values", "settings", "categorical_features", "features"}
+    check_keys(raw, expected, where)
+    fixed = get_mapping(raw, "fixed_values", where)
+    check_keys(fixed, {"decay_tau_days", "history_similarity_top_k"}, f"{where}.fixed_values")
+    settings = get_mapping(raw, "settings", where)
+    setting_keys = {"history_length", "rrf_k", "online_sales_channel_id", "windows"}
+    check_keys(settings, setting_keys, f"{where}.settings")
+    windows = get_mapping(settings, "windows", f"{where}.settings")
+    window_keys = {"week_days", "four_week_days", "year_days"}
+    check_keys(windows, window_keys, f"{where}.settings.windows")
+    features = _parse_locked_features(raw["features"], f"{where}.features")
+    return FeaturesLock(
+        stamp=_parse_stamp(get_mapping(raw, "lock", where), "features"),
+        features=features,
+        categorical_features=_parse_categorical_features(raw, features, where),
+        decay_tau_days=get_float(fixed, "decay_tau_days", f"{where}.fixed_values"),
+        history_similarity_top_k=get_int(
+            fixed, "history_similarity_top_k", f"{where}.fixed_values"
+        ),
+        history_length=get_int(settings, "history_length", f"{where}.settings"),
+        rrf_k=get_int(settings, "rrf_k", f"{where}.settings"),
+        online_sales_channel_id=get_int(settings, "online_sales_channel_id", f"{where}.settings"),
+        week_days=get_int(windows, "week_days", f"{where}.settings.windows"),
+        four_week_days=get_int(windows, "four_week_days", f"{where}.settings.windows"),
+        year_days=get_int(windows, "year_days", f"{where}.settings.windows"),
+    )
+
+
+def load_features_lock(path: Path) -> FeaturesLock:
+    """Read and check configs/locks/features.lock.yaml."""
+    return parse_features_lock(load_yaml(path))
+
+
+def _feature_list_difference(
+    in_config: list[tuple[str, str]], in_lock: list[tuple[str, str]]
+) -> str | None:
+    """Describe how two (name, dtype) lists differ, or return None if they are equal."""
+    if in_config == in_lock:
+        return None
+    if len(in_config) != len(in_lock):
+        only_config = sorted(set(in_config) - set(in_lock))
+        only_lock = sorted(set(in_lock) - set(in_config))
+        return (
+            f"{len(in_config)} features in features.yaml, {len(in_lock)} in the lock; "
+            f"only in features.yaml {only_config}, only in the lock {only_lock}"
+        )
+    for position, (config_item, lock_item) in enumerate(zip(in_config, in_lock, strict=True)):
+        if config_item != lock_item:
+            return (
+                f"column {position} (name, dtype): {config_item} in features.yaml, "
+                f"{lock_item} in the lock"
+            )
+    return None
+
+
+def check_features_match_lock(config: FeaturesConfig, lock: FeaturesLock) -> None:
+    """Fail unless configs/features.yaml says exactly what the features lock says.
+
+    Compared: the feature names and dtypes in column order, the categorical
+    features, the two fixed values (decay_tau_days, history_similarity_top_k)
+    and the four settings (history_length, rrf_k, online_sales_channel_id, the
+    three window lengths). Only embedding_pair_chunk_size is not compared: it
+    changes memory, not results. The code keeps reading configs/features.yaml;
+    this check is what stops an edit of that file after the lock.
+
+    Args:
+        config: The loaded configs/features.yaml.
+        lock: The loaded configs/locks/features.lock.yaml.
+
+    Raises:
+        ValueError: If any compared item differs; the message names each one.
+    """
+    differences: list[str] = []
+    feature_difference = _feature_list_difference(
+        [(feature.name, feature.dtype) for feature in config.features],
+        [(feature.name, feature.dtype) for feature in lock.features],
+    )
+    if feature_difference is not None:
+        differences.append(feature_difference)
+    if config.categorical_names != lock.categorical_features:
+        differences.append(
+            f"categorical features: {config.categorical_names} in features.yaml, "
+            f"{lock.categorical_features} in the lock"
+        )
+    # FeaturesConfig and FeaturesLock use the same attribute names for these numbers.
+    for name in LOCKED_FEATURE_NUMBERS:
+        in_config, in_lock = getattr(config, name), getattr(lock, name)
+        if in_config != in_lock:
+            differences.append(f"{name}: {in_config} in features.yaml, {in_lock} in the lock")
+    if differences:
+        raise ValueError(
+            "configs/features.yaml differs from the locked features "
+            "(configs/locks/features.lock.yaml): " + "; ".join(differences)
+        )
 
 
 # ---------------------------------------------------------------- sha256 of files

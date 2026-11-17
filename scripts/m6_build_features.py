@@ -44,7 +44,11 @@ from hmrec.features.build import (  # noqa: E402
 )
 from hmrec.features.stats import STATS_COLUMNS  # noqa: E402
 from hmrec.hpo.runner import git_state, warn_uncommitted_changes  # noqa: E402
-from hmrec.locks import load_twotower_lock  # noqa: E402
+from hmrec.locks import (  # noqa: E402
+    check_features_match_lock,
+    load_features_lock,
+    load_twotower_lock,
+)
 from hmrec.logging_utils import get_logger, setup_logging  # noqa: E402
 from hmrec.memory import MemoryTracker, bytes_to_gb, log_process_peak_memory  # noqa: E402
 from hmrec.paths import ProjectPaths, get_paths  # noqa: E402
@@ -97,6 +101,8 @@ def main() -> None:
     stamp = RunStamp(commit, dirty)
     preprocess = load_preprocess_config(paths.preprocess_config_file)
     config = load_features_config(paths.features_config_file)
+    # The features are locked (proposal §8.7): stop if configs/features.yaml was changed.
+    check_features_match_lock(config, load_features_lock(paths.features_lock_file))
     fold = load_fold_manifest(paths.fold_manifest_file).get(fold_name)
     if fold.phase not in POST_LOCK_PHASES:
         raise ValueError(f"--fold must be a post-lock fold (F1 ... T4), got {fold_name!r}")

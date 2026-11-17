@@ -1,0 +1,140 @@
+# LOCKED feature list of the Ranker wide table (M6, proposal §8.7).
+#
+# DO NOT EDIT OR DELETE (AGENTS.md §3.3): files under configs/locks/ are append-only.
+# Written on 2026-11-18, after the F1 features were built and checked
+# (docs/decisions.md) and before any Ranker result existed. From here on the
+# features are frozen: V-phase tuning does not touch them (proposal §8.7).
+#
+#   fixed_values           two numbers that define features and are NOT hyperparameters:
+#                            decay_tau_days            tau of the ui_decay_* features
+#                                                      (exp(-age_days / tau), proposal §8.6)
+#                            history_similarity_top_k  tt_sim_top5_hist averages this many
+#                                                      of the largest similarities (§8.3)
+#   settings               the other numbers of configs/features.yaml that define feature
+#                          values:
+#                            history_length           past purchases used by the *_hist
+#                                                     features (the locked R6 history, §8.3)
+#                            rrf_k                    rrf_score = sum of 1 / (rrf_k + rank), §8.2
+#                            online_sales_channel_id  the online channel of *_online_share_*
+#                            windows                  lengths in days of the 1w / prev_1w, 4w
+#                                                     and 52w windows (§8.1)
+#   categorical_features   the features LightGBM treats as categorical, in column order;
+#                          exactly the int16 features below
+#   features               every feature: name and dtype, in the column order of
+#                          artifacts/features/{fold}/part-*.parquet (after query_id,
+#                          article_idx). float32 = a number, missing is NaN;
+#                          int16 = a category code, 0 = missing.
+#
+# configs/features.yaml stays the file the code reads. hmrec.locks.check_features_match_lock
+# fails when it differs from this file in any of the items above; it is called by
+# scripts/m6_build_features.py before a fold is built and by tests/unit/test_features_lock.py.
+#
+# Not in this file, on purpose:
+#   - chunking.embedding_pair_chunk_size of configs/features.yaml and the chunk sizes of
+#     configs/base.yaml: they change memory and speed, not results;
+#   - the category code table (artifacts/features/category_codes.json, not in git): every
+#     fold checks that its codes equal the existing file (features/categories.py).
+
+lock:
+  name: features
+  locked_on: 2026-11-18
+  # HEAD when this file was written (the commit that adds this file is its child).
+  git_commit: 068956dc96c1067e254c74ba1351ca8676cd5011
+
+fixed_values:
+  decay_tau_days: 30.0
+  history_similarity_top_k: 5
+
+settings:
+  history_length: 20
+  rrf_k: 60
+  online_sales_channel_id: 2
+  windows:
+    week_days: 7
+    four_week_days: 28
+    year_days: 364
+
+# 8 features.
+categorical_features:
+  - product_type_no
+  - product_group_name
+  - garment_group_no
+  - index_group_no
+  - section_no
+  - colour_group_code
+  - club_member_status
+  - fashion_news_frequency
+
+# 71 features: A 14, B 7, C 17, D 12, E 21 (proposal §8.2-§8.6).
+features:
+  - {name: pop_rank, dtype: float32}
+  - {name: rep_rank, dtype: float32}
+  - {name: sib_rank, dtype: float32}
+  - {name: icf_rank, dtype: float32}
+  - {name: wals_rank, dtype: float32}
+  - {name: tt_rank, dtype: float32}
+  - {name: pop_score, dtype: float32}
+  - {name: rep_score, dtype: float32}
+  - {name: sib_score, dtype: float32}
+  - {name: icf_score, dtype: float32}
+  - {name: pop_is_fallback, dtype: float32}
+  - {name: n_channels, dtype: float32}
+  - {name: best_rank, dtype: float32}
+  - {name: rrf_score, dtype: float32}
+  - {name: tt_dot, dtype: float32}
+  - {name: wals_dot, dtype: float32}
+  - {name: pop_bucket_score, dtype: float32}
+  - {name: img_sim_hist, dtype: float32}
+  - {name: txt_sim_hist, dtype: float32}
+  - {name: tt_sim_max_hist, dtype: float32}
+  - {name: tt_sim_top5_hist, dtype: float32}
+  - {name: item_cnt_1w, dtype: float32}
+  - {name: item_cnt_prev_1w, dtype: float32}
+  - {name: item_cnt_4w, dtype: float32}
+  - {name: item_uniq_buyers_4w, dtype: float32}
+  - {name: item_days_since_first_sale, dtype: float32}
+  - {name: item_days_since_last_sale, dtype: float32}
+  - {name: item_price_mean_4w, dtype: float32}
+  - {name: item_online_share_4w, dtype: float32}
+  - {name: item_buyer_age_mean_4w, dtype: float32}
+  - {name: item_repurchase_ratio_52w, dtype: float32}
+  - {name: item_discount_ratio, dtype: float32}
+  - {name: product_type_no, dtype: int16}
+  - {name: product_group_name, dtype: int16}
+  - {name: garment_group_no, dtype: int16}
+  - {name: index_group_no, dtype: int16}
+  - {name: section_no, dtype: int16}
+  - {name: colour_group_code, dtype: int16}
+  - {name: age, dtype: float32}
+  - {name: club_member_status, dtype: int16}
+  - {name: fashion_news_frequency, dtype: int16}
+  - {name: fn, dtype: float32}
+  - {name: active, dtype: float32}
+  - {name: user_cnt_4w, dtype: float32}
+  - {name: user_cnt_52w, dtype: float32}
+  - {name: user_days_since_last_purchase, dtype: float32}
+  - {name: user_price_mean_52w, dtype: float32}
+  - {name: user_online_share_52w, dtype: float32}
+  - {name: user_uniq_items_52w, dtype: float32}
+  - {name: user_purchase_days_52w, dtype: float32}
+  - {name: ui_cnt_item, dtype: float32}
+  - {name: ui_days_since_item, dtype: float32}
+  - {name: ui_cnt_pcode, dtype: float32}
+  - {name: ui_days_since_pcode, dtype: float32}
+  - {name: ui_share_ptype_52w, dtype: float32}
+  - {name: ui_share_garment_52w, dtype: float32}
+  - {name: ui_share_index_52w, dtype: float32}
+  - {name: ui_share_colour_52w, dtype: float32}
+  - {name: ui_price_ratio, dtype: float32}
+  - {name: ui_age_gap, dtype: float32}
+  - {name: ui_decay_ptype, dtype: float32}
+  - {name: ui_decay_garment, dtype: float32}
+  - {name: ui_decay_section, dtype: float32}
+  - {name: ui_decay_colour, dtype: float32}
+  - {name: ui_days_since_ptype, dtype: float32}
+  - {name: ui_days_since_section, dtype: float32}
+  - {name: ui_share_section_52w, dtype: float32}
+  - {name: ui_share_pgroup_52w, dtype: float32}
+  - {name: ui_lift_ptype_52w, dtype: float32}
+  - {name: ui_channel_gap, dtype: float32}
+  - {name: ui_attr_match_cnt, dtype: float32}

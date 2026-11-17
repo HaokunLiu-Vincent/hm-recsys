@@ -132,6 +132,11 @@ class ProjectPaths:
         """configs/locks/twotower.lock.yaml: the locked config and model files of R6 (M5)."""
         return self.locks_dir / "twotower.lock.yaml"
 
+    @property
+    def features_lock_file(self) -> Path:
+        """configs/locks/features.lock.yaml: the locked Ranker features (M6, proposal §8.7)."""
+        return self.locks_dir / "features.lock.yaml"
+
     # ------------------------------------------------------------ raw data
 
     @property
