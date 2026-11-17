@@ -58,7 +58,6 @@ from hmrec.hpo.runner import (
     TrialSettings,
     evaluate_trial,
     make_evaluate_fn,
-    twotower_chunks,
 )
 from hmrec.hpo.union_precheck import (
     ALL_CHANNELS,
@@ -77,6 +76,7 @@ from hmrec.logging_utils import get_logger
 from hmrec.memory import MemoryTracker
 from hmrec.paths import ProjectPaths
 from hmrec.recall.base import ARTICLE_IDX, validate_candidates, write_candidates
+from hmrec.recall.build import twotower_chunks
 from hmrec.recall.twotower.infer import (
     TWOTOWER_SPEC,
     TwoTowerChannel,

@@ -81,7 +81,7 @@ Placeholders for now; filled in as each milestone is implemented. See proposal �
 | M3 | Two-Tower base model | `scripts/m3_twotower_base.py` (TODO) |
 | M3 | Two-Tower D1–D4 chain | `scripts/m3_twotower_chain.py` (TODO) |
 | M4 | Union recall check | `scripts/m4_union_check.py` (TODO) |
-| M5 | Freeze recall configs | git tag `lock-channels-v1` |
+| M5 | Freeze recall configs | `configs/locks/`; check with `scripts/m5_verify_locks.py --channel ...`; git tag `lock-channels-v1` |
 | M6 | Candidates per fold | `scripts/m6_generate_candidates.py --fold F1` (TODO) |
 | M6 | Features per fold | `scripts/m6_build_features.py --fold F1` (TODO) |
 | M7 | Ranker HPO on V1–V4 | `scripts/m7_ranker_hpo.py` (TODO) |

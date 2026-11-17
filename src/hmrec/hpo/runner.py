@@ -55,18 +55,11 @@ from hmrec.logging_utils import get_logger
 from hmrec.memory import MemoryTracker, bytes_to_gb
 from hmrec.paths import get_paths
 from hmrec.recall.base import ARTICLE_IDX, QUERY_ID, RecallChannel, RecallInputs
-from hmrec.recall.r1_popularity import IS_FALLBACK, PopularityChannel, fallback_diagnostics
-from hmrec.recall.r2_repurchase import RepurchaseChannel
-from hmrec.recall.r3_sibling import SiblingChannel
-from hmrec.recall.r4_itemcf import ItemCFChannel
-from hmrec.recall.r5_wals import WalsChannel
+from hmrec.recall.build import build_statistical_channel, twotower_chunks
+from hmrec.recall.r1_popularity import IS_FALLBACK, fallback_diagnostics
 from hmrec.recall.twotower.chain import TwoTowerChainChannel
 from hmrec.recall.twotower.data import read_training_array
-from hmrec.recall.twotower.infer import (
-    TwoTowerChannel,
-    TwoTowerChunks,
-    load_twotower_resources,
-)
+from hmrec.recall.twotower.infer import TwoTowerChannel, load_twotower_resources
 from hmrec.recall.twotower.train import choose_alarm_users
 
 ALLOWED_PHASES = ("D", "V")
@@ -82,37 +75,13 @@ LOGGER = get_logger("hpo.runner")
 
 
 def build_channel(channel: str, raw_config: Mapping[str, Any], base: BaseConfig) -> RecallChannel:
-    """Parse a raw config and build the recall channel (chunk sizes from configs/base.yaml)."""
-    chunking = base.chunking
-    if channel == "r1_popularity":
-        return PopularityChannel(parse_popularity_config(raw_config))
-    if channel == "r2_repurchase":
-        return RepurchaseChannel(parse_repurchase_config(raw_config))
-    if channel == "r3_sibling":
-        return SiblingChannel(parse_sibling_config(raw_config))
-    if channel == "r4_itemcf":
-        config = parse_itemcf_config(raw_config)
-        return ItemCFChannel(config, chunking.item_chunk_size, chunking.query_chunk_size)
-    if channel == "r5_wals":
-        config = parse_wals_config(raw_config)
-        return WalsChannel(
-            config,
-            base.num_threads,
-            chunking.dense_score_query_chunk_size,
-            chunking.pair_chunk_size,
-        )
+    """Parse a raw config and build the recall channel (chunk sizes from configs/base.yaml).
+
+    R1-R5 are built by hmrec.recall.build, the same code the locked path uses after M5.
+    """
     if channel == "r6_twotower":
         return _build_twotower_channel(raw_config, base)
-    raise ValueError(f"unknown channel {channel!r}")
-
-
-def twotower_chunks(base: BaseConfig) -> TwoTowerChunks:
-    """R6 prediction chunk sizes from configs/base.yaml."""
-    return TwoTowerChunks(
-        encode_queries=base.chunking.dense_score_query_chunk_size,
-        score_queries=base.chunking.twotower_score_query_chunk_size,
-        pairs=base.chunking.pair_chunk_size,
-    )
+    return build_statistical_channel(channel, raw_config, base)
 
 
 def _build_twotower_channel(

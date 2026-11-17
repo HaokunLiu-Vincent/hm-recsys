@@ -337,3 +337,43 @@
 - **提醒：D 阶段的分数偏乐观。**D1–D4 上的各路分数和 union recall 都带有选择偏差：六路的配置（包括看到结果之后扩展的网格、R6 的人工选择和这次 R3 的切换）都是在这 4 周上决定的，R6 的 base 模型也紧接在这 4 周之前训练。F、V、T 周的 union recall 可能低于 25.3%，以后各周照常记录；G2 在 F / V / T 每周的检查以实测为准。D1–D4 不进入 Ranker 训练（§3）。
 - **M4 之后的代码改动**（只影响内存和日志，不改变结果，有测试）：union 检查改为一次只处理一个 fold（fold 的 queries、labels、活跃池和候选在这个 fold 结束时释放）；每个阶段单独记录内存峰值，采样间隔可用 `--memory-sample-interval` 指定（定位尖峰时用 0.05 秒）。
 - **proposal §1.3 已按实测更新**：每个 query 平均 313 个候选（原假设 250）→ 合并去重后每周约 2,570 万行；特征宽表每块（1 万 query）约 0.68 GB；Ranker 推理每块约 0.65 GB；12 周特征 Parquet 未压缩约 62 GB，压缩后估计 20–40 GB。
+
+## 2026-11-17 R3 改为只输出 A(a) 之后的结果（规则执行的结果，不参与任何选择）
+
+- **来源**：`scripts/m4_union_check.py --variant r3_active_pool`（HEAD 270998b，工作区干净）。R3 切换后的 trial `06025cc3d129` 记录在 `results/m4_trials.csv`，六路 union 检查记录在 `results/m4_union_check_r3_active_pool.csv`；原来的 `results/m4_union_check.csv` 不变。其余五路的候选没有变化，各路各周的分数与 `results/d_phase.csv` 逐位相同。
+- **R3 自己**（Recall@50，D1 / D2 / D3 / D4）：3.526 / 3.574 / 2.890 / 3.188，4 周合并 **3.240%**；切换前（trial `3188358fa459`）为 3.257%，下降 0.016 个百分点（相对 −0.51%）。候选行数 4 周合计从 1,169 万降到 945 万（平均每个 query 29.8 → 24.1 行），全部在 `A(a)` 内。
+- **六路 union recall**：D1 26.51%、D2 27.15%、D3 23.46%、D4 24.97%，**4 周合并 25.24%**（切换前 25.27%，下降 **0.025 个百分点**）。**G2（≥ 24%）仍然达标。**规则判定时估计的下降是 0.045 个百分点；实际更小，因为空出的名额由活跃池内的同款商品补上，补回了一部分命中。
+- **Leave-one-out**（去掉一路后 4 周合并 union recall 的下降，百分点）：R6 4.96、R1 3.03、R5 1.41、R4 1.15、R2 0.50、R3 **0.48**（切换前 0.51）。
+- **没有任何一路命中的 query**：50.55%（切换前 50.53%）。
+- **每个 query 去重后的候选数**：平均 **307.1**，P50 320，P90 **364**（切换前 312.9 / 327 / 373；上限 480）。合并前 D1 3,219 万行、D3 4,947 万行；去重后 D1 约 2,440 万行、D3 约 3,661 万行。
+- **内存**：这次运行一次只处理一个 fold，整个进程的真实峰值 **4.78 GB**（`/usr/bin/time`；采样到的最大值是 D4 整个 fold 的 4.72 GB），第一次 M4 运行（四周一起处理）是 6.66 GB。**这个 4.78 GB 不包含 R6 现场预测**：R1、R2、R4、R5、R6 的候选都是从已有文件读回的，只有 R3 现场生成。R6 现场预测、以及"六路候选生成 + 合并"在一个进程里的峰值，留到 M6 生成 F1 时实测；单独一路的峰值先在 M5 的 D1 核对中实测（见下一条）。
+- **说明**：R3 切换是预先登记规则的执行结果，这个 trial 没有和任何其他配置比较过；γ、τ 没有重新调。
+
+## 2026-11-17 M5：锁定全部 recall 配置
+
+- **决定**：六路 recall 的配置写入 `configs/locks/channels.lock.yaml`（R1–R5）和 `configs/locks/twotower.lock.yaml`（R6），此后不再修改（AGENTS.md §3.3：`configs/locks/` 只能新增）。两个文件都记录写入时的 git commit（HEAD `db801c6`；添加锁定文件的 commit 是它的子 commit）和日期。
+
+  | Channel | 锁定的配置 | 名额 | trial_id | D1–D4 合并分数（只作记录） | 选择依据 |
+  |---|---|---|---|---|---|
+  | R1 Popularity | A1，窗口 7 天，τ 3（默认配置） | 100 | `d2094d455698` | Recall@100 7.388% | 规则选择 |
+  | R2 Repurchase | decayed_frequency，lookback 365 天，τ 30 | 30 | `f562d598b0d6` | Recall@30 4.266% | 规则选择 |
+  | R3 Sibling | style_lookback 180，market_window 7，τ 30，γ 1.0，**active_pool_only: true** | 50 | `06025cc3d129` | Recall@50 3.240% | **规则执行**（D 阶段规则选中 `3188358fa459`；M4 预先登记的规则改为只输出 `A(a)`） |
+  | R4 ItemCF | CF3，fit_window 365，α 0.7，neighbors 100，seed_window 365，seed_decay 开，τ_seed 30 | 100 | `df281d91d7c1` | Recall@100 9.332% | 规则选择 |
+  | R5 WALS | W2，window 180，τ 60，α_conf 60，λ 0.1，factors 128，iterations 15，seed 42 | 100 | `3261309f8e8f` | Recall@100 10.807% | 规则选择 |
+  | R6 Two-Tower | base 窗口 2019-12-03 – 2020-06-02，E_base 4，E_update 2，replay 0.5，fine-tune lr 1e-4，chain seed 42，模型和训练设置同 proposal §5 R6 | 100 | `835ef201ee4d` | Recall@100 14.634% | **人工决定**（规则选中 (2, 0) = `ef62019e6c73`；见上面 "R6 训练链：采用 (E_update = 2, replay = 50%)" 一条） |
+
+  "规则选择"包含此前记录的、看到结果之后才加入的网格扩展（R2 的 365 天窗口、R3 的 γ 1.5 / 2.0、R4 的 seed 网格、R5 的 α_conf 60 / 80）；这些记录不变。
+- **R6 的模型文件**（`artifacts/` 不进 git，用 sha256 确认以后用的是同一个文件）：
+  - `base` = `artifacts/models/twotower/base/epoch_4.pt`，sha256 `0abcec18093362584826806b3a0a5968eb5d106e7684984bb7e8fecf0f59d3ab`（在训练链中预测了 D1）；
+  - `f1_start` = `artifacts/models/twotower/chain/835ef201ee4d/D4.pt`，sha256 `2a17e7c21899dc024237fb57a0fe3e8af8e2f6145a04f9c857110d4fc14ea1cf`（M4，预测 F1，F / V / T 的训练链从它继续）；
+  - 报警用户：比例 1%、seed 42，从 `artifacts/twotower/data/base/customer_idx.npy`（sha256 `1e8003eb…f0f9`）抽出 7,141 人。锁定文件记录这个数组的 sha256，因为数组一旦重新生成，被排除的用户就可能不同。
+- **锁定文件怎么写的、怎么核对的**：两个文件是手写的（数值从 `results/d_phase.csv`、`results/m4_trials.csv` 和 `shasum` 的输出复制）。`tests/unit/test_locks_match_records.py` 不读锁定文件，独立推出每一路应有的配置（在 `results/d_phase.csv` 上重放选择规则 + `configs/m4_union_check.yaml` 中 R6 的人工决定 + R3 的规则执行），再与锁定文件比较：配置完全一致；锁定的 trial_id 等于锁定配置的 hash，也等于记录中的 trial；锁定文件抄录的分数与结果文件逐位相同。
+- **代码（设计上新增的部分）**：
+  1. **新增底层模块 `src/hmrec/locks.py`**（只依赖 `config.py` 和标准库，与 `vectors.py` 同层）：读取并严格校验两个锁定文件，提供文件 sha256 核对。放在底层是因为 `features/` 以后也需要某些路的锁定参数（例如 §8.3 的 `pop_bucket_score` 要用 R1 的 τ），而 `features/` 不能 import `recall/`。锁定的配置必须写全每一项，不能依赖解析器的默认值（R3 的 `active_pool_only` 缺省时等于 false，锁定文件里必须写出）。
+  2. **`src/hmrec/recall/locked.py` 是 M5 之后构建六路的唯一入口**（`load_locked_recall`、`build_locked_channel` / `build_locked_channels`）。M6 之后的代码不再读 `configs/recall/` 的默认值或 `results/d_phase.csv`；`tests/unit/test_locked.py` 扫描 M6–M8 的脚本和 `fusion/`、`features/`、`ranker/`，出现这些读取就失败。
+  3. **R6 加载模型前先核对 sha256**，不一致就报错、不加载；路径由 `paths.py` 按锁定的 `base_epoch` / `trial_id` 得到，并要求与锁定文件里写的路径是同一个文件。入口返回的 R6 是"只预测"的 channel，从 `base` 或 `f1_start` 开始；**M6 每周预测之后的 fine-tune（训练链的延续）还没有接到这个入口上**，M6 实现时补上，报警用户通过 `load_locked_alarm_users` 取得。
+  4. R1–R5 的构建代码从 `hpo/runner.py` 移到 `src/hmrec/recall/build.py`，HPO 和锁定入口共用同一个函数（分块大小的接法只有一处）。D 阶段的行为不变（有测试）。
+- **`configs/base.yaml`：R4 的 `chunking.item_chunk_size` 从 2000 改为 1000。**原因见 2026-11-17 "D 阶段 R4 跑完……" 一条和 proposal §1.3：D 阶段最重的 R4 trial 峰值 4.76 GB，离 6 GB 太近。分块只影响内存和速度，不影响结果（分块与不分块的 `C_w` 逐位相同，有测试）；分块大小、线程数不属于锁定内容。
+- **锁定后的核对**（`scripts/m5_verify_locks.py`，每路一个进程；在本次 commit 之后运行，结果另记一条）：只通过锁定文件构建六路，在 D1 上重新生成候选（R6 用 `base` 预测，不训练），每一路的分数必须与记录逐位相同（R1、R2、R4、R5、R6 对 `results/d_phase.csv`，R3 对 `results/m4_trials.csv`）。候选写到 `artifacts/m5/lock_check/`，后续步骤不读取这个目录。同时记录每一路的耗时和 `/usr/bin/time` 的真实内存峰值（R4 是新的分块大小，R6 是现场预测）。
+- **提醒**：D1–D4 上的分数偏乐观（各路配置都在这 4 周上决定），只作记录；F / V / T 的各路 recall 和 union recall 以实测为准。
+- **proposal 已同步**：§0.1（参考值旁边的 D 阶段实测值）、§1.3（每个 query 307 个候选、P90 364，以及由此重算的各项估算；R4 分块；4.78 GB 的说明）、§5（每一路表格的"M5 锁定"行）、§6.5（锁定内容）、§9.1、§11（M0–M5 标为完成）、§14（新模块）。§5 R2 的表格原来被一段说明文字从中间断开，这次把那段文字移到了表格之后，内容没有改。

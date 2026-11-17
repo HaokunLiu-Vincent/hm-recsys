@@ -1,0 +1,161 @@
+# LOCKED recall configuration of R1-R5 (M5, proposal §11). R6 is in twotower.lock.yaml.
+#
+# DO NOT EDIT OR DELETE (AGENTS.md §3.3): files under configs/locks/ are append-only.
+# From M6 on, every F / V / T fold builds its channels from this file through
+# hmrec.recall.locked (the only entry). configs/recall/*.yaml (the D-phase
+# defaults) and results/d_phase.csv are no longer read for configuration.
+#
+# Per channel:
+#   selection_basis          how this configuration was chosen:
+#                              rule_selection   the §4.2 rule on D1-D4 (results/d_phase.csv)
+#                              rule_execution   outcome of a pre-registered rule applied
+#                                               on top of the rule's selection
+#                              manual_decision  chosen by hand (see twotower.lock.yaml)
+#   trial_id                 id of the locked configuration (hmrec.hpo.runner.make_trial_id)
+#   rule_selected_trial_id   the trial the §4.2 rule selected in the D phase
+#                            (= trial_id when selection_basis is rule_selection)
+#   decision_record          the docs/decisions.md entry
+#   quota                    max candidates per query (must equal config.quota)
+#   d_phase_record           FOR THE RECORD ONLY: the selection metric of this trial on
+#                            D1-D4 as stored in `source` (pooled = all queries of the
+#                            4 weeks averaged, proposal §4.1). D scores are optimistic
+#                            (the configurations were chosen on these weeks, §12) and
+#                            nothing reads them to make a choice.
+#   config                   the COMPLETE channel configuration, same keys as
+#                            configs/recall/{channel}.yaml
+#
+# Not locked here, on purpose:
+#   - chunk sizes and threads (configs/base.yaml): they change memory and speed, not results;
+#   - the active pool A(a) (configs/catalog.yaml) and the age buckets
+#     (configs/preprocess.yaml): frozen in M0 and never tuned.
+#
+# tests/unit/test_locks_match_records.py checks this file against a replay of the
+# selection on results/d_phase.csv plus the R3 rule outcome (results/m4_trials.csv).
+
+lock:
+  name: channels
+  locked_on: 2026-11-17
+  # HEAD when this file was written (the commit that adds this file is its child).
+  git_commit: db801c676bb1799f5886e8a6a2b1ec3cb3f9a60c
+
+channels:
+  r1_popularity:
+    selection_basis: rule_selection
+    trial_id: d2094d455698
+    rule_selected_trial_id: d2094d455698
+    decision_record: "docs/decisions.md 2026-11-17 D 阶段 R1–R5 最终选择（尚未锁定）"
+    quota: 100
+    d_phase_record:
+      source: results/d_phase.csv
+      metric: recall@100
+      pooled: 0.07388282594529487
+      folds:
+        D1: 0.07497200996179279
+        D2: 0.08333165907947691
+        D3: 0.07028547345128722
+        D4: 0.07057869924846817
+    config:
+      variant: A1          # per age bucket, decayed (the default was kept: no candidate passed)
+      window_days: 7       # history window [anchor - 7d, anchor)
+      tau_days: 3.0        # weight = exp(-age_days / tau)
+      quota: 100
+
+  r2_repurchase:
+    selection_basis: rule_selection
+    trial_id: f562d598b0d6
+    rule_selected_trial_id: f562d598b0d6
+    decision_record: "docs/decisions.md 2026-11-17 D 阶段 R1–R5 最终选择（尚未锁定）"
+    quota: 30
+    d_phase_record:
+      source: results/d_phase.csv
+      metric: recall@30
+      pooled: 0.04265844106059504
+      folds:
+        D1: 0.05336155656120723
+        D2: 0.04769915776408096
+        D3: 0.034911784196159125
+        D4: 0.0401107164995693
+    config:
+      variant: decayed_frequency
+      lookback_days: 365   # [anchor - 365d, anchor); the default was 180
+      tau_days: 30.0
+      quota: 30            # soft quota: at most 30, never padded
+
+  r3_sibling:
+    # The D-phase rule selected trial 3188358fa459 (gamma 1.0, tau 30, not limited
+    # to A(a)). The pre-registered M4 rule (union recall drop 0.045 pp < 0.1 pp) then
+    # switched R3 to "A(a) only": active_pool_only is true, gamma and tau were NOT
+    # re-tuned. The locked trial was run once as the outcome of that rule and is
+    # recorded in results/m4_trials.csv; it was never a candidate of a selection.
+    selection_basis: rule_execution
+    trial_id: 06025cc3d129
+    rule_selected_trial_id: 3188358fa459
+    decision_record: "docs/decisions.md 2026-11-17 M4 union 检查结果；R3 按预先登记的规则改为只输出 A(a) 内的商品"
+    quota: 50
+    d_phase_record:
+      source: results/m4_trials.csv
+      metric: recall@50
+      pooled: 0.03240284289030368
+      folds:
+        D1: 0.03526219660601794
+        D2: 0.035741069668308416
+        D3: 0.02889914908473948
+        D4: 0.0318809323628318
+    config:
+      style_lookback_days: 180   # window of P(u, c) and of the exclusion
+      market_window_days: 7      # window of M(j)
+      tau_days: 30.0
+      gamma: 1.0                 # the default was 0.5
+      quota: 50                  # at most 50, never padded
+      active_pool_only: true     # only articles in A(a), filtered BEFORE the Top-50 cut
+
+  r4_itemcf:
+    selection_basis: rule_selection
+    trial_id: df281d91d7c1
+    rule_selected_trial_id: df281d91d7c1
+    decision_record: "docs/decisions.md 2026-11-17 D 阶段 R1–R5 最终选择（尚未锁定）"
+    quota: 100
+    d_phase_record:
+      source: results/d_phase.csv
+      metric: recall@100
+      pooled: 0.09332095646014905
+      folds:
+        D1: 0.10543883432792314
+        D2: 0.10135328487878693
+        D3: 0.08336238022060798
+        D4: 0.09011763962264616
+    config:
+      variant: CF3             # IUF user weights
+      fit_window_days: 365     # C_w and n_w: [anchor - 365d, anchor)
+      seed_window_days: 365    # the default was 90
+      alpha: 0.7
+      neighbors_per_seed: 100  # K_n
+      seed_decay: true         # the default was false
+      seed_tau_days: 30.0      # fixed, not tuned
+      quota: 100
+
+  r5_wals:
+    selection_basis: rule_selection
+    trial_id: 3261309f8e8f
+    rule_selected_trial_id: 3261309f8e8f
+    decision_record: "docs/decisions.md 2026-11-17 D 阶段 R1–R5 最终选择（尚未锁定）"
+    quota: 100
+    d_phase_record:
+      source: results/d_phase.csv
+      metric: recall@100
+      pooled: 0.10807135584954505
+      folds:
+        D1: 0.12295079519167419
+        D2: 0.11760330415812739
+        D3: 0.09576485479460514
+        D4: 0.10443984303289268
+    config:
+      variant: W2
+      window_days: 180         # fit window [anchor - 180d, anchor)
+      decay_tau_days: 60.0     # fixed, not tuned
+      alpha_conf: 60.0         # the default was 20
+      regularization: 0.1
+      factors: 128             # the default was 64
+      iterations: 15
+      random_seed: 42
+      quota: 100

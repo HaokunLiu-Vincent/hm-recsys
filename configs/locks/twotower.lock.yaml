@@ -1,0 +1,110 @@
+# LOCKED configuration and models of R6 Two-Tower (M5, proposal §6.5).
+#
+# DO NOT EDIT OR DELETE (AGENTS.md §3.3): files under configs/locks/ are append-only.
+# From M6 on, R6 is built from this file through hmrec.recall.locked (the only
+# entry). configs/recall/r6_twotower.yaml and results/d_phase.csv are no longer
+# read for configuration. The base model is NOT retrained (proposal §6.5).
+#
+# The fields of `channel` have the same meaning as in channels.lock.yaml.
+
+lock:
+  name: twotower
+  locked_on: 2026-11-17
+  # HEAD when this file was written (the commit that adds this file is its child).
+  git_commit: db801c676bb1799f5886e8a6a2b1ec3cb3f9a60c
+
+channel:
+  # MANUAL DECISION, a deviation from the pre-registered rule. On the training
+  # chain step the §4.2 rule selected (E_update 2, replay 0) = trial ef62019e6c73
+  # (pooled Recall@100 14.576%). (E_update 2, replay 50%) = trial 835ef201ee4d
+  # (14.634%) was adopted by hand AFTER all chain results were seen: the chain runs
+  # for 16 weeks and showed first signs of forgetting without replay. The rule, its
+  # config and its recorded outcome were not changed. Reasons: the decision_record.
+  selection_basis: manual_decision
+  trial_id: 835ef201ee4d
+  rule_selected_trial_id: ef62019e6c73
+  decision_record: "docs/decisions.md 2026-11-17 R6 训练链：采用 (E_update = 2, replay = 50%)，偏离规则选中的 (2, 0)（人工决定）"
+  quota: 100
+  d_phase_record:
+    # Progressive validation: each fold was predicted BEFORE the model trained on it.
+    # D1 is the base checkpoint (epoch 4) with no update.
+    source: results/d_phase.csv
+    metric: recall@100
+    pooled: 0.14633756299808864
+    folds:
+      D1: 0.14477651846610332
+      D2: 0.15911795293420683
+      D3: 0.13970084036266944
+      D4: 0.14574898468440328
+  config:
+    history_length: 20          # last 20 purchases before the anchor
+    quota: 100
+    base_epoch: 4               # E_base: the base checkpoint the chain started from
+    e_update: 2                 # E_update: fine-tune epochs per week
+    replay: 0.5                 # half of each fine-tune set is replay (new : old = 1 : 1)
+    chain_seed: 42              # fine-tune shuffles and replay draws
+    chain:
+      week_days: 7              # new data of the week with anchor a: purchase days [a, a + 7)
+      replay_window_days: 28    # replay rows: purchase days [a - 28, a)
+    base_window:
+      end_anchor: 2020-06-03    # base samples: purchase days [end_anchor - 182d, end_anchor)
+      window_days: 182          #   = 2019-12-03 .. 2020-06-02 (26 weeks)
+    model:
+      output_dim: 128
+      image_projection_dim: 128
+      text_projection_dim: 128
+      article_embedding_dim: 64
+      product_code_embedding_dim: 32
+      category_embedding_dim: 16
+      one_hot_max_cardinality: 20
+      hidden_dim: 256
+      embedding_init_std: 0.02
+    training:
+      batch_size: 512
+      temperature: 0.05
+      learning_rate: 0.001             # base training (already done; not repeated)
+      fine_tune_learning_rate: 0.0001  # weekly fine-tune; a NEW Adam every week
+      adam_beta1: 0.9
+      adam_beta2: 0.999
+      adam_epsilon: 1.0e-8
+      weight_decay: 0.0
+      epochs: 6                        # base epochs that were trained (checkpoints 1..6)
+      seed: 42                         # also the seed of the alarm-user draw
+      alarm_user_share: 0.01
+      log_every_steps: 1000
+      device: cpu
+    # Not used by the model. Kept because the recorded trial id is a hash of the
+    # whole parsed config, and this section is part of it.
+    benchmark:
+      steps: 200
+      warmup_steps: 10
+      batch_size: 512
+      embedding_dim: 128
+      learning_rate: 0.001
+      temperature: 0.05
+      seed: 42
+
+# The 1% alarm users are kept out of every fine-tune; only their loss is logged
+# (proposal §6.4). They are drawn again each time from the base training arrays with
+# training.seed, so the same users are excluded only while that array is the same file.
+alarm_users:
+  share: 0.01                  # = config.training.alarm_user_share
+  seed: 42                     # = config.training.seed
+  source: artifacts/twotower/data/base/customer_idx.npy
+  source_sha256: 1e8003eb98e3ba0fd92784fb80c53f03ad95920818bb4f952880ee86ff0df0f9
+  n_alarm_users: 7141          # round(0.01 x 714,091 distinct users)
+
+# Model files. artifacts/ is not in git, so the sha256 is what proves that a later
+# run uses the same file. hmrec.recall.locked checks it before loading the weights
+# and fails on a mismatch.
+checkpoints:
+  # Base model after E_base = 4 epochs. It predicted D1 in the chain, and every
+  # chain model starts from it.
+  base:
+    path: artifacts/models/twotower/base/epoch_4.pt
+    sha256: 0abcec18093362584826806b3a0a5968eb5d106e7684984bb7e8fecf0f59d3ab
+  # M4 of proposal §6.4: the chain model after the D4 fine-tune. It predicts F1;
+  # the F / V / T chain continues from it (proposal §6.6).
+  f1_start:
+    path: artifacts/models/twotower/chain/835ef201ee4d/D4.pt
+    sha256: 2a17e7c21899dc024237fb57a0fe3e8af8e2f6145a04f9c857110d4fc14ea1cf

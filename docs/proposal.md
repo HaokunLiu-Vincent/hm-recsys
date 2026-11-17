@@ -15,19 +15,21 @@
 | 编号 | 指标 | 目标 | 在哪里检查 |
 |---|---|---|---|
 | G1 | 端到端 macro **MAP@12**（LambdaMART） | **≥ 0.032**（最低目标） | V1–V4 选模型，T1–T4 最终报告 |
-| G2 | 6 路合并后的 macro **union recall** | **≥ 24%** | D1–D4（锁定 recall 前）和 F/V/T 每周 |
+| G2 | 6 路合并后的 macro **union recall** | **≥ 24%**（D1–D4 实测 **25.24%**，M5 锁定的配置；见下表说明） | D1–D4（锁定 recall 前）和 F/V/T 每周 |
 | G3 | LambdaMART 优于 RRF baseline | 4 周中至少 3 周 MAP@12 更高 | V1–V4、T1–T4 |
 
 各路 Recall@quota 的参考值（来自旧项目，**存疑，只作为 sanity check，不作为验收标准**）：
 
-| Channel | Quota | 参考 Recall@quota |
-|---|---|---|
-| R1 Popularity | 100 | ~7% |
-| R2 Repurchase | ≤30 | ~4% |
-| R3 Sibling | ≤50 | ~3.6% |
-| R4 ItemCF | 100 | ~8% |
-| R5 WALS | 100 | ~10% |
-| R6 Two-Tower | 100 | ~10% |
+| Channel | Quota | 参考 Recall@quota | D 阶段实测（M5 锁定的配置，D1–D4 四周合并） |
+|---|---|---|---|
+| R1 Popularity | 100 | ~7% | **7.39%** |
+| R2 Repurchase | ≤30 | ~4% | **4.27%** |
+| R3 Sibling | ≤50 | ~3.6% | **3.24%**（只输出 `A(a)`；切换前 3.26%） |
+| R4 ItemCF | 100 | ~8% | **9.33%** |
+| R5 WALS | 100 | ~10% | **10.81%** |
+| R6 Two-Tower | 100 | ~10% | **14.63%**（训练链，每周先预测后 fine-tune；不更新的 base 为 11.84%） |
+
+实测列来自 `configs/locks/` 中每一路记录的 trial（`results/d_phase.csv`，R3 为 `results/m4_trials.csv`）。**D 阶段的分数偏乐观**（配置就是在这 4 周上选出来的，见 §12 第 4 条），只用来和参考值对照，不代表 F / V / T 周的表现。没有哪一路比参考值低一半以上。
 
 如果某一路实测结果比参考值低一半以上，先排查 bug（时间截断、ID 映射、去重），再讨论模型本身。
 
@@ -84,22 +86,22 @@
 | M0 预处理（CSV 流式转 Parquet、对齐 embedding） | — | **峰值 2.25 GB**（其中交易表一步峰值 2.10 GB）；全程约 6 秒 | Polars lazy 扫描 + streaming `sink_parquet`；字符串 ID 先换成 int32 再排序 |
 | M0 query / label 生成（16 个 fold） | — | **峰值 0.36 GB**（MemoryTracker 采样；`/usr/bin/time` 最大 RSS 0.38 GB）；16 个 fold 共约 1.9 秒（每个 fold 约 0.1 秒） | 每个 fold 只读 label 周的两列（`customer_idx, article_idx`）；每周约 6.9 万–12.0 万个 query，约 21 万–49 万条 label |
 | R1–R3 候选生成（D1，默认配置） | — | **整体峰值 1.77 GB**（`/usr/bin/time` 最大 RSS，整个脚本：读 queries / labels、算活跃池、跑 3 路、评估）；耗时 R1 0.6 秒、R2 0.2 秒、R3 0.5 秒，全程 2.2 秒。单个 channel 的运行时间短于 0.5 秒的采样间隔，**单路峰值不可靠**，不单独列出 | 每路只读需要的列；R2 / R3 的历史先按 query 用户 semi-join |
-| R4 ItemCF 共现矩阵（365 天） | 不分块可能远超 8 GB | **D1（CF3，α=0.7）：整体峰值 2.95 GB**（`/usr/bin/time` 最大 RSS，含读数据；MemoryTracker 采样 2.62 GB）；耗时 17.2 秒（建图 + 邻居 15.5 秒，打分 1.8 秒）。图规模：1,540 万条购买行 → 1,325 万个 (用户, 商品) 对，98.8 万用户，7.2 万商品，`Σ d_u²` ≈ 5.1 亿；28,110 个 seed，分 15 块。**D 阶段（D1–D4 四周，9 个配置）：最重的 trial 峰值 4.76 GB**（MemoryTracker 采样，整个进程，含已加载的 4 周数据；配置 seed 窗口 365 天、衰减关，4 周共 115 秒）；seed 窗口越长，要算邻居的 seed 越多，峰值越高（其余 trial 3.9–4.6 GB） | **按 seed item 分块**（每块约 2,000 个 item），每块算完只保留 Top-`K_n` 邻居就释放。4.76 GB 离 6 GB 上限太近：**M6 之前把 `chunking.item_chunk_size` 从 2000 调到 1000**（分块只影响内存和速度，不影响结果：分块和不分块的 `C_w` 逐位相同，有测试） |
+| R4 ItemCF 共现矩阵（365 天） | 不分块可能远超 8 GB | **D1（CF3，α=0.7）：整体峰值 2.95 GB**（`/usr/bin/time` 最大 RSS，含读数据；MemoryTracker 采样 2.62 GB）；耗时 17.2 秒（建图 + 邻居 15.5 秒，打分 1.8 秒）。图规模：1,540 万条购买行 → 1,325 万个 (用户, 商品) 对，98.8 万用户，7.2 万商品，`Σ d_u²` ≈ 5.1 亿；28,110 个 seed，分 15 块。**D 阶段（D1–D4 四周，9 个配置）：最重的 trial 峰值 4.76 GB**（MemoryTracker 采样，整个进程，含已加载的 4 周数据；配置 seed 窗口 365 天、衰减关，4 周共 115 秒）；seed 窗口越长，要算邻居的 seed 越多，峰值越高（其余 trial 3.9–4.6 GB） | **按 seed item 分块**，每块算完只保留 Top-`K_n` 邻居就释放。D 阶段每块 2,000 个 item；4.76 GB 离 6 GB 上限太近，所以 **M5 把 `chunking.item_chunk_size` 从 2000 改为 1000**（分块只影响内存和速度，不影响结果：分块和不分块的 `C_w` 逐位相同，有测试）。新分块下的峰值和耗时在锁定后的 D1 核对（`scripts/m5_verify_locks.py`）中实测 |
 | R5 WALS（180 天） | ~0.5–1 GB | **D1（W2，默认配置）：整体峰值 3.10 GB**（`/usr/bin/time` 最大 RSS；MemoryTracker 采样：拟合 0.96 GB，打分 2.11 GB）；耗时 63.8 秒（拟合 53.0 秒，打分 10.8 秒）。矩阵 71.1 万用户 × 5.2 万商品，590 万个非零值。**峰值来自打分**而不是拟合：打分按 `chunking.dense_score_query_chunk_size` = 5,000 个 query 分块，每块 5,000 × 20,764 个活跃商品的 float32 分数矩阵约 0.41 GB，再加 `np.partition` 的副本（分块为 1 万时整体峰值 4.05 GB；两种分块的 Recall@100 都是 11.36%，候选行数相同）。当前 `implicit` 的 macOS wheel 没有链接 OpenMP，拟合实际是**单线程**（`num_threads=6` 不起作用） | 稀疏 CSR，没问题 |
 | R6 Two-Tower 训练 | ~1.5–2 GB | **训练数组生成（base 窗口，2026-11-17）：峰值 4.70 GB**（取较保守的值：两次运行 MemoryTracker 采样分别为 3.35 GB 和 4.70 GB，任务只有约 4.5 秒，0.5 秒的采样间隔误差大；`/usr/bin/time` 最大 RSS 4.15 GB，含读数据），耗时 4.6 秒；616 万个样本，数组共 670 MB（`history` int32 470 MB、`history_mask` 118 MB）。**200 步 benchmark（占位模型，batch 512）**：MPS 进程最大 RSS 2.00 GB，MPS 张量占用 1.17 GB（驱动共持有 2.02 GB，统一内存，与 RSS 部分重叠）；CPU 进程最大 RSS 2.34 GB。真实模型（训练全程）待测 | 用户历史预先存成 int32 数组 `[N, 20]`；商品特征表（~10.5 万 × 896 维，约 380 MB）整块放进 MPS 显存；batch 直接按下标取，不用 DataLoader |
-| 候选生成（每周） | 合并前最多约 3,940 万行，全部放在内存约 0.73 GB（D3 约 1.07 GB）；单个 channel 最多约 0.15 GB；合并去重后约 **2,570 万行**（每个 query 平均 313 个；计算见表下 ①） | **M4 实测（D1–D4，2026-11-17）**：合并前 D1 3,268 万行、D3 5,015 万行（只保留 `query_id`、`article_idx`、`rank` 三列时约 0.37 / 0.56 GB）；去重后每个 query 平均 **313** 个候选（P50 327，P90 373；上限 480），D1 约 2,490 万行、D3 约 3,731 万行。M4 union 检查整个进程的真实峰值 **6.66 GB**（`/usr/bin/time`；0.5 秒采样只看到 5.22 GB），超过 6 GB，尖峰所在阶段待定位 | 每个 channel 单独写 Parquet，再按 query 分块合并去重 |
-| 特征宽表（每周，§8） | 一周全放进内存约 **5.5 GB**（2,570 万行 × 232 B），不可行；按 1 万 query 分块后每块约 **0.68 GB**，P90 的块约 0.81 GB（计算见表下 ④）。12 周（F、V、T）的特征 Parquet 未压缩约 **62 GB**，压缩后估计 20–40 GB（计算见表下 ⑤） | 待测 | **按 query 分块计算**（每块 1 万个 query），每块算完直接写成一个 Parquet row group / part 文件，不在内存中保留整周 |
+| 候选生成（每周） | 合并前最多约 3,940 万行，全部放在内存约 0.73 GB（D3 约 1.07 GB）；单个 channel 最多约 0.15 GB；合并去重后约 **2,520 万行**（每个 query 平均 307 个；计算见表下 ①） | **M4 实测（D1–D4，2026-11-17，M5 锁定的配置，即 R3 只输出 `A(a)`）**：合并前 D1 3,219 万行、D3 4,947 万行（只保留 `query_id`、`article_idx`、`rank` 三列时约 0.36 / 0.55 GB）；去重后每个 query 平均 **307** 个候选（P50 320，P90 364；上限 480），D1 约 2,440 万行、D3 约 3,661 万行。R3 切换之前：平均 313（P50 327，P90 373），合并前 D1 3,268 万行、D3 5,015 万行。**内存**：第一次 M4 union 检查（四周一起处理）整个进程的真实峰值 6.66 GB（`/usr/bin/time`；0.5 秒采样只看到 5.22 GB），超过 6 GB；改为一次只处理一个 fold 后（R3 切换后的重跑）降到 **4.78 GB**（`/usr/bin/time`；采样 4.72 GB）。**这个 4.78 GB 不包含 R6 现场预测**：那次运行 R1、R2、R4、R5、R6 的候选都从已有文件读回，只有 R3 是现场生成的。候选生成（含 R6 预测）加合并的峰值留到 M6 的 F1 实测 | 每个 channel 单独写 Parquet，再按 query 分块合并去重 |
+| 特征宽表（每周，§8） | 一周全放进内存约 **5.4 GB**（2,520 万行 × 232 B），不可行；按 1 万 query 分块后每块约 **0.66 GB**，P90 的块约 0.79 GB（计算见表下 ④）。12 周（F、V、T）的特征 Parquet 未压缩约 **61 GB**，压缩后估计 18–37 GB（计算见表下 ⑤） | 待测 | **按 query 分块计算**（每块 1 万个 query），每块算完直接写成一个 Parquet row group / part 文件，不在内存中保留整周 |
 | Ranker 训练（4 周） | 负采样 1:40 约 1,100 万行，1:80 约 2,170 万行（上限）；原始 float32 特征约 2.3–4.5 GB，分箱后约 0.6–1.1 GB（计算见表下 ②） | 待测 | **流式加载（stream loading）**：每周特征按 row group 存 Parquet，用 LightGBM 的 `lgb.Sequence` 分批读入构建 `Dataset`，原始特征不必一次性放进内存；构建后的分箱数据（每个值 1 字节）约 0.5–1 GB，存成 LightGBM binary 文件复用 |
-| Ranker 推理（每周，不采样） | 一次全放进内存约 **5.4 GB**；按 1 万 query 分块后每块约 **0.65 GB**，P90 的块约 0.78 GB（计算见表下 ③） | 待测 | **按 query 分块打分**（每块 1 万个 query） |
+| Ranker 推理（每周，不采样） | 一次全放进内存约 **5.3 GB**；按 1 万 query 分块后每块约 **0.64 GB**，P90 的块约 0.76 GB（计算见表下 ③） | 待测 | **按 query 分块打分**（每块 1 万个 query） |
 
-**候选生成、Ranker 训练、Ranker 推理、特征宽表几行的估算过程**（2026-11-16 按实测 query 数重算；2026-11-17 按 M4 实测的候选数重算；1 GB = 1024³ B）。共同输入：每周平均 **8.2 万** query（D3 最多 12.0 万；F、V、T 周 6.9–8.6 万），每个 query 平均约 **3.4** 个 label（去重后；F、V 周 3.2–3.6）；6 路 quota 合计 100 + 30 + 50 + 100 + 100 + 100 = **480**；合并去重后每个 query 平均 **313** 个候选，P50 327，P90 373（M4 在 D1–D4 上实测，R3 改为只输出 `A(a)` 之前；原来假设 250）；特征 **56** 个。F、V、T 共 12 周的 query 数实测为 6.9–8.6 万，合计 **917,354**，平均 7.64 万。
+**候选生成、Ranker 训练、Ranker 推理、特征宽表几行的估算过程**（2026-11-16 按实测 query 数重算；2026-11-17 按 M4 实测的候选数重算，同日 M5 锁定时再按 R3 切换后的候选数 307 重算；1 GB = 1024³ B）。共同输入：每周平均 **8.2 万** query（D3 最多 12.0 万；F、V、T 周 6.9–8.6 万），每个 query 平均约 **3.4** 个 label（去重后；F、V 周 3.2–3.6）；6 路 quota 合计 100 + 30 + 50 + 100 + 100 + 100 = **480**；合并去重后每个 query 平均 **307** 个候选，P50 320，P90 364（M4 在 D1–D4 上实测，M5 锁定的配置，即 R3 只输出 `A(a)`；R3 切换之前为 313 / 327 / 373，最初假设 250）；特征 **56** 个。F、V、T 共 12 周的 query 数实测为 6.9–8.6 万，合计 **917,354**，平均 7.64 万。
 
-- ① **候选生成**：合并前最多 8.2 万 × 480 ≈ 3,940 万行（D3：12.0 万 × 480 ≈ 5,760 万行）。每行约 20 B（`query_id`、`article_idx`、`rank` 各 int32 4 B，`score` float32 4 B，`channel` 用 Categorical 约 4 B）→ 3,940 万 × 20 B ≈ 0.73 GB（D3 ≈ 1.07 GB）。每个 channel 单独写盘，单个 channel 最多 8.2 万 × 100 × 20 B ≈ 0.15 GB。合并去重后 8.2 万 × 313 ≈ **2,570 万行**（原估算 2,050 万；D3：12.0 万 × 310 ≈ 3,730 万行）。
-- ② **Ranker 训练**：每周正样本 ≈ 8.2 万 query × 3.4 label × 24%（G2 的 union recall 目标；M4 在 D1–D4 上实测 25.3%，正样本和下面的行数相应多约 5%）≈ 6.7 万。每个正样本配 r 个负样本：r = 40 时 6.7 万 × 41 ≈ 274 万行/周，4 周 ≈ **1,100 万行**；r = 80 时 6.7 万 × 81 ≈ 542 万行/周，4 周 ≈ **2,170 万行**（候选不够时负样本全取，所以这是上限）。原始特征 56 × 4 B = 224 B/行 → 1,100 万 × 224 B ≈ 2.3 GB，2,170 万 × 224 B ≈ 4.5 GB；分箱后每个值 1 B → 1,100 万 × 56 B ≈ 0.57 GB，2,170 万 × 56 B ≈ 1.1 GB。r = 80 时原始特征接近 6 GB 上限，所以必须流式加载。
-- ③ **Ranker 推理**：每周 8.2 万 × 313 = 2,570 万行 × 224 B ≈ 5.75 × 10⁹ B ≈ **5.4 GB**（原估算 4.3 GB；V、T 周最多 8.3 万 query，差不多）。按 1 万 query 分块：1 万 × 313 × 224 B ≈ 7.0 × 10⁸ B ≈ **0.65 GB/块**（原估算 0.52 GB）；候选多的块按 P90 算：1 万 × 373 × 224 B ≈ 0.78 GB/块。
-- ④ **特征宽表**：每行 56 个 float32 特征 224 B，加上 `query_id`、`article_idx` 两个 int32 共 8 B → **232 B/行**。一周 2,570 万行 × 232 B ≈ 5.96 × 10⁹ B ≈ 5.5 GB，接近 6 GB 上限，所以不能整周放进内存。按 1 万 query 分块：1 万 × 313 × 232 B ≈ 7.3 × 10⁸ B ≈ **0.68 GB/块**；按 P90：1 万 × 373 × 232 B ≈ 0.81 GB/块。
-- ⑤ **12 周特征 Parquet 的磁盘占用**：F1–F4、V1–V4、T1–T4 共 917,354 个 query × 313 ≈ **2.87 亿行**；未压缩 2.87 亿 × 232 B ≈ 6.66 × 10¹⁰ B ≈ **62 GB**（平均每周约 5.2 GB）。Parquet 压缩比现在只能估计：候选文件（ID、rank、score）压缩后约为原始大小的 18%（预检查 5 路 4 周 1.25 亿行 449 MB），浮点特征压缩得差一些，按 30%–60% 估计为 **约 20–40 GB**。M6 生成 F1 后先实测一周的大小再外推。当前磁盘可用空间约 520 GB，足够。
-- 说明：313 是 R3 改为只输出 `A(a)` 之前的实测值。R3 在 `A(a)` 外的候选约占 R3 行数的 23%（平均每个 query 约 7 行），其中一部分名额会由池内的同款商品补上，所以切换后的平均候选数预计在 306–313 之间，以切换后重跑的 union 检查为准。
+- ① **候选生成**：合并前最多 8.2 万 × 480 ≈ 3,940 万行（D3：12.0 万 × 480 ≈ 5,760 万行）。每行约 20 B（`query_id`、`article_idx`、`rank` 各 int32 4 B，`score` float32 4 B，`channel` 用 Categorical 约 4 B）→ 3,940 万 × 20 B ≈ 0.73 GB（D3 ≈ 1.07 GB）。每个 channel 单独写盘，单个 channel 最多 8.2 万 × 100 × 20 B ≈ 0.15 GB。合并去重后 8.2 万 × 307 ≈ **2,520 万行**（R3 切换之前 2,570 万，最初估算 2,050 万；D3：12.0 万 × 305 ≈ 3,660 万行）。
+- ② **Ranker 训练**：每周正样本 ≈ 8.2 万 query × 3.4 label × 24%（G2 的 union recall 目标；M4 在 D1–D4 上实测 25.2%，正样本和下面的行数相应多约 5%）≈ 6.7 万。每个正样本配 r 个负样本：r = 40 时 6.7 万 × 41 ≈ 274 万行/周，4 周 ≈ **1,100 万行**；r = 80 时 6.7 万 × 81 ≈ 542 万行/周，4 周 ≈ **2,170 万行**（候选不够时负样本全取，所以这是上限）。原始特征 56 × 4 B = 224 B/行 → 1,100 万 × 224 B ≈ 2.3 GB，2,170 万 × 224 B ≈ 4.5 GB；分箱后每个值 1 B → 1,100 万 × 56 B ≈ 0.57 GB，2,170 万 × 56 B ≈ 1.1 GB。r = 80 时原始特征接近 6 GB 上限，所以必须流式加载。
+- ③ **Ranker 推理**：每周 8.2 万 × 307 = 2,520 万行 × 224 B ≈ 5.64 × 10⁹ B ≈ **5.3 GB**（最初估算 4.3 GB；V、T 周最多 8.3 万 query，差不多）。按 1 万 query 分块：1 万 × 307 × 224 B ≈ 6.9 × 10⁸ B ≈ **0.64 GB/块**（最初估算 0.52 GB）；候选多的块按 P90 算：1 万 × 364 × 224 B ≈ 0.76 GB/块。
+- ④ **特征宽表**：每行 56 个 float32 特征 224 B，加上 `query_id`、`article_idx` 两个 int32 共 8 B → **232 B/行**。一周 2,520 万行 × 232 B ≈ 5.84 × 10⁹ B ≈ 5.4 GB，接近 6 GB 上限，所以不能整周放进内存。按 1 万 query 分块：1 万 × 307 × 232 B ≈ 7.1 × 10⁸ B ≈ **0.66 GB/块**；按 P90：1 万 × 364 × 232 B ≈ 0.79 GB/块。
+- ⑤ **12 周特征 Parquet 的磁盘占用**：F1–F4、V1–V4、T1–T4 共 917,354 个 query × 307 ≈ **2.82 亿行**；未压缩 2.82 亿 × 232 B ≈ 6.53 × 10¹⁰ B ≈ **61 GB**（平均每周约 5.1 GB）。Parquet 压缩比现在只能估计：候选文件（ID、rank、score）压缩后约为原始大小的 18%（预检查 5 路 4 周 1.25 亿行 449 MB），浮点特征压缩得差一些，按 30%–60% 估计为 **约 18–37 GB**。M6 生成 F1 后先实测一周的大小再外推。当前磁盘可用空间约 520 GB，足够。
+- 说明：307 是 R3 改为只输出 `A(a)` 之后重跑 union 检查的实测值（`results/m4_union_check_r3_active_pool.csv`，4 周合并 307.1）。切换之前是 313：R3 在 `A(a)` 外的候选约占 R3 行数的 23%（平均每个 query 约 7 行），切换后其中一部分名额由池内的同款商品补上，R3 平均每个 query 的行数从 29.8 降到 24.1，合并去重后平均少 5.8 个。
 
 以上除"实测"列外都是估算值，后续各阶段实测后继续填写"实测"列。M0 query / label 生成实测于 2026-11-16（`scripts/m0_build_queries.py`）。M0 预处理实测（2026-11-15）：常驻内存是读回 Parquet 后的 Polars `estimated_size()`；峰值是 `MemoryTracker` 的采样 RSS（间隔 0.5 秒，是下限，见下一段）。其他 M0 产物的常驻内存：customers 37 MB，articles 3 MB，customer ID 映射 89 MB，按 `article_idx` 对齐的图像 / 文本 embedding 206 MB / 155 MB。
 
@@ -273,6 +275,8 @@
 
 **每个 trial 都要在 D1–D4 每周重新计算**：用该周 anchor 之前的数据重新统计或重新 fit。不能 fit 一次然后评 4 周。
 
+**最终配置（M5，2026-11-17 锁定）**：六路的最终配置写在 `configs/locks/channels.lock.yaml`（R1–R5）和 `configs/locks/twotower.lock.yaml`（R6），下面每一路表格的最后一行（"M5 锁定"）给出。表中的分数是该 trial 在 D1–D4 上的 4 周合并分数，**只作记录**，偏乐观（§12 第 4 条）。**M6 之后只能通过 `src/hmrec/recall/locked.py` 从锁定文件构建六路**，不再读取 `configs/recall/` 的默认值或 `results/d_phase.csv`（有测试扫描 M6 之后的代码）。
+
 统一输出格式（每路一张表）：`query_id, article_idx, channel, rank, score`。每个 query 内 `article_idx` 不重复；按 `score DESC, article_idx ASC` 排序；`rank` 从 1 开始连续编号；不足 quota 时不补齐。
 
 **每路的输出规格**（`src/hmrec/recall/base.py` 的 `OutputSpec`）：每一路声明自己的额外列（列名必须以该路前缀开头，如 `pop_`，不允许 null）和排序键（默认 `score DESC, article_idx ASC`）。写盘前的校验是双向的：多了未声明的列、缺少已声明的列、dtype 不一致都报错；并检查 `rank` 与声明的排序键一致。
@@ -304,6 +308,7 @@
 |---|---|---|
 | Ablation | **G0**（全局、不分桶、7 天原始计数）vs **A1**（τ=3） | 2 |
 | HPO | `τ ∈ {1, 2, 3, 4, 5, 6, 7}` | +6 |
+| **M5 锁定** | **A1，τ = 3**（没有候选通过规则，保留默认配置），窗口 7 天，quota 100。规则选择；trial `d2094d455698`；Recall@100 = 7.388% | — |
 
 **合计 8 个配置，分钟级。**
 
@@ -318,10 +323,11 @@
 | 类型 | 内容 | 配置数 |
 |---|---|---|
 | Ablation | **Recency-only**（按最近一次购买时间排序）vs **Decayed frequency**（τ=30） | 2 |
-
-Recency-only 的分数 = `1 / age_days`，`age_days` 取用户最近一次购买该商品的年龄（昨天 = 1.0，前天 = 0.5）；更早的购买和购买次数都不参与。同一天买的多件商品同分，只按 `article_idx ASC` 排序，不用其他信息打破平局，保持它是纯粹的对照组。
 | HPO 第 1 步 | `τ ∈ {14, 30, 60}` | +2 |
 | HPO 第 2 步 | 历史窗口 `lookback_days ∈ {180, 365}`（默认 180；优先顺序 180 < 365，短的更简单）。**在看到 D 阶段 R1–R3 结果之后加入**，见 `docs/decisions.md` | +1 |
+| **M5 锁定** | **Decayed frequency，τ = 30，历史窗口 365 天**，quota 30。规则选择；trial `f562d598b0d6`；Recall@30 = 4.266% | — |
+
+Recency-only 的分数 = `1 / age_days`，`age_days` 取用户最近一次购买该商品的年龄（昨天 = 1.0，前天 = 0.5）；更早的购买和购买次数都不参与。同一天买的多件商品同分，只按 `article_idx ASC` 排序，不用其他信息打破平局，保持它是纯粹的对照组。
 
 **合计 5 个配置。**
 
@@ -338,10 +344,11 @@ Recency-only 的分数 = `1 / age_days`，`age_days` 取用户最近一次购买
 |---|---|---|
 | Ablation | `γ ∈ {0, 0.5, 1.0, 1.5, 2.0}`（γ=0 表示只看风格偏好，用来检验市场热度有没有用；1.5、2.0 **在看到 D 阶段 R1–R3 结果之后加入**，见 `docs/decisions.md`；优先顺序按与默认值 0.5 的距离） | 5 |
 | HPO | 在最佳 γ 上调 `τ ∈ {14, 30, 60}` | +2 |
+| **M5 锁定** | **γ = 1.0，τ = 30，只输出 `A(a)` 内的商品**（`active_pool_only: true`），风格窗口 180 天，市场窗口 7 天，quota 50。规则执行：D 阶段规则选中 γ = 1.0、τ = 30（trial `3188358fa459`，Recall@50 = 3.257%），M4 预先登记的规则再把它改为只输出 `A(a)`；锁定的是切换后的 trial `06025cc3d129`（`results/m4_trials.csv`），Recall@50 = 3.240% | — |
 
 **合计 7 个配置。** 如果选中 γ = 2.0（新网格的边界），不再继续扩展，只在报告中说明。
 
-**活跃池**（2026-11-17，M4）：R3 只输出 `A(a)` 内的商品（`configs/recall/r3_sibling.yaml` 的 `active_pool_only`，在 `configs/m4_union_check.yaml` 的 `variants.r3_active_pool` 中打开）。过滤放在取 Top-50 之前，空出的名额由池内的同款商品补上；`P(u, c)`、`M(j)` 和已购买商品的排除仍用全部商品。本节的 ablation 和 HPO 都是在不过滤的设置下做的，γ、τ 不重新调（§2.4、§5.7 第 4 项）。
+**活跃池**（2026-11-17，M4）：R3 只输出 `A(a)` 内的商品（`configs/recall/r3_sibling.yaml` 的 `active_pool_only`，在 `configs/m4_union_check.yaml` 的 `variants.r3_active_pool` 中打开；M5 在 `configs/locks/channels.lock.yaml` 中锁定为 `true`）。过滤放在取 Top-50 之前，空出的名额由池内的同款商品补上；`P(u, c)`、`M(j)` 和已购买商品的排除仍用全部商品。本节的 ablation 和 HPO 都是在不过滤的设置下做的，γ、τ 不重新调（§2.4、§5.7 第 4 项）。
 
 ### R4 — ItemCF
 
@@ -359,6 +366,7 @@ Recency-only 的分数 = `1 / age_days`，`age_days` 取用户最近一次购买
 | Ablation | **CF0**（不加权，α = 0.5，即普通 cosine `s = C / sqrt(n(i)·n(j))`）vs **CF3** | 2 |
 | HPO 第 1 步 | `α ∈ {0.5, 0.7, 0.9}` | +2 |
 | HPO 第 2 步 | 3×2 小网格：`L_seed ∈ {90, 180, 365}` × seed 衰减 {关, 开（τ_seed = 30）}；(90, 关) 就是当前配置 | +5 |
+| **M5 锁定** | **CF3，α = 0.7，`L_seed` = 365 天，seed 衰减开**（τ_seed = 30），建图窗口 365 天，`K_n` = 100，quota 100。规则选择；trial `df281d91d7c1`；Recall@100 = 9.332% | — |
 
 **HPO 第 2 步为什么用网格，而不是"一次只改一个因素"**：两个因素明显相互影响。seed 窗口越长，覆盖的用户越多（D1 上 32.2% 的 query 因 90 天内没有购买而输出为空），但不衰减时，几个月前的旧购买和昨天的购买权重相同，噪声随窗口变长而变大；衰减正是用来抵消这部分噪声的。单独调窗口（衰减关）会低估长窗口，单独调衰减（90 天）又看不到它在长窗口上的作用。网格只有 6 格，每格在 D1 上只需十几秒（§1.3），成本可以忽略。
 
@@ -384,6 +392,7 @@ Recency-only 的分数 = `1 / age_days`，`age_days` 取用户最近一次购买
 | HPO 第 2 步 | `λ ∈ {0.01, 0.1, 1.0}` | +2 |
 | HPO 第 3 步 | `factors ∈ {64, 128}` | +1 |
 | 收敛检查 | 在最终配置上跑 `iterations ∈ {10, 15, 25}`，只确认 15 次时已经进入平台期 | +2 |
+| **M5 锁定** | **W2，`α_conf` = 60，`λ` = 0.1，`factors` = 128，`iterations` = 15**，窗口 180 天，衰减 τ = 60，seed 42，quota 100。规则选择；trial `3261309f8e8f`；Recall@100 = 10.807% | — |
 
 **Iterations 不做 early stopping**：ALS 每一轮都是闭式解（closed-form），很快收敛；过拟合由 λ 和 factors 控制。如果 25 次明显比 15 次好，就改成 25；如果 15 次之后分数明显下降，说明 λ 太小，回到第 2 步加大 λ，而不是减少 iterations。
 
@@ -441,6 +450,7 @@ Recency-only 的分数 = `1 / age_days`，`age_days` 取用户最近一次购买
 | 稳健性 | 前 2 名的配置各再跑 2 个 seed | 约 4 条链 |
 | 可选 | ① 只用 ID、不用 CLIP / MiniLM 的 content ablation；② base 长度改为 52 周 | 时间允许再做 |
 | 不做 | 每周从零重训（full retrain）的对照 | — |
+| **M5 锁定** | **E_base = 4，E_update = 2，replay = 50%**，fine-tune lr 1e-4，chain seed 42，其余为上面的固定值。**人工决定**：规则选中的是 (E_update = 2, replay = 0)（trial `ef62019e6c73`，14.576%），人工采用 (2, 50%)（trial `835ef201ee4d`，Recall@100 = 14.634%），理由见 `docs/decisions.md`。模型文件和 sha256 见 §6.5 | — |
 
 ### 5.7 D 阶段的收尾：Union 检查
 
@@ -515,6 +525,15 @@ Recency-only 的分数 = `1 / age_days`，`age_days` 取用户最近一次购买
 ### 6.5 第 3 步：锁定
 
 在 2020-07-01 之前，把 `base_window, E_base, E_update, replay, fine_tune_lr, seed` 写进 `configs/locks/twotower.lock.yaml`。**选中配置跑出来的 M4 就是之后使用的模型，不重新训练 base。**
+
+**锁定内容（M5，2026-11-17）**：`configs/locks/twotower.lock.yaml` 记录：
+
+- 完整的 R6 配置：base 窗口（购买日 2019-12-03 – 2020-06-02）、模型结构和训练设置的全部数值、`E_base = 4`、`E_update = 2`、`replay = 0.5`、fine-tune lr 1e-4、chain seed 42；
+- 选择依据：**人工决定**。规则选中的是 (2, 0)（trial `ef62019e6c73`），锁定的是 (2, 50%)（trial `835ef201ee4d`），并指向 `docs/decisions.md` 的记录；
+- 报警用户的设置：比例 1%、seed 42，以及抽样来源（base 训练数组的 `customer_idx.npy`）的 sha256 和抽出的人数（7,141）；
+- 两个模型文件的路径和 **sha256**：`base`（`artifacts/models/twotower/base/epoch_4.pt`，在训练链中预测了 D1）和 `f1_start`（`artifacts/models/twotower/chain/835ef201ee4d/D4.pt`，即 M4，用来预测 F1）。
+
+`artifacts/` 不进 git，所以用 sha256 确认以后用的是同一个文件：`src/hmrec/recall/locked.py` 在加载模型权重**之前**先核对 sha256，不一致就报错，不加载。
 
 ### 6.6 第 4 步：F → V → T，每周照做
 
@@ -666,7 +685,7 @@ WALS 和 Two-Tower 的原始分数放在 B 组，因为 B 组对所有候选都�
 
 估算（与 §1.3 ② 一致）：每周正样本 ≈ 8.2 万 query × 3.4 label × 24%（G2 的 union recall 目标）≈ 6.7 万；r = 40 时 6.7 万 × 41 ≈ 每周 274 万行，4 周约 1,100 万行；r = 80 时 6.7 万 × 81 ≈ 每周 542 万行，4 周约 2,170 万行（候选不够时负样本全取，所以是上限）。计算过程和内存处理见 §1.3。
 
-M4 在 D1–D4 上的实测（2026-11-17，§5.7）：六路 union recall 25.3%，所以正样本比上面的估算多约 5%；**49.5% 的 query 至少有 1 个正样本**（50.5% 的 query 没有任何一路命中，不进入训练）；每个 query 去重后平均 313 个候选（P50 327，P90 373），所以 r = 80 时绝大多数正样本都能配满负样本（一个有 2 个正样本的 query 需要 160 个负样本）。这几周的分数偏乐观（各路配置就是在这 4 周上选的），F、V、T 周以实测为准。
+M4 在 D1–D4 上的实测（2026-11-17，§5.7，M5 锁定的配置）：六路 union recall 25.2%，所以正样本比上面的估算多约 5%；**49.5% 的 query 至少有 1 个正样本**（50.5% 的 query 没有任何一路命中，不进入训练）；每个 query 去重后平均 307 个候选（P50 320，P90 364；R3 改为只输出 `A(a)` 之前为 313 / 327 / 373），所以 r = 80 时绝大多数正样本都能配满负样本（一个有 2 个正样本的 query 需要 160 个负样本）。这几周的分数偏乐观（各路配置就是在这 4 周上选的），F、V、T 周以实测为准。
 
 ### 9.2 滚动重训：固定 4 周窗口
 
@@ -739,17 +758,17 @@ V4 结束后、T1 之前，把 Ranker 配置写进 `configs/locks/ranker.lock.ya
 
 内存只有 8 GB，**重任务一次只跑一个**。
 
-| # | 内容 | 产出 | 完成标准 |
-|---|---|---|---|
-| M0 | 按 §14 建好仓库骨架、`AGENTS.md`、lint / test 配置；数据清洗与压缩（ID 转 int32 等）；`fold_manifest`；年龄桶；活跃池规则；`selection_rule.yaml`；Two-Tower 200 步 benchmark；内存实测 | 处理好的 Parquet、configs | 校验脚本通过；规则在看到任何分数之前提交 |
-| M1 | 实现评估模块（Recall / MAP / NDCG / union recall）和 R1–R5 | 代码 + 单元测试 | 时间截断测试、tie-break 测试、手算小例子全部通过 |
-| M2 | R1–R5 在 D1–D4 上做 ablation + HPO | `results/d_phase.csv` | 每路配置锁定 |
-| M3 | Two-Tower：数据准备 → base → D1–D4 训练链 | checkpoints、M4、结果表 | `twotower.lock.yaml` |
-| M4 | D 阶段 union 检查（§5.7） | union recall 表 | **G2 达标**，否则回到 M2 / M3 |
-| M5 | **冻结全部 recall 配置**（打 git tag） | `channels.lock.yaml` | 之后不再修改 |
-| M6 | 逐周生成 F1–T4 的候选和宽表特征（Two-Tower 沿训练链逐周推进） | `artifacts/candidates/`、`artifacts/features/` | 每周通过时间截断测试 |
-| M7 | Ranker 在 V1–V4 上滚动 HPO + baseline + 系统 ablation | `results/v_phase.csv` | `ranker.lock.yaml`；**G1、G3 在 V 上达标** |
-| M8 | T1–T4 最终评估 | 最终报告 | 报告 G1–G3 |
+| # | 内容 | 产出 | 完成标准 | 状态 |
+|---|---|---|---|---|
+| M0 | 按 §14 建好仓库骨架、`AGENTS.md`、lint / test 配置；数据清洗与压缩（ID 转 int32 等）；`fold_manifest`；年龄桶；活跃池规则；`selection_rule.yaml`；Two-Tower 200 步 benchmark；内存实测 | 处理好的 Parquet、configs | 校验脚本通过；规则在看到任何分数之前提交 | **完成** |
+| M1 | 实现评估模块（Recall / MAP / NDCG / union recall）和 R1–R5 | 代码 + 单元测试 | 时间截断测试、tie-break 测试、手算小例子全部通过 | **完成** |
+| M2 | R1–R5 在 D1–D4 上做 ablation + HPO | `results/d_phase.csv` | 每路配置锁定 | **完成**（选择在 M2 完成，锁定在 M5 统一进行） |
+| M3 | Two-Tower：数据准备 → base → D1–D4 训练链 | checkpoints、M4、结果表 | `twotower.lock.yaml` | **完成**（锁定文件在 M5 写入） |
+| M4 | D 阶段 union 检查（§5.7） | union recall 表 | **G2 达标**，否则回到 M2 / M3 | **完成**（4 周合并 25.24%，G2 达标；R3 按预先登记的规则改为只输出 `A(a)`） |
+| M5 | **冻结全部 recall 配置**（打 git tag） | `channels.lock.yaml`、`twotower.lock.yaml` | 之后不再修改 | **完成**（2026-11-17 写入锁定文件；锁定后在 D1 上重新生成候选、与记录逐位核对的结果，以及 tag，见 `docs/decisions.md`） |
+| M6 | 逐周生成 F1–T4 的候选和宽表特征（Two-Tower 沿训练链逐周推进） | `artifacts/candidates/`、`artifacts/features/` | 每周通过时间截断测试 | |
+| M7 | Ranker 在 V1–V4 上滚动 HPO + baseline + 系统 ablation | `results/v_phase.csv` | `ranker.lock.yaml`；**G1、G3 在 V 上达标** | |
+| M8 | T1–T4 最终评估 | 最终报告 | 报告 G1–G3 | |
 
 M2 中计算量小的 R1–R3 可以和 M3 的 Two-Tower 训练同时跑；R4 建图和 R5 拟合不要和 Two-Tower 同时跑。
 
@@ -820,8 +839,8 @@ hm-recsys/
 │   ├── features.yaml            # 宽表特征列表（§8）
 │   ├── ranker.yaml              # LightGBM 固定参数（§9.3）
 │   └── locks/                   # 锁定后的配置，只能新增，不能修改
-│       ├── channels.lock.yaml
-│       ├── twotower.lock.yaml
+│       ├── channels.lock.yaml   # M5：R1–R5 的完整配置、名额、trial_id、D 阶段分数（只作记录）、选择依据
+│       ├── twotower.lock.yaml   # M5：R6 的完整配置、报警用户设置、两个模型文件的路径和 sha256
 │       ├── features.lock.yaml
 │       └── ranker.lock.yaml
 │
@@ -833,6 +852,7 @@ hm-recsys/
 │   ├── memory.py                # 内存监控、分块迭代工具
 │   ├── threads.py               # 在 import polars 之前按 base.yaml 设置 POLARS_MAX_THREADS（只依赖标准库和 yaml）
 │   ├── vectors.py               # 用户 / 商品向量（WALS、Two-Tower 共用）：按 (customer_idx, article_idx) 批量点积、保存 / 读取
+│   ├── locks.py                 # 读取并校验 configs/locks/ 的锁定文件；文件 sha256 核对（底层，recall / features 都可以用）
 │   │
 │   ├── data/
 │   │   ├── preprocess.py        # 原始 CSV → Parquet；ID 映射成 int32；压缩 dtype
@@ -852,6 +872,8 @@ hm-recsys/
 │   │   ├── r4_itemcf.py
 │   │   ├── r5_wals.py
 │   │   ├── vector_scoring.py    # R5 / R6 共用：按向量点积取 Top-quota，score 用 vectors.dot_pairs
+│   │   ├── build.py             # 从原始配置构建 R1–R5（分块大小取自 base.yaml）；HPO 和锁定入口共用
+│   │   ├── locked.py            # M5 之后构建六路的唯一入口：只读 configs/locks/；R6 加载模型前核对 sha256
 │   │   └── twotower/
 │   │       ├── data.py          # 训练样本、用户历史数组 [N, 20]、商品特征表（末尾 padding 行）、在设备上取 batch
 │   │       ├── benchmark.py     # §1.4 的 200 步计时（占位模型；也用于真实模型的设备选择）
@@ -892,7 +914,8 @@ hm-recsys/
 │       ├── d_phase.py           # D 阶段：加载 D1–D4，按 channel 运行，写结果和每一步的报告
 │       ├── robustness.py        # 一步中排名靠前的配置再跑额外的 seed（只汇报，不参与选择）
 │       ├── union_precheck.py    # 重放规则得到各路的选择；R1–R5 的 union 预检查
-│       └── union_check.py       # M4：六路 union 检查（只用命中的候选计算）、R3 活跃池规则
+│       ├── union_check.py       # M4：六路 union 检查（只用命中的候选计算）、R3 活跃池规则
+│       └── lock_check.py        # M5：只用锁定文件重新生成一个 fold 的候选，分数必须与记录逐位相同
 │
 ├── scripts/                     # 命令行入口，只做"读参数 → 调用 src → 写结果"
 │   ├── m0_preprocess.py
@@ -904,6 +927,7 @@ hm-recsys/
 │   ├── m3_twotower_base.py
 │   ├── m3_twotower_chain.py
 │   ├── m4_union_check.py
+│   ├── m5_verify_locks.py          # --channel r1_popularity ...：锁定文件在 D1 上重现记录的分数（每路一个进程）
 │   ├── m6_generate_candidates.py   # --fold F1 ...
 │   ├── m6_build_features.py        # --fold F1 ...
 │   ├── m7_ranker_hpo.py
@@ -950,6 +974,7 @@ hm-recsys/
 │   ├── lgb_datasets/{run_id}/   # LightGBM binary dataset
 │   ├── models/{wals,twotower,ranker}/{fold}/
 │   ├── hpo/D/{channel}/{trial_id}/{fold}.parquet  # R2 / R3 候选 + in_active_pool 标记（M4 的 §5.7 第 4 项用）
+│   ├── m5/lock_check/{fold}/{channel}.parquet     # M5 锁定核对生成的候选；后续步骤不读取这个目录
 │   └── runs/{run_id}/           # 每次运行的 config 快照、日志、指标
 │
 └── results/                     # 进 git：小的汇总表
@@ -967,6 +992,7 @@ scripts/  →  src/hmrec/{recall, fusion, features, ranker, hpo}  →  src/hmrec
 
 - 上层可以调用下层，**下层不能 import 上层**。例如 `data/` 不能 import `recall/`。
 - `recall/`、`features/`、`ranker/` 之间互不 import，通过 `artifacts/` 里的文件交接。
+- `locks.py` 属于底层（只依赖 `config.py` 和标准库）：它只读取、校验 `configs/locks/` 的锁定文件。`recall/` 和 `features/` 都可以 import 它（特征需要某一路的锁定参数时从这里取，不经过 `recall/`）。从锁定文件**构建** channel 在 `recall/locked.py`。
 - `vectors.py` 属于底层（只依赖 numpy 和标准库），`recall/` 和 `features/` 都可以 import 它：R5 / R6 训练后用它把向量存到 `artifacts/models/{wals,twotower}/{fold}/`，§8.3 的 `wals_dot`、`tt_dot` 用它读取并计算点积。召回分数和点积特征用同一个函数计算，所以同一个 (用户, 商品) 的 R5 `score` 与 `wals_dot` 完全相同。
 - 所有按时间取历史数据的操作都必须经过 `data/asof.py`。
 

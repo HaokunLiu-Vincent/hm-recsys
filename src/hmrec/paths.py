@@ -112,6 +112,16 @@ class ProjectPaths:
         """configs/locks/ (append-only)."""
         return self.configs_dir / "locks"
 
+    @property
+    def channels_lock_file(self) -> Path:
+        """configs/locks/channels.lock.yaml: the locked configs of R1-R5 (M5)."""
+        return self.locks_dir / "channels.lock.yaml"
+
+    @property
+    def twotower_lock_file(self) -> Path:
+        """configs/locks/twotower.lock.yaml: the locked config and model files of R6 (M5)."""
+        return self.locks_dir / "twotower.lock.yaml"
+
     # ------------------------------------------------------------ raw data
 
     @property
@@ -278,6 +288,15 @@ class ProjectPaths:
     def m4_candidates_file(self, fold: str, channel: str, trial_id: str) -> Path:
         """artifacts/m4/candidates/{fold}/{channel}_{trial_id}.parquet (M4 union check)."""
         return self.artifacts_root / "m4" / "candidates" / fold / f"{channel}_{trial_id}.parquet"
+
+    def lock_check_candidates_file(self, fold: str, channel: str) -> Path:
+        """artifacts/m5/lock_check/{fold}/{channel}.parquet: candidates of the M5 lock check.
+
+        Kept apart from artifacts/candidates/ on purpose: these files only prove
+        that the lock files reproduce the recorded D-phase scores. No later step
+        reads them.
+        """
+        return self.artifacts_root / "m5" / "lock_check" / fold / f"{channel}.parquet"
 
     def twotower_checkpoint_file(self, epoch: int) -> Path:
         """artifacts/models/twotower/base/epoch_{epoch}.pt: base model after `epoch` epochs."""
