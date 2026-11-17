@@ -487,11 +487,16 @@ Recency-only 的分数 = `1 / age_days`，`age_days` 取用户最近一次购买
 | 06-17 | M2 预测 D3 → 记分 → 用 D3 fine-tune → M3 |
 | 06-24 | M3 预测 D4 → 记分 → 用 D4 fine-tune → **M4** |
 
-- **每个分数都是"先预测、后训练"得到的**（progressive validation）：被预测的那一周，模型还没见过。
-- Replay：fine-tune 时额外混入的旧数据比例，从前 4 周的购买中随机抽取。
-- Fine-tune 的 learning rate 固定为 base LR 的 0.1 倍，不调。
-- "Frozen base"那条链就是第 1 步的结果，直接拿来对比。
-- 所有链在 D1 上的分数相同（都是 base 的预测），真正区分配置的是 D2–D4。
+- **每个分数都是"先预测、后训练"得到的**（progressive validation）：被预测的那一周，模型还没见过。实现上（`src/hmrec/recall/twotower/chain.py`）每一周先用当前模型生成候选，再 fine-tune；各 fold 必须按时间顺序处理，否则报错。
+- **新数据**：anchor 为 `a` 的这一周，购买日在 `[a, a + 7)` 的购买；样本、历史、去重规则与 base 训练完全一致（§6.1）。
+- **Replay 的定义**：`replay` 是 fine-tune 集中旧数据所占的比例。旧数据从**这一周开始之前 4 周**（购买日 `[a − 28, a)`）的样本中不放回随机抽取，数量 `n_replay = round(n_new × replay / (1 − replay))`：`replay = 50%` 时 `n_replay = n_new`（新 : 旧 = 1 : 1），`replay = 0` 时只用新数据。抽样用固定 seed（`chain_seed` 和这一周的 anchor）。
+- **报警用户**：继续排除 base 训练中那 1% 的报警用户（用 base 的数组和 seed 重新抽出同一批用户），新数据和 replay 中都不含他们；每周 fine-tune 后记录他们在这一周的 loss，只作报警，不用于选择。
+- **优化器**：每周 fine-tune 都**重新初始化 Adam**（lr 1e-4 = base LR 的 0.1 倍，其余设置同 base），不继承上一周的优化器状态。每个 epoch 用 `(chain_seed, anchor, epoch)` 打乱顺序。LogQ 的 `Q` 用这一次的 fine-tune 集（新数据 + replay）统计。
+- **保存**：每一周 fine-tune 后的模型存到 `artifacts/models/twotower/chain/{trial_id}/{fold}.pt`（不覆盖已有文件）；D4 预测完之后也用 D4 fine-tune 一次，得到 **M4**（`D4.pt`），F1 从它开始。
+- **默认配置和候选**（`configs/hpo/d_phase.yaml` 的 `r6_twotower.update` 步骤）：默认是 **frozen**（`e_update = 0`：base 不更新，直接预测 D1–D4，就是第 1 步选中的 E_base 的结果，直接复用）。候选按优先顺序：`(E_update = 1, replay = 0) < (1, 50%) < (2, 0) < (2, 50%)`（epoch 少、不加 replay 的更便宜，排在前面），按 §4.2 的多候选规则选择。
+- 所有链在 D1 上的分数相同（都是 base 的预测），真正区分配置的是 D2–D4：§4.2 的"4 周中至少 3 周严格更好"实际要求 D2、D3、D4 都更好，这是预期的行为。
+- **稳健性**：按 §4.2 规则排名前 2 的配置（第 1 名是规则选中的；第 2 名是去掉第 1 名后规则会选中的；没有候选通过时按合并分数排）各再用 seed 43、44 跑一遍（只影响 fine-tune 的打乱顺序和 replay 抽样），汇报均值和波动（`results/d_phase_steps/r6_twotower_seeds.csv`）。**选择仍以 seed 42 的结果为准**，额外的 seed 只用于汇报。
+- 内存：训练链按 fold 逐个处理，每周的 fine-tune 数组用完就释放；历史只读取涉及的用户的购买。
 
 ### 6.5 第 3 步：锁定
 

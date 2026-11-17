@@ -280,3 +280,18 @@
 - **决定**：按上一条记录的规则（MPS 快 1.3 倍以上才用 MPS），**R6 用 CPU 训练和推理**。MPS 的速度只有 CPU 的 0.67 倍。`configs/recall/r6_twotower.yaml` 的 `training.device` 本来就是 `cpu`，不用改；proposal §1.2、§1.4 已同步。
 - **推算**：每个 epoch 约 1.19 万步（去掉 1% 报警用户）× 30.4 ms ≈ **6.0 分钟**，6 个 epoch 约 **36–37 分钟**（另加每个 epoch 末尾的报警用户 loss 和 checkpoint 保存，各几秒）。内存峰值约 2.2–2.5 GB。
 - **附带核对**：R5 的打分代码移到 `recall/vector_scoring.py` 之后，用 R5 在 D 阶段选中的配置（trial 3261309f8e8f）在 D1 上重新运行一次：Recall@100 = 0.12295079519167419、候选 6,398,300 行，与 `results/d_phase.csv` 的记录逐位相同（没有写入 results，也没有写候选文件）。
+
+## 2026-11-17 Two-Tower 训练链（§6.4）的定义：replay、Adam、默认配置和候选顺序
+
+- **时间点**：以下定义是在**看到 E_base 结果（选中 epoch 4，4 周合并 Recall@100 11.84%）之后、运行任何训练链之前**确定的。没有看过任何 fine-tune 的分数。
+- **决定**：
+  1. **训练链**：从 base 的 epoch 4 出发，按 D1 → D2 → D3 → D4 的顺序，每周先用当前模型预测（记分），再用这一周（购买日 `[a, a + 7)`）的数据 fine-tune；D4 预测完之后也 fine-tune 一次，得到 M4（F1 用）。每一步的模型存到 `artifacts/models/twotower/chain/{trial_id}/{fold}.pt`，不覆盖。
+  2. **Replay = 50% 的含义**：从这一周开始之前 4 周（`[a − 28, a)`）的样本中不放回抽取，数量与新数据相同（新 : 旧 = 1 : 1）；一般公式 `n_replay = round(n_new × replay / (1 − replay))`；replay = 0 时只用新数据。抽样用固定 seed。
+  3. **报警用户**：继续排除 base 训练中那 1% 的用户（用 base 数组和 base seed 重新抽出同一批），并记录他们每周的 loss。
+  4. **每周重新初始化 Adam**（lr 1e-4，其余同 base），不继承上一周的优化器状态。理由：每周的数据和 LogQ 分布不同，上一周的动量和二阶矩不再对应当前的梯度；每周从同样的初始状态开始也让各周的设置一致、容易复现。
+  5. **LogQ 的 Q** 用这一次 fine-tune 集（新数据 + replay）统计。
+  6. **默认配置是 frozen**（不更新，直接复用 E_base epoch 4 的结果）。为了让这个 trial 被复用，`hmrec.hpo.runner.parsed_config` 规定：`e_update = 0` 时，`replay`、`chain_seed`、`chain` 这些设置不影响结果，不计入 trial_id，所以 E_base 的 6 个 trial_id 保持不变（有测试）。
+  7. **候选和优先顺序**：(E_update = 1, replay = 0) < (1, 50%) < (2, 0) < (2, 50%)，按 §4.2 的多候选规则选择（epoch 少、不加 replay 的更便宜，排在前面）。所有配置在 D1 上分数相同，所以"4 周中至少 3 周严格更好"实际要求 D2、D3、D4 都更好，这是预期的。
+  8. **稳健性**：按规则排名前 2 的配置（第 2 名 = 去掉第 1 名后规则会选中的；没有候选通过时按合并分数排）各再用 seed 43、44 跑一遍，只影响 fine-tune 的打乱顺序和 replay 抽样；汇报均值、标准差、最小值、最大值。选择仍以 seed 42 的结果为准，额外 seed 只用于汇报。写在 `configs/hpo/d_phase.yaml` 新增的 `robustness` 部分。
+  9. **内存**：训练链按 fold 逐个处理，每周的 fine-tune 数组在这一周用完后释放；fine-tune 的历史只读取涉及的用户的购买（与推理相同）。预测的每个阶段（历史、向量、候选）记录内存，用来查明 E_base 评估中第一个 trial 6.27 GB 峰值的原因（结果在运行后另记）。
+- **proposal §6.4 已同步。**
