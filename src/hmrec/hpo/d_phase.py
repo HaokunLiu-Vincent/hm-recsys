@@ -23,8 +23,6 @@ from functools import partial
 from pathlib import Path
 from typing import Any
 
-import polars as pl
-
 from hmrec.config import (
     BaseConfig,
     CatalogConfig,
@@ -32,9 +30,7 @@ from hmrec.config import (
     SelectionRule,
     load_yaml,
 )
-from hmrec.data.catalog import build_active_pool
 from hmrec.data.folds import Fold
-from hmrec.data.metadata import scan_processed_parquet
 from hmrec.eval.report import FoldEvaluator
 from hmrec.hpo.grid import PhaseGrid, RawConfig
 from hmrec.hpo.records import TrialRecord, append_record, read_records, result_columns
@@ -52,7 +48,7 @@ from hmrec.hpo.runner import (
 )
 from hmrec.logging_utils import get_logger
 from hmrec.paths import ProjectPaths
-from hmrec.recall.base import RecallInputs
+from hmrec.recall.inputs import build_recall_inputs, load_shared_tables, read_queries
 
 PHASE = "D"
 LOGGER = get_logger("hpo.d_phase")
@@ -66,27 +62,12 @@ def load_fold_contexts(
 ) -> list[FoldContext]:
     """Queries, channel inputs and label evaluator of every fold (labels stay inside eval/)."""
     check_tuning_folds(folds)
-    metadata = paths.processed_metadata_file
-    transactions = scan_processed_parquet(paths.transactions_file, metadata, preprocess)
-    customers = (
-        scan_processed_parquet(paths.customers_file, metadata, preprocess)
-        .select("customer_idx", "age_bucket")
-        .collect()
-    )
-    articles = (
-        scan_processed_parquet(paths.articles_file, metadata, preprocess)
-        .select("article_idx", "product_code")
-        .collect()
-    )
+    # The same loader as candidate generation after the lock (hmrec.recall.inputs).
+    tables = load_shared_tables(paths, preprocess)
     contexts: list[FoldContext] = []
     for fold in folds:
-        active_pool = build_active_pool(
-            transactions, fold.anchor, preprocess.day_zero, catalog.active_pool
-        )
-        inputs = RecallInputs(
-            fold.anchor, preprocess.day_zero, transactions, customers, articles, active_pool
-        )
-        queries = pl.read_parquet(paths.queries_file(fold.name))
+        inputs = build_recall_inputs(tables, fold, preprocess, catalog)
+        queries = read_queries(paths, fold.name)
         evaluator = FoldEvaluator.from_file(fold.name, paths.labels_file(fold.name))
         contexts.append(FoldContext(fold, queries, inputs, evaluator))
         LOGGER.info(
@@ -94,7 +75,7 @@ def load_fold_contexts(
             fold.name,
             fold.anchor,
             queries.height,
-            active_pool.height,
+            inputs.active_pool.height,
         )
     return contexts
 
