@@ -30,7 +30,7 @@ import polars as pl
 
 from hmrec.config import BaseConfig, SelectionRule, load_yaml
 from hmrec.eval.metrics import FOLD, QUERY_ID, VALUE, macro_mean
-from hmrec.hpo.grid import PhaseGrid, RawConfig, Step
+from hmrec.hpo.grid import PhaseGrid, RawConfig, Step, apply_overrides
 from hmrec.hpo.records import TrialRecord, read_records, result_columns
 from hmrec.hpo.runner import (
     FoldContext,
@@ -129,14 +129,47 @@ def select_channel(
     return SelectedChannel(channel, selected_raw, record)
 
 
+def apply_manual_selection(
+    choice: SelectedChannel,
+    overrides: Mapping[str, object],
+    finished: Mapping[str, TrialRecord],
+) -> SelectedChannel:
+    """Replace the rule's selection of one channel by a manual choice (docs/decisions.md).
+
+    Args:
+        choice: The rule's selection.
+        overrides: Config keys to change, e.g. {"replay": 0.5}.
+        finished: trial_id -> record of this channel from results/d_phase.csv.
+
+    Raises:
+        ValueError: If the manual config was never run (no trial in results/d_phase.csv).
+    """
+    raw_config = apply_overrides(choice.raw_config, overrides)
+    trial_id = make_trial_id(choice.channel, raw_config)
+    if trial_id not in finished:
+        raise ValueError(
+            f"{choice.channel}: manual selection {dict(overrides)} is trial {trial_id}, "
+            "which is not in results/d_phase.csv"
+        )
+    LOGGER.warning(
+        "%s: MANUAL selection %s replaces the rule's trial %s by trial %s",
+        choice.channel,
+        dict(overrides),
+        choice.record.trial_id,
+        trial_id,
+    )
+    return SelectedChannel(choice.channel, raw_config, finished[trial_id])
+
+
 def select_channels(
     paths: ProjectPaths,
     channels: Sequence[str],
     grid: PhaseGrid,
     rule: SelectionRule,
     folds: Sequence[str],
+    manual_selection: Mapping[str, Mapping[str, object]] | None = None,
 ) -> list[SelectedChannel]:
-    """select_channel for each channel, reading results/d_phase.csv once."""
+    """select_channel for each channel (reading results/d_phase.csv once), then manual choices."""
     columns = result_columns(folds, list(grid.fold_groups), grid.extra_metrics)
     records = read_records(
         paths.d_phase_results_file, columns, folds, list(grid.fold_groups), grid.extra_metrics
@@ -145,10 +178,11 @@ def select_channels(
     for channel in channels:
         finished = {r.trial_id: r for r in records if r.channel == channel and r.phase == "D"}
         default_raw = load_yaml(paths.recall_config_file(channel))
-        selected.append(
-            select_channel(channel, grid.channels[channel], default_raw, finished, rule)
-        )
-        LOGGER.info("%s: selected trial %s", channel, selected[-1].record.trial_id)
+        choice = select_channel(channel, grid.channels[channel], default_raw, finished, rule)
+        if manual_selection and channel in manual_selection:
+            choice = apply_manual_selection(choice, manual_selection[channel], finished)
+        selected.append(choice)
+        LOGGER.info("%s: selected trial %s", channel, choice.record.trial_id)
     return selected
 
 

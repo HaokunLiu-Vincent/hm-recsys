@@ -1,0 +1,21 @@
+# M4 union check of the six channels on D1-D4 (proposal §5.7).
+# Read by hmrec.config.load_union_check_config; used by scripts/m4_union_check.py.
+
+# G2 (proposal §0.1): macro union recall of the six channels.
+union_recall_target: 0.24
+
+# Pre-registered on 2026-11-16 (docs/decisions.md "R3 活跃池外候选"), before any D2-D4
+# or union result was seen. DO NOT CHANGE. If removing R3's candidates outside A(a)
+# lowers the 4-week pooled union recall by LESS than this (absolute; 0.001 = 0.1
+# percentage points), R3 is changed to output only articles in A(a); otherwise R3 stays.
+r3_active_pool_rule:
+  max_union_recall_drop: 0.001
+
+# Manual choices that replace the rule's D-phase selection. Each entry overrides keys
+# of the rule-selected config of that channel; the resulting trial must already be in
+# results/d_phase.csv. Every entry needs a docs/decisions.md record.
+manual_selection:
+  # 2026-11-17 "R6 训练链：采用 (E_update = 2, replay = 50%)": the rule selected
+  # (2, 0); (2, 50%) was chosen by hand after seeing the chain results.
+  r6_twotower:
+    replay: 0.5

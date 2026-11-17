@@ -17,6 +17,7 @@ from hmrec.config import (
     load_selection_rule,
     load_sibling_config,
     load_twotower_config,
+    load_union_check_config,
     load_wals_config,
     load_yaml,
     parse_base_config,
@@ -28,6 +29,7 @@ from hmrec.config import (
     parse_selection_rule,
     parse_sibling_config,
     parse_twotower_config,
+    parse_union_check_config,
     parse_wals_config,
     preprocess_config_hash,
 )
@@ -43,6 +45,7 @@ VALID_BASE: dict[str, Any] = {
         "query_chunk_size": 10,
         "item_chunk_size": 3,
         "dense_score_query_chunk_size": 4,
+        "twotower_score_query_chunk_size": 2,
         "pair_chunk_size": 5,
     },
 }
@@ -448,3 +451,24 @@ def test_repo_twotower_chain_defaults() -> None:
     # Default = frozen (no update); the chain step overrides e_update / replay (§6.4).
     assert (config.e_update, config.replay, config.chain_seed) == (0, 0.0, 42)
     assert (config.chain.week_days, config.chain.replay_window_days) == (7, 28)
+
+
+# ---------------------------------------------------------------- m4_union_check.yaml
+
+
+def test_repo_union_check_config() -> None:
+    config = load_union_check_config(REPO_CONFIGS / "m4_union_check.yaml")
+    assert config.union_recall_target == 0.24  # G2
+    # Pre-registered 2026-11-16: 0.1 percentage points, absolute. Must never change.
+    assert config.r3_max_union_recall_drop == 0.001
+    assert config.manual_selection == {"r6_twotower": {"replay": 0.5}}
+
+
+def test_union_check_config_errors() -> None:
+    valid = load_yaml(REPO_CONFIGS / "m4_union_check.yaml")
+    with pytest.raises(ValueError, match="must be in"):
+        parse_union_check_config({**valid, "union_recall_target": 24})
+    with pytest.raises(ValueError, match="non-empty mapping"):
+        parse_union_check_config({**valid, "manual_selection": {"r6_twotower": {}}})
+    with pytest.raises(ValueError, match="r3_active_pool_rule"):  # wrong key name
+        parse_union_check_config({**valid, "r3_active_pool_rule": {"max_drop": 0.001}})

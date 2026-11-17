@@ -98,6 +98,11 @@ class ProjectPaths:
         """configs/queries.yaml."""
         return self.configs_dir / "queries.yaml"
 
+    @property
+    def union_check_config_file(self) -> Path:
+        """configs/m4_union_check.yaml."""
+        return self.configs_dir / "m4_union_check.yaml"
+
     def recall_config_file(self, channel_file_stem: str) -> Path:
         """configs/recall/{channel_file_stem}.yaml, e.g. "r1_popularity"."""
         return self.configs_dir / "recall" / f"{channel_file_stem}.yaml"
@@ -270,6 +275,10 @@ class ProjectPaths:
         """artifacts/twotower/data/{window_name}/: Two-Tower training arrays, e.g. "base"."""
         return self.artifacts_root / "twotower" / "data" / window_name
 
+    def m4_candidates_file(self, fold: str, channel: str, trial_id: str) -> Path:
+        """artifacts/m4/candidates/{fold}/{channel}_{trial_id}.parquet (M4 union check)."""
+        return self.artifacts_root / "m4" / "candidates" / fold / f"{channel}_{trial_id}.parquet"
+
     def twotower_checkpoint_file(self, epoch: int) -> Path:
         """artifacts/models/twotower/base/epoch_{epoch}.pt: base model after `epoch` epochs."""
         return self.model_dir("twotower", "base") / f"epoch_{epoch}.pt"
@@ -306,6 +315,11 @@ class ProjectPaths:
     def union_precheck_results_file(self) -> Path:
         """results/d_phase_union_precheck.csv: union recall table of the R1-R5 pre-check."""
         return self.results_root / "d_phase_union_precheck.csv"
+
+    @property
+    def m4_union_check_results_file(self) -> Path:
+        """results/m4_union_check.csv: the six-channel union check (proposal §5.7)."""
+        return self.results_root / "m4_union_check.csv"
 
     def d_phase_seeds_file(self, channel: str) -> Path:
         """results/d_phase_steps/{channel}_seeds.csv: extra-seed runs (reported only)."""

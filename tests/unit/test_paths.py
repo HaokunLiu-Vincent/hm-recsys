@@ -15,7 +15,11 @@ def make_config(data_root: str, artifacts_root: str, results_root: str = "result
         num_threads=1,
         memory=MemoryConfig(limit_gb=1.0, sample_interval_seconds=0.1),
         chunking=ChunkingConfig(
-            query_chunk_size=1, item_chunk_size=1, dense_score_query_chunk_size=1, pair_chunk_size=1
+            query_chunk_size=1,
+            item_chunk_size=1,
+            dense_score_query_chunk_size=1,
+            twotower_score_query_chunk_size=1,
+            pair_chunk_size=1,
         ),
     )
 
@@ -65,6 +69,10 @@ def test_build_paths_derives_everything_from_roots(tmp_path: Path) -> None:
     assert paths.twotower_chain_checkpoint_file("abc", "D4") == Path(
         "/abs/artifacts/models/twotower/chain/abc/D4.pt"
     )
+    assert paths.m4_candidates_file("D3", "r6_twotower", "abc") == Path(
+        "/abs/artifacts/m4/candidates/D3/r6_twotower_abc.parquet"
+    )
+    assert paths.m4_union_check_results_file == tmp_path / "results" / "m4_union_check.csv"
     assert paths.d_phase_seeds_file("r6_twotower") == (
         tmp_path / "results" / "d_phase_steps" / "r6_twotower_seeds.csv"
     )
