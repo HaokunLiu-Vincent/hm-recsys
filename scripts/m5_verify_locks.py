@@ -5,6 +5,11 @@ Usage (one process per channel, so the process max RSS is each channel's true pe
     ... --channel r2_repurchase | r3_sibling | r4_itemcf | r5_wals | r6_twotower
 Put `/usr/bin/time -l` in front to cross-check the recorded process max RSS.
 
+To repeat the check later (e.g. as a regression check after a refactor), add
+`--run-name NAME`: the candidates then go to artifacts/m5/lock_check_NAME/D1/
+and the log to artifacts/runs/m5_verify_locks_{channel}_NAME/, so nothing of the
+first check is touched. Rows are appended to results/m5_lock_check.csv as usual.
+
 The channel is built ONLY from configs/locks/ (hmrec.recall.locked). Its D1
 candidates are generated again and written to artifacts/m5/lock_check/D1/, a
 folder no later step reads. Its selection metric must equal the D1 score of the
@@ -64,6 +69,11 @@ def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--channel", required=True, choices=ALL_CHANNELS)
     parser.add_argument("--run-id", default=None, help="log goes to artifacts/runs/{run_id}/")
+    parser.add_argument(
+        "--run-name",
+        default="",
+        help="name of a repeated check: output goes to artifacts/m5/lock_check_{run_name}/",
+    )
     return parser.parse_args()
 
 
@@ -72,7 +82,10 @@ def main() -> None:
     args = parse_args()
     channel = args.channel
     paths = get_paths()
-    run_id = args.run_id or f"m5_verify_locks_{channel}"
+    if args.run_name != "" and not args.run_name.replace("_", "").isalnum():
+        raise ValueError(f"--run-name may hold only letters, digits and _, got {args.run_name!r}")
+    suffix = "" if args.run_name == "" else f"_{args.run_name}"
+    run_id = args.run_id or f"m5_verify_locks_{channel}{suffix}"
     setup_logging(logging.INFO, log_file=paths.run_dir(run_id) / "run.log")
     base = load_base_config(paths.base_config_file)
     LOGGER.info("polars thread pool size = %d", check_polars_thread_pool(base.num_threads))
@@ -109,7 +122,7 @@ def main() -> None:
             locked_channel,
             context,
             record.summary.fold_scores[fold.name],
-            paths.lock_check_candidates_file(fold.name, channel),
+            paths.lock_check_candidates_file(fold.name, channel, args.run_name),
             base.memory,
         )
     # Last step of the run: the true peak of the whole process (it also covers what
