@@ -104,6 +104,11 @@ class ProjectPaths:
         return self.configs_dir / "m4_union_check.yaml"
 
     @property
+    def features_config_file(self) -> Path:
+        """configs/features.yaml: the 56 wide-table features and their dtypes (proposal §8)."""
+        return self.configs_dir / "features.yaml"
+
+    @property
     def m6_config_file(self) -> Path:
         """configs/m6_candidates.yaml: monitoring and stop settings of M6 candidate generation."""
         return self.configs_dir / "m6_candidates.yaml"
@@ -298,6 +303,19 @@ class ProjectPaths:
         """artifacts/features/{fold}/ (holds part-*.parquet)."""
         return self.artifacts_root / "features" / fold
 
+    def features_part_file(self, fold: str, part: int) -> Path:
+        """artifacts/features/{fold}/part-{part:05d}.parquet: the wide table of one query chunk."""
+        return self.features_dir(fold) / f"part-{part:05d}.parquet"
+
+    def features_metadata_file(self, fold: str) -> Path:
+        """artifacts/features/{fold}/features.json: written LAST; it marks a finished fold."""
+        return self.features_dir(fold) / "features.json"
+
+    @property
+    def category_codes_file(self) -> Path:
+        """artifacts/features/category_codes.json: the category code table shared by all folds."""
+        return self.artifacts_root / "features" / "category_codes.json"
+
     def lgb_dataset_dir(self, run_id: str) -> Path:
         """artifacts/lgb_datasets/{run_id}/."""
         return self.artifacts_root / "lgb_datasets" / run_id
@@ -396,6 +414,11 @@ class ProjectPaths:
     def m6_candidates_results_file(self) -> Path:
         """results/m6_candidates.csv: per fold, monitoring rows of each channel and of the union."""
         return self.results_root / "m6_candidates.csv"
+
+    @property
+    def m6_features_results_file(self) -> Path:
+        """results/m6_features.csv: per fold and feature, missing rate, min, max and mean."""
+        return self.results_root / "m6_features.csv"
 
     @property
     def m6_twotower_chain_results_file(self) -> Path:

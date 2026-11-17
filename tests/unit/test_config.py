@@ -6,10 +6,14 @@ from typing import Any
 import pytest
 
 from hmrec.config import (
+    N_PROPOSAL_FEATURES,
+    PROPOSAL_CATEGORICAL_FEATURES,
+    PROPOSAL_FEATURES,
     ActivePoolConfig,
     load_base_config,
     load_candidate_run_config,
     load_catalog_config,
+    load_features_config,
     load_itemcf_config,
     load_popularity_config,
     load_preprocess_config,
@@ -24,6 +28,7 @@ from hmrec.config import (
     parse_base_config,
     parse_candidate_run_config,
     parse_catalog_config,
+    parse_features_config,
     parse_itemcf_config,
     parse_popularity_config,
     parse_preprocess_config,
@@ -508,3 +513,46 @@ def test_candidate_run_config_errors() -> None:
             parse_candidate_run_config(bad)
     with pytest.raises(ValueError, match="must be > 0"):
         parse_candidate_run_config({**raw, "twotower_chain": {"max_fine_tune_loss": 0.0}})
+
+
+def test_repo_features_config_is_exactly_the_71_features_of_the_proposal() -> None:
+    config = load_features_config(REPO_CONFIGS / "features.yaml")
+    assert len(config.features) == 71 and len(set(config.names)) == 71
+    assert N_PROPOSAL_FEATURES == 71
+    assert [len(config.group_names(group)) for group in "ABCDE"] == [14, 7, 17, 12, 21]
+    assert {group: config.group_names(group) for group in "ABCDE"} == PROPOSAL_FEATURES
+    assert config.categorical_names == PROPOSAL_CATEGORICAL_FEATURES
+    assert len(config.categorical_names) == 8
+    assert (config.history_length, config.rrf_k, config.online_sales_channel_id) == (20, 60, 2)
+    # Fixed values, not hyperparameters: the decay tau of ui_decay_* and the 5 of tt_sim_top5_hist.
+    assert (config.decay_tau_days, config.history_similarity_top_k) == (30.0, 5)
+    assert (config.week_days, config.four_week_days, config.year_days) == (7, 28, 364)
+    for feature in config.features:
+        assert feature.dtype == ("int16" if feature.categorical else "float32")
+
+
+def test_features_config_refuses_any_change_of_the_feature_list() -> None:
+    raw = load_yaml(REPO_CONFIGS / "features.yaml")
+
+    def with_features(features: list) -> dict:
+        return {**raw, "features": features}
+
+    extra = {"name": "item_cnt_2w", "group": "C", "dtype": "float32", "categorical": False}
+    with pytest.raises(ValueError, match="exactly the 71 features"):
+        parse_features_config(with_features([*raw["features"], extra]))
+    with pytest.raises(ValueError, match="exactly the 71 features"):
+        parse_features_config(with_features(raw["features"][:-1]))
+    swapped = [raw["features"][1], raw["features"][0], *raw["features"][2:]]
+    with pytest.raises(ValueError, match="exactly the 71 features"):
+        parse_features_config(with_features(swapped))
+    as_number = [dict(item) for item in raw["features"]]
+    section = next(item for item in as_number if item["name"] == "section_no")
+    section.update(dtype="float32", categorical=False)
+    with pytest.raises(ValueError, match="categorical features must be"):
+        parse_features_config(with_features(as_number))
+    mismatch = [dict(item) for item in raw["features"]]
+    mismatch[0]["dtype"] = "int16"  # a numeric feature declared as a category code
+    with pytest.raises(ValueError, match="categorical features are int16 codes"):
+        parse_features_config(with_features(mismatch))
+    with pytest.raises(ValueError, match="must be > 0"):
+        parse_features_config({**raw, "rrf_k": 0})

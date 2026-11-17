@@ -77,6 +77,14 @@ def test_build_paths_derives_everything_from_roots(tmp_path: Path) -> None:
         tmp_path / "results" / "m4_union_check_r3_active_pool.csv"
     )
     assert paths.m4_trials_file == tmp_path / "results" / "m4_trials.csv"
+    # M6 features: one part file per query chunk, the fold marker, the shared code table.
+    assert paths.features_config_file == tmp_path / "configs" / "features.yaml"
+    assert paths.features_part_file("F1", 3) == Path(
+        "/abs/artifacts/features/F1/part-00003.parquet"
+    )
+    assert paths.features_metadata_file("F1") == Path("/abs/artifacts/features/F1/features.json")
+    assert paths.category_codes_file == Path("/abs/artifacts/features/category_codes.json")
+    assert paths.m6_features_results_file == tmp_path / "results" / "m6_features.csv"
     # M6: candidates, the files the features read, the locked chain models, results.
     assert paths.m6_config_file == tmp_path / "configs" / "m6_candidates.yaml"
     assert paths.r1_bucket_scores_file("F1") == Path(

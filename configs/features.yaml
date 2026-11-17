@@ -1,0 +1,129 @@
+# Ranker wide-table features, proposal §8. Read by hmrec.config.load_features_config.
+#
+# EXACTLY the 71 features of proposal §8.2-§8.6 (A 14, B 7, C 17, D 12, E 21), in the
+# column order of artifacts/features/{fold}/part-*.parquet (after query_id, article_idx).
+# 56 of them are the first version of the proposal; 15 were added on 2026-11-17, BEFORE
+# the features were locked and before any Ranker result existed (docs/decisions.md).
+# Do not add, remove or reorder features: the loader checks the names of every group
+# against the proposal's list, and V-phase tuning does not touch features (§8.7).
+#
+# dtype:        float32 = a number; missing is NaN (LightGBM handles it, §8.1).
+#               int16   = a category code: 0 = missing, 1..K = the distinct values of
+#                         the column in sorted order. One code table for ALL folds:
+#                         artifacts/features/category_codes.json (features/categories.py).
+# categorical:  true = pass to LightGBM as a categorical feature (§8.1).
+#
+# There is no label column: labels are joined only in ranker/sampling.py (M7).
+
+# The *_hist features (img_sim_hist, txt_sim_hist, tt_sim_max_hist, tt_sim_top5_hist,
+# ui_attr_match_cnt) use the user's last 20 purchases before the anchor: the same
+# history R6 uses (hmrec.data.histories). It must equal history_length of the locked
+# R6 config (checked when features are built).
+history_length: 20
+
+# tt_sim_top5_hist = mean of the 5 largest similarities between the candidate and the
+# history articles (all of them if the history has fewer than 5).
+history_similarity_top_k: 5
+
+# rrf_score = sum over the channels that returned the article of 1 / (rrf_k + rank), §8.2.
+rrf_k: 60
+
+# ui_decay_* = sum of exp(-age_days / decay_tau_days) over the user's purchase lines of
+# the candidate's category. FIXED at 30 days (the tau of R2 / R3 / R4's seed decay);
+# it is NOT a hyperparameter and is not tuned.
+decay_tau_days: 30.0
+
+# sales_channel_id of the online channel, for the *_online_share_* features (§8.4, §8.5).
+online_sales_channel_id: 2
+
+# Time windows in days; every window ends BEFORE the anchor a (§8.1):
+#   1w = [a - 7, a)    prev_1w = [a - 14, a - 7)    4w = [a - 28, a)    52w = [a - 364, a)
+# A feature without a window in its name uses all history t_dat < a.
+windows:
+  week_days: 7
+  four_week_days: 28
+  year_days: 364
+
+chunking:
+  # (customer, article) pairs per chunk for the 512-dim image / 384-dim text cosine:
+  # 100k pairs x 512 dims x 4 B x 2 sides = 0.4 GB. Queries per chunk of the wide table
+  # come from chunking.query_chunk_size in configs/base.yaml. Memory only, same results.
+  embedding_pair_chunk_size: 100000
+
+features:
+  # ---- A: recall source (14, §8.2). NaN = not returned by that channel.
+  - {name: pop_rank, group: A, dtype: float32, categorical: false}
+  - {name: rep_rank, group: A, dtype: float32, categorical: false}
+  - {name: sib_rank, group: A, dtype: float32, categorical: false}
+  - {name: icf_rank, group: A, dtype: float32, categorical: false}
+  - {name: wals_rank, group: A, dtype: float32, categorical: false}
+  - {name: tt_rank, group: A, dtype: float32, categorical: false}
+  - {name: pop_score, group: A, dtype: float32, categorical: false}
+  - {name: rep_score, group: A, dtype: float32, categorical: false}
+  - {name: sib_score, group: A, dtype: float32, categorical: false}
+  - {name: icf_score, group: A, dtype: float32, categorical: false}
+  - {name: pop_is_fallback, group: A, dtype: float32, categorical: false}
+  - {name: n_channels, group: A, dtype: float32, categorical: false}
+  - {name: best_rank, group: A, dtype: float32, categorical: false}
+  - {name: rrf_score, group: A, dtype: float32, categorical: false}
+  # ---- B: dense scores computed for EVERY candidate (7, §8.3)
+  - {name: tt_dot, group: B, dtype: float32, categorical: false}
+  - {name: wals_dot, group: B, dtype: float32, categorical: false}
+  - {name: pop_bucket_score, group: B, dtype: float32, categorical: false}
+  - {name: img_sim_hist, group: B, dtype: float32, categorical: false}
+  - {name: txt_sim_hist, group: B, dtype: float32, categorical: false}
+  - {name: tt_sim_max_hist, group: B, dtype: float32, categorical: false}
+  - {name: tt_sim_top5_hist, group: B, dtype: float32, categorical: false}
+  # ---- C: article features (17, §8.4)
+  - {name: item_cnt_1w, group: C, dtype: float32, categorical: false}
+  - {name: item_cnt_prev_1w, group: C, dtype: float32, categorical: false}
+  - {name: item_cnt_4w, group: C, dtype: float32, categorical: false}
+  - {name: item_uniq_buyers_4w, group: C, dtype: float32, categorical: false}
+  - {name: item_days_since_first_sale, group: C, dtype: float32, categorical: false}
+  - {name: item_days_since_last_sale, group: C, dtype: float32, categorical: false}
+  - {name: item_price_mean_4w, group: C, dtype: float32, categorical: false}
+  - {name: item_online_share_4w, group: C, dtype: float32, categorical: false}
+  - {name: item_buyer_age_mean_4w, group: C, dtype: float32, categorical: false}
+  - {name: item_repurchase_ratio_52w, group: C, dtype: float32, categorical: false}
+  - {name: item_discount_ratio, group: C, dtype: float32, categorical: false}
+  - {name: product_type_no, group: C, dtype: int16, categorical: true}
+  - {name: product_group_name, group: C, dtype: int16, categorical: true}
+  - {name: garment_group_no, group: C, dtype: int16, categorical: true}
+  - {name: index_group_no, group: C, dtype: int16, categorical: true}
+  - {name: section_no, group: C, dtype: int16, categorical: true}
+  - {name: colour_group_code, group: C, dtype: int16, categorical: true}
+  # ---- D: customer features (12, §8.5)
+  - {name: age, group: D, dtype: float32, categorical: false}
+  - {name: club_member_status, group: D, dtype: int16, categorical: true}
+  - {name: fashion_news_frequency, group: D, dtype: int16, categorical: true}
+  - {name: fn, group: D, dtype: float32, categorical: false}
+  - {name: active, group: D, dtype: float32, categorical: false}
+  - {name: user_cnt_4w, group: D, dtype: float32, categorical: false}
+  - {name: user_cnt_52w, group: D, dtype: float32, categorical: false}
+  - {name: user_days_since_last_purchase, group: D, dtype: float32, categorical: false}
+  - {name: user_price_mean_52w, group: D, dtype: float32, categorical: false}
+  - {name: user_online_share_52w, group: D, dtype: float32, categorical: false}
+  - {name: user_uniq_items_52w, group: D, dtype: float32, categorical: false}
+  - {name: user_purchase_days_52w, group: D, dtype: float32, categorical: false}
+  # ---- E: customer x article features (21, §8.6)
+  - {name: ui_cnt_item, group: E, dtype: float32, categorical: false}
+  - {name: ui_days_since_item, group: E, dtype: float32, categorical: false}
+  - {name: ui_cnt_pcode, group: E, dtype: float32, categorical: false}
+  - {name: ui_days_since_pcode, group: E, dtype: float32, categorical: false}
+  - {name: ui_share_ptype_52w, group: E, dtype: float32, categorical: false}
+  - {name: ui_share_garment_52w, group: E, dtype: float32, categorical: false}
+  - {name: ui_share_index_52w, group: E, dtype: float32, categorical: false}
+  - {name: ui_share_colour_52w, group: E, dtype: float32, categorical: false}
+  - {name: ui_price_ratio, group: E, dtype: float32, categorical: false}
+  - {name: ui_age_gap, group: E, dtype: float32, categorical: false}
+  - {name: ui_decay_ptype, group: E, dtype: float32, categorical: false}
+  - {name: ui_decay_garment, group: E, dtype: float32, categorical: false}
+  - {name: ui_decay_section, group: E, dtype: float32, categorical: false}
+  - {name: ui_decay_colour, group: E, dtype: float32, categorical: false}
+  - {name: ui_days_since_ptype, group: E, dtype: float32, categorical: false}
+  - {name: ui_days_since_section, group: E, dtype: float32, categorical: false}
+  - {name: ui_share_section_52w, group: E, dtype: float32, categorical: false}
+  - {name: ui_share_pgroup_52w, group: E, dtype: float32, categorical: false}
+  - {name: ui_lift_ptype_52w, group: E, dtype: float32, categorical: false}
+  - {name: ui_channel_gap, group: E, dtype: float32, categorical: false}
+  - {name: ui_attr_match_cnt, group: E, dtype: float32, categorical: false}

@@ -1489,3 +1489,270 @@ def parse_candidate_run_config(raw: Mapping[str, Any]) -> CandidateRunConfig:
 def load_candidate_run_config(path: Path) -> CandidateRunConfig:
     """Read and validate configs/m6_candidates.yaml."""
     return parse_candidate_run_config(load_yaml(path))
+
+
+# ---------------------------------------------------------------- features.yaml
+
+FEATURE_DTYPES = ("float32", "int16")
+# The 71 features of proposal §8.2-§8.6, by group and in the proposal's order
+# (A 14, B 7, C 17, D 12, E 21). configs/features.yaml must list exactly these
+# names in exactly this order.
+PROPOSAL_FEATURES: dict[str, tuple[str, ...]] = {
+    "A": (
+        "pop_rank",
+        "rep_rank",
+        "sib_rank",
+        "icf_rank",
+        "wals_rank",
+        "tt_rank",
+        "pop_score",
+        "rep_score",
+        "sib_score",
+        "icf_score",
+        "pop_is_fallback",
+        "n_channels",
+        "best_rank",
+        "rrf_score",
+    ),
+    "B": (
+        "tt_dot",
+        "wals_dot",
+        "pop_bucket_score",
+        "img_sim_hist",
+        "txt_sim_hist",
+        "tt_sim_max_hist",
+        "tt_sim_top5_hist",
+    ),
+    "C": (
+        "item_cnt_1w",
+        "item_cnt_prev_1w",
+        "item_cnt_4w",
+        "item_uniq_buyers_4w",
+        "item_days_since_first_sale",
+        "item_days_since_last_sale",
+        "item_price_mean_4w",
+        "item_online_share_4w",
+        "item_buyer_age_mean_4w",
+        "item_repurchase_ratio_52w",
+        "item_discount_ratio",
+        "product_type_no",
+        "product_group_name",
+        "garment_group_no",
+        "index_group_no",
+        "section_no",
+        "colour_group_code",
+    ),
+    "D": (
+        "age",
+        "club_member_status",
+        "fashion_news_frequency",
+        "fn",
+        "active",
+        "user_cnt_4w",
+        "user_cnt_52w",
+        "user_days_since_last_purchase",
+        "user_price_mean_52w",
+        "user_online_share_52w",
+        "user_uniq_items_52w",
+        "user_purchase_days_52w",
+    ),
+    "E": (
+        "ui_cnt_item",
+        "ui_days_since_item",
+        "ui_cnt_pcode",
+        "ui_days_since_pcode",
+        "ui_share_ptype_52w",
+        "ui_share_garment_52w",
+        "ui_share_index_52w",
+        "ui_share_colour_52w",
+        "ui_price_ratio",
+        "ui_age_gap",
+        "ui_decay_ptype",
+        "ui_decay_garment",
+        "ui_decay_section",
+        "ui_decay_colour",
+        "ui_days_since_ptype",
+        "ui_days_since_section",
+        "ui_share_section_52w",
+        "ui_share_pgroup_52w",
+        "ui_lift_ptype_52w",
+        "ui_channel_gap",
+        "ui_attr_match_cnt",
+    ),
+}
+N_PROPOSAL_FEATURES = sum(len(names) for names in PROPOSAL_FEATURES.values())
+# Category fields (LightGBM categorical features, §8.1): the six article fields of
+# §8.4 and the two customer fields of §8.5.
+PROPOSAL_CATEGORICAL_FEATURES = (
+    "product_type_no",
+    "product_group_name",
+    "garment_group_no",
+    "index_group_no",
+    "section_no",
+    "colour_group_code",
+    "club_member_status",
+    "fashion_news_frequency",
+)
+
+
+@dataclass(frozen=True)
+class FeatureSpec:
+    """One column of the wide table.
+
+    Attributes:
+        name: Feature name, as in proposal §8.
+        group: "A" ... "E" (proposal §8.2-§8.6).
+        dtype: "float32" (a number, missing = NaN) or "int16" (a category code,
+            0 = missing).
+        categorical: True if LightGBM treats it as a categorical feature.
+    """
+
+    name: str
+    group: str
+    dtype: str
+    categorical: bool
+
+
+@dataclass(frozen=True)
+class FeaturesConfig:
+    """Settings from configs/features.yaml (proposal §8).
+
+    Attributes:
+        history_length: Past purchases used by the *_hist features (20).
+        history_similarity_top_k: tt_sim_top5_hist averages this many of the
+            largest similarities (5).
+        rrf_k: The constant of rrf_score = sum of 1 / (rrf_k + rank) (60).
+        decay_tau_days: Time constant of the ui_decay_* features (30; fixed, not tuned).
+        online_sales_channel_id: sales_channel_id of the online channel (2).
+        week_days: Length of the 1w and prev_1w windows (7).
+        four_week_days: Length of the 4w window (28).
+        year_days: Length of the 52w window (364).
+        embedding_pair_chunk_size: Pairs per chunk for the image / text cosine.
+        features: The 71 features in wide-table column order.
+    """
+
+    history_length: int
+    history_similarity_top_k: int
+    rrf_k: int
+    decay_tau_days: float
+    online_sales_channel_id: int
+    week_days: int
+    four_week_days: int
+    year_days: int
+    embedding_pair_chunk_size: int
+    features: tuple[FeatureSpec, ...]
+
+    @property
+    def names(self) -> tuple[str, ...]:
+        """Feature names in wide-table column order."""
+        return tuple(feature.name for feature in self.features)
+
+    @property
+    def categorical_names(self) -> tuple[str, ...]:
+        """Names of the categorical features, in column order."""
+        return tuple(feature.name for feature in self.features if feature.categorical)
+
+    def group_names(self, group: str) -> tuple[str, ...]:
+        """Names of one group's features, in column order."""
+        return tuple(feature.name for feature in self.features if feature.group == group)
+
+
+def _parse_feature_spec(raw: Any, position: int) -> FeatureSpec:
+    """Parse one entry of `features`; a category code must be int16 and vice versa."""
+    where = f"features.features[{position}]"
+    if not isinstance(raw, Mapping):
+        raise ValueError(f"{where}: expected a mapping, got {raw!r}")
+    check_keys(raw, {"name", "group", "dtype", "categorical"}, where)
+    spec = FeatureSpec(
+        name=get_str(raw, "name", where),
+        group=get_str(raw, "group", where),
+        dtype=get_str(raw, "dtype", where),
+        categorical=get_bool(raw, "categorical", where),
+    )
+    if spec.dtype not in FEATURE_DTYPES:
+        raise ValueError(f"{where}.dtype must be one of {FEATURE_DTYPES}, got {spec.dtype!r}")
+    if spec.categorical != (spec.dtype == "int16"):
+        raise ValueError(
+            f"{where} ({spec.name}): categorical features are int16 codes and numeric "
+            f"features are float32; got dtype {spec.dtype}, categorical {spec.categorical}"
+        )
+    return spec
+
+
+def _check_features_match_proposal(features: tuple[FeatureSpec, ...]) -> None:
+    """The feature list must be exactly proposal §8: same names, groups, order, categories."""
+    listed = [(feature.group, feature.name) for feature in features]
+    expected = [(group, name) for group, names in PROPOSAL_FEATURES.items() for name in names]
+    if listed != expected:
+        missing = sorted(set(expected) - set(listed))
+        extra = sorted(set(listed) - set(expected))
+        raise ValueError(
+            f"configs/features.yaml must list exactly the {N_PROPOSAL_FEATURES} features of "
+            f"proposal §8 in the proposal's order; missing {missing}, not in the proposal {extra}"
+        )
+    categorical = tuple(feature.name for feature in features if feature.categorical)
+    if categorical != PROPOSAL_CATEGORICAL_FEATURES:
+        raise ValueError(
+            f"categorical features must be {PROPOSAL_CATEGORICAL_FEATURES}, got {categorical}"
+        )
+
+
+def parse_features_config(raw: Mapping[str, Any]) -> FeaturesConfig:
+    """Build a FeaturesConfig from the parsed content of configs/features.yaml.
+
+    Raises:
+        ValueError: If a key is missing or unknown, a number is not positive, or
+            the feature list differs from proposal §8 in any way.
+    """
+    where = "features"
+    expected = {
+        "history_length",
+        "history_similarity_top_k",
+        "rrf_k",
+        "decay_tau_days",
+        "online_sales_channel_id",
+        "windows",
+        "chunking",
+        "features",
+    }
+    check_keys(raw, expected, where)
+    windows = get_mapping(raw, "windows", where)
+    check_keys(windows, {"week_days", "four_week_days", "year_days"}, f"{where}.windows")
+    chunking = get_mapping(raw, "chunking", where)
+    check_keys(chunking, {"embedding_pair_chunk_size"}, f"{where}.chunking")
+    raw_features = raw["features"]
+    if not isinstance(raw_features, list):
+        raise ValueError(f"{where}.features: expected a list, got {type(raw_features).__name__}")
+    features = tuple(_parse_feature_spec(item, i) for i, item in enumerate(raw_features))
+    _check_features_match_proposal(features)
+    config = FeaturesConfig(
+        history_length=get_int(raw, "history_length", where),
+        history_similarity_top_k=get_int(raw, "history_similarity_top_k", where),
+        rrf_k=get_int(raw, "rrf_k", where),
+        decay_tau_days=get_float(raw, "decay_tau_days", where),
+        online_sales_channel_id=get_int(raw, "online_sales_channel_id", where),
+        week_days=get_int(windows, "week_days", f"{where}.windows"),
+        four_week_days=get_int(windows, "four_week_days", f"{where}.windows"),
+        year_days=get_int(windows, "year_days", f"{where}.windows"),
+        embedding_pair_chunk_size=get_int(
+            chunking, "embedding_pair_chunk_size", f"{where}.chunking"
+        ),
+        features=features,
+    )
+    for name in (
+        "history_length",
+        "history_similarity_top_k",
+        "rrf_k",
+        "decay_tau_days",
+        "week_days",
+        "four_week_days",
+        "year_days",
+        "embedding_pair_chunk_size",
+    ):
+        require_positive(getattr(config, name), f"{where}.{name}")
+    return config
+
+
+def load_features_config(path: Path) -> FeaturesConfig:
+    """Read and validate configs/features.yaml."""
+    return parse_features_config(load_yaml(path))
