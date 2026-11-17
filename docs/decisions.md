@@ -226,3 +226,18 @@
   1. **现在不修改 R1–R5 的任何配置**（包括名额）。等 R6 加入后，在 M4 按 proposal §5.7 用六路统一判断；如果六路 union recall 仍明显低于 24%，按 §5.7 先改 recall，再进入 F 阶段。
   2. **union 预检查的内存峰值 6.71 GB**，超过单任务约 6 GB 的目标，但在 8 GB 以内；本次不修复。候选生成本身的峰值为 3.5–4.6 GB，超出部分来自每周 6 次 union 去重（每周最多约 3,800 万行候选）。**M4 六路时候选更多，届时 union 计算必须改为**：先过滤出命中 label 的候选，再在这个小表上算 union recall 和 leave-one-out；每个 query 的候选数按 query 分块统计。
 - **原因**：D 阶段 R1–R5 到此结束。union recall 是系统层面的判断，R6 的贡献还不知道，现在改单路配置没有依据；内存问题只在 union 计算上，M4 必须重写这部分，届时一并处理。
+
+## 2026-11-17 Two-Tower 训练样本和用户历史的定义（M3 第 7 步）
+
+- **决定**：
+  1. **正样本**：每个 (customer_idx, 购买日, article_idx) 一条。同一用户同一天重复购买同一商品（多条相同的购买行）只算一条正样本。proposal §6.1 原文是"每一次购买对应一条正样本"，现改为按天去重。
+  2. **分组**：同一用户同一天的所有正样本共用一个 `group_id`（样本按 (t_dat_day, customer_idx, article_idx) 排序，同组的行连续），供 §5 R6 的 multi-positive loss 识别"互为正样本、不能当负样本"。
+  3. **用户历史**：购买日**之前**（`t_dat_day` < 购买日，不含当天）最近 20 件购买，不限时间窗口（最早到数据第一天）。历史中的购买与正样本**用同样的方式去重**（同一天同一商品只算一件）；不同天买同一商品算多件。顺序：从近到远；同一天的多件按 `article_idx` 升序，结果与文件行序无关。不足 20 件在末尾补 padding，`history_mask = False`。**padding 编号为 `n_articles`**（真实商品是 0..n_articles−1，所以 padding 不对应任何真实商品；以后某处漏用 mask，也不会把真实商品悄悄混进用户历史）。
+  4. **商品特征表末尾加一行 padding 专用行**（下标 `n_articles`）：图像、文本向量全 0，两个 mask 为 False，product_code 和类目编码全为 0。表的行数为 `n_articles + 1`。模型的商品 ID embedding 用 `padding_idx = n_articles`；类目 embedding 用 `padding_idx = 0`（商品表里只有 padding 行的编码是 0，真实商品的这些列没有空值）。
+  5. **Profile 和类目编码**：age_bucket、club_member_status、fashion_news_frequency，以及 product_code 和 §8.4 的 6 个类目列，都编码成整数：0 = 空值，1..K = 去重后排序的取值。
+  6. **存储**：样本数组（`customer_idx`、`t_dat_day`、`article_idx`、`group_id` [N]，`history` int32 [N, 20]，`history_mask` bool [N, 20]）存成 `.npy`，放在 `artifacts/twotower/data/{窗口名}/`，不覆盖已有目录。Base 窗口写在 `configs/twotower.yaml`：购买日 [2020-06-03 − 182 天, 2020-06-03)，即 2019-12-03 – 2020-06-02。
+- **原因**：
+  - 同一天的重复购买行通常是一次购买多件，对"下一件买什么"没有额外信息；按天去重后，正样本和历史使用同一种计数，避免同一商品在历史里占多个位置。
+  - 第 3 项"历史也按天去重"是 agent 在实现时提出的，用户在 commit 前确认。
+  - padding 最初用 `article_idx = 0`；0 是真实商品，漏用 mask 时会无声出错，所以在 commit 前按用户要求改为 `n_articles`，并给商品特征表加 padding 行。
+- **proposal §6.1 已同步。**

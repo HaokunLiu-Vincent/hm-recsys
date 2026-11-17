@@ -420,7 +420,7 @@ Recency-only 的分数 = `1 / age_days`，`age_days` 取用户最近一次购买
 
 ### 6.1 训练样本
 
-每一次购买对应一条正样本：`(用户在购买当天之前最近 20 件购买 + 用户 profile) → 买的商品`。用户历史预先算好，存成 int32 数组 `[N, 20]`。
+每个 (用户, 购买日, 商品) 对应一条正样本：`(用户在购买当天之前最近 20 件购买 + 用户 profile) → 买的商品`。同一用户同一天重复购买同一商品只算一条；同一用户同一天的多个正样本共用一个 group_id（multi-positive loss 用）。历史只取购买日**之前**（不含当天）的购买，按同样的 (用户, 日, 商品) 去重，从近到远排列，同一天按 `article_idx` 升序；不足 20 件在末尾补 padding 并带 mask；**padding 编号为 `n_articles`**（不对应任何真实商品）。商品特征表（图像、文本向量及 mask、product_code 和类目编码）末尾有一行 padding 专用行（向量全 0、mask 为 False、编码全 0），模型的 ID / 类目 embedding 用 `padding_idx` 指向它。用户历史预先算好，存成 int32 数组 `[N, 20]`（实现：`src/hmrec/recall/twotower/data.py`）。
 
 ### 6.2 第 0 步：Base model
 
