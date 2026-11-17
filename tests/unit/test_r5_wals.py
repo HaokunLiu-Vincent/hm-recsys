@@ -25,7 +25,8 @@ from conftest import make_queries, make_recall_inputs
 
 from hmrec.config import WalsConfig
 from hmrec.recall.base import RecallInputs, validate_candidates
-from hmrec.recall.r5_wals import WALS_SPEC, WalsChannel, build_als_model, select_top_items
+from hmrec.recall.r5_wals import WALS_SPEC, WalsChannel, build_als_model
+from hmrec.recall.vector_scoring import select_top_items
 from hmrec.vectors import dot_pairs
 
 ANCHOR_DAY = 200
