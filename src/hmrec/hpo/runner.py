@@ -62,7 +62,11 @@ from hmrec.recall.r4_itemcf import ItemCFChannel
 from hmrec.recall.r5_wals import WalsChannel
 from hmrec.recall.twotower.chain import TwoTowerChainChannel
 from hmrec.recall.twotower.data import read_training_array
-from hmrec.recall.twotower.infer import TwoTowerChannel, load_twotower_resources
+from hmrec.recall.twotower.infer import (
+    TwoTowerChannel,
+    TwoTowerChunks,
+    load_twotower_resources,
+)
 from hmrec.recall.twotower.train import choose_alarm_users
 
 ALLOWED_PHASES = ("D", "V")
@@ -102,6 +106,15 @@ def build_channel(channel: str, raw_config: Mapping[str, Any], base: BaseConfig)
     raise ValueError(f"unknown channel {channel!r}")
 
 
+def twotower_chunks(base: BaseConfig) -> TwoTowerChunks:
+    """R6 prediction chunk sizes from configs/base.yaml."""
+    return TwoTowerChunks(
+        encode_queries=base.chunking.dense_score_query_chunk_size,
+        score_queries=base.chunking.twotower_score_query_chunk_size,
+        pairs=base.chunking.pair_chunk_size,
+    )
+
+
 def _build_twotower_channel(
     raw_config: Mapping[str, Any], base: BaseConfig
 ) -> TwoTowerChannel | TwoTowerChainChannel:
@@ -115,9 +128,9 @@ def _build_twotower_channel(
     paths = get_paths()
     preprocess = load_preprocess_config(paths.preprocess_config_file)
     resources = load_twotower_resources(paths, preprocess, config)
-    chunk_sizes = (base.chunking.dense_score_query_chunk_size, base.chunking.pair_chunk_size)
+    chunks = twotower_chunks(base)
     if config.e_update == 0:
-        return TwoTowerChannel(config, resources, *chunk_sizes)
+        return TwoTowerChannel(config, resources, chunks)
     trial_id = make_trial_id("r6_twotower", raw_config)
     base_customers = read_training_array(paths.twotower_data_dir("base"), "customer_idx")
     alarm_customers = choose_alarm_users(
@@ -132,7 +145,7 @@ def _build_twotower_channel(
     return TwoTowerChainChannel(
         config,
         resources,
-        chunk_sizes,
+        chunks,
         partial(paths.twotower_chain_checkpoint_file, trial_id),
         alarm_customers,
         base.memory,
@@ -342,8 +355,10 @@ def _score_folds(
     diagnostics: dict[str, Any] = {}
     for context in contexts:
         candidates = recall_channel.generate(context.queries, context.inputs)
+        # One check and one join with the labels for all metrics (not one per metric).
+        fold_values = context.evaluator.per_query_many(candidates, metrics)
         for metric in metrics:
-            per_query[metric].append(context.evaluator.per_query(candidates, metric))
+            per_query[metric].append(fold_values[metric])
         numbers, flags = fold_diagnostics(channel, candidates, context)
         if isinstance(recall_channel, TwoTowerChainChannel):
             # The chain fine-tunes inside generate(); keep its time / memory per fold.

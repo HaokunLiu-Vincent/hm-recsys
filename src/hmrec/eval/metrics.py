@@ -171,7 +171,11 @@ def recall_at_k(predictions: pl.DataFrame, labels: pl.DataFrame, k: int) -> pl.D
     _check_k(k)
     check_labels(labels)
     check_predictions(predictions, labels)
-    hits = _hits_in_top_k(predictions, labels, k)
+    return _recall_from_top_k_hits(_hits_in_top_k(predictions, labels, k), labels)
+
+
+def _recall_from_top_k_hits(hits: pl.DataFrame, labels: pl.DataFrame) -> pl.DataFrame:
+    """Recall@K from the hits with rank <= K (columns query_id, rank)."""
     hit_counts = hits.group_by(QUERY_ID).agg(pl.len().alias("n_hits"))
     per_query = _attach_to_all_queries(hit_counts, labels)
     return _finish(per_query, pl.col("n_hits") / pl.col(_N_LABELS))
@@ -195,7 +199,13 @@ def average_precision_at_k(predictions: pl.DataFrame, labels: pl.DataFrame, k: i
     _check_k(k)
     check_labels(labels)
     check_predictions(predictions, labels)
-    hits = _hits_in_top_k(predictions, labels, k)
+    return _average_precision_from_top_k_hits(_hits_in_top_k(predictions, labels, k), labels, k)
+
+
+def _average_precision_from_top_k_hits(
+    hits: pl.DataFrame, labels: pl.DataFrame, k: int
+) -> pl.DataFrame:
+    """AP@K from the hits with rank <= K (columns query_id, rank)."""
     sorted_ranks = pl.col(RANK).sort()
     hit_number = pl.int_range(1, pl.len() + 1)
     # Sum the precisions in rank order (cum_sum().last()), so the result does
@@ -254,8 +264,13 @@ def ndcg_at_k(predictions: pl.DataFrame, labels: pl.DataFrame, k: int) -> pl.Dat
     _check_k(k)
     check_labels(labels)
     check_predictions(predictions, labels)
+    return _ndcg_from_top_k_hits(_hits_in_top_k(predictions, labels, k), labels, k)
+
+
+def _ndcg_from_top_k_hits(hits: pl.DataFrame, labels: pl.DataFrame, k: int) -> pl.DataFrame:
+    """NDCG@K from the hits with rank <= K (columns query_id, rank)."""
     discounts = _discount_table(k)
-    hits = _hits_in_top_k(predictions, labels, k).with_columns(pl.col(RANK).cast(pl.Int64))
+    hits = hits.with_columns(pl.col(RANK).cast(pl.Int64))
     hits = hits.join(discounts, on=RANK)
     dcg = hits.group_by(QUERY_ID).agg(pl.col(_DISCOUNT).sort_by(RANK).cum_sum().last().alias("dcg"))
     per_query = _attach_to_all_queries(dcg, labels)
@@ -263,6 +278,98 @@ def ndcg_at_k(predictions: pl.DataFrame, labels: pl.DataFrame, k: int) -> pl.Dat
         pl.min_horizontal(pl.col(_N_LABELS), pl.lit(k)).cast(pl.Int64).alias("n_ideal")
     ).join(_ideal_dcg_table(discounts), on="n_ideal")
     return _finish(per_query, pl.col("dcg") / pl.col("ideal_dcg"))
+
+
+# ---------------------------------------------------------------- several metrics, one join
+
+METRIC_KINDS = ("recall", "ndcg", "map")
+
+
+def ranked_hits(predictions: pl.DataFrame, labels: pl.DataFrame) -> pl.DataFrame:
+    """Check both tables ONCE and return every prediction that is in G_q.
+
+    Evaluating several metrics on the same predictions needs the input checks
+    and the join with the labels only once: every metric here is a function of
+    the hits' ranks. On 8-12 million candidate rows this avoids repeating the
+    checks and the join for each metric.
+
+    Args:
+        predictions: See recall_at_k.
+        labels: See recall_at_k.
+
+    Returns:
+        One row per hit (any rank). Columns: query_id, rank.
+    """
+    check_labels(labels)
+    check_predictions(predictions, labels)
+    hits = predictions.select(QUERY_ID, ARTICLE_IDX, RANK).join(
+        labels.select(QUERY_ID, ARTICLE_IDX), on=[QUERY_ID, ARTICLE_IDX], how="semi"
+    )
+    return hits.select(QUERY_ID, RANK)
+
+
+def metric_from_hits(kind: str, hits: pl.DataFrame, labels: pl.DataFrame, k: int) -> pl.DataFrame:
+    """One metric per query from the hits of ranked_hits.
+
+    Gives exactly the same values as recall_at_k / ndcg_at_k /
+    average_precision_at_k on the full predictions: the hits with rank <= k are
+    the same rows, and the same code turns them into the metric.
+
+    Args:
+        kind: "recall", "ndcg" or "map" (map = AP@K per query).
+        hits: Output of ranked_hits for these labels.
+        labels: See recall_at_k (already checked by ranked_hits).
+        k: Cut-off, > 0.
+
+    Returns:
+        One row per query in `labels`: query_id, fold, value (float64), sorted by query_id.
+    """
+    _check_k(k)
+    top_k_hits = hits.filter(pl.col(RANK) <= k)
+    if kind == "recall":
+        return _recall_from_top_k_hits(top_k_hits, labels)
+    if kind == "ndcg":
+        return _ndcg_from_top_k_hits(top_k_hits, labels, k)
+    if kind == "map":
+        return _average_precision_from_top_k_hits(top_k_hits, labels, k)
+    raise ValueError(f"metric kind must be one of {METRIC_KINDS}, got {kind!r}")
+
+
+def label_hits(candidates: pl.DataFrame, labels: pl.DataFrame) -> pl.DataFrame:
+    """The candidate rows whose (query_id, article_idx) is in G_q (for union recall, §5.7).
+
+    Only these rows matter for union recall, and they are few (about 1 in 400
+    candidates), so unions and leave-one-out unions can be built from them
+    instead of from tens of millions of candidate rows.
+
+    Args:
+        candidates: Rows with query_id, article_idx (other columns are kept).
+        labels: See recall_at_k.
+
+    Returns:
+        The rows of `candidates` that hit a label, all columns kept.
+    """
+    _require_columns(candidates, (QUERY_ID, ARTICLE_IDX), "candidates")
+    _check_query_ids_known(candidates, labels, "candidates")
+    return candidates.join(
+        labels.select(QUERY_ID, ARTICLE_IDX), on=[QUERY_ID, ARTICLE_IDX], how="semi"
+    )
+
+
+def union_recall_from_hits(hits: pl.DataFrame, labels: pl.DataFrame) -> pl.DataFrame:
+    """Union recall per query from rows that are already known to hit a label (label_hits).
+
+    The same pair may appear several times (several channels); it counts once.
+    Gives exactly the values of union_recall on the full candidate rows.
+
+    Returns:
+        One row per query in `labels`: query_id, fold, value (float64), sorted by query_id.
+    """
+    _require_columns(hits, (QUERY_ID, ARTICLE_IDX), "hits")
+    pairs = hits.select(QUERY_ID, ARTICLE_IDX).unique()
+    hit_counts = pairs.group_by(QUERY_ID).agg(pl.len().alias("n_hits"))
+    per_query = _attach_to_all_queries(hit_counts, labels)
+    return _finish(per_query, pl.col("n_hits") / pl.col(_N_LABELS))
 
 
 def union_recall(candidates: pl.DataFrame, labels: pl.DataFrame) -> pl.DataFrame:

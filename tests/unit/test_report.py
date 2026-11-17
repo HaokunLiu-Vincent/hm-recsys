@@ -75,3 +75,21 @@ def test_fold_evaluator_union_recall_counts_duplicates_once() -> None:
     per_query = FoldEvaluator("D1", LABELS).union_recall(candidates)
     assert per_query["query_id"].to_list() == [1, 2]
     assert per_query["value"].to_list() == [0.5, 1.0]
+
+
+def test_per_query_many_equals_one_metric_at_a_time() -> None:
+    evaluator = FoldEvaluator("D1", LABELS)
+    metrics = ["recall@2", "recall@1", "ndcg@2", "map@2"]
+    together = evaluator.per_query_many(CANDIDATES, metrics)
+    assert list(together) == metrics
+    for metric in metrics:
+        assert together[metric].equals(evaluator.per_query(CANDIDATES, metric))
+
+
+def test_hits_keep_only_label_rows_and_their_columns() -> None:
+    evaluator = FoldEvaluator("D1", LABELS)
+    hits = evaluator.hits(CANDIDATES)
+    # (1, 10) is a label of q1; (1, 20) is not.
+    assert hits.select("query_id", "article_idx").rows() == [(1, 10)]
+    assert hits.columns == CANDIDATES.columns
+    assert evaluator.union_recall_of_hits(hits).equals(evaluator.union_recall(CANDIDATES))

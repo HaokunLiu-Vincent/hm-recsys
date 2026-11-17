@@ -67,7 +67,10 @@ class ChunkingConfig:
         query_chunk_size: Number of queries per chunk (fusion, features, ranker scoring).
         item_chunk_size: Number of seed items per chunk (R4 ItemCF co-occurrence).
         dense_score_query_chunk_size: Number of queries per chunk when every active
-            article is scored with a matrix product (R5 WALS; later R6).
+            article is scored with a matrix product (R5 WALS), and per model
+            forward pass when R6 encodes users / articles.
+        twotower_score_query_chunk_size: R6 only: queries per chunk of the
+            user x active-article score matrix (memory only, same results).
         pair_chunk_size: Number of (customer, article) pairs per chunk when
             computing vector dot products (hmrec.vectors.dot_pairs).
     """
@@ -75,6 +78,7 @@ class ChunkingConfig:
     query_chunk_size: int
     item_chunk_size: int
     dense_score_query_chunk_size: int
+    twotower_score_query_chunk_size: int
     pair_chunk_size: int
 
 
@@ -276,7 +280,13 @@ def parse_base_config(raw: Mapping[str, Any]) -> BaseConfig:
     raw_chunking = get_mapping(raw, "chunking", "base")
     check_keys(
         raw_chunking,
-        {"query_chunk_size", "item_chunk_size", "dense_score_query_chunk_size", "pair_chunk_size"},
+        {
+            "query_chunk_size",
+            "item_chunk_size",
+            "dense_score_query_chunk_size",
+            "twotower_score_query_chunk_size",
+            "pair_chunk_size",
+        },
         "base.chunking",
     )
     chunking = ChunkingConfig(
@@ -284,6 +294,9 @@ def parse_base_config(raw: Mapping[str, Any]) -> BaseConfig:
         item_chunk_size=get_int(raw_chunking, "item_chunk_size", "base.chunking"),
         dense_score_query_chunk_size=get_int(
             raw_chunking, "dense_score_query_chunk_size", "base.chunking"
+        ),
+        twotower_score_query_chunk_size=get_int(
+            raw_chunking, "twotower_score_query_chunk_size", "base.chunking"
         ),
         pair_chunk_size=get_int(raw_chunking, "pair_chunk_size", "base.chunking"),
     )
@@ -310,6 +323,10 @@ def _validate_base_config(config: BaseConfig) -> None:
     require_positive(config.chunking.item_chunk_size, "base.chunking.item_chunk_size")
     require_positive(
         config.chunking.dense_score_query_chunk_size, "base.chunking.dense_score_query_chunk_size"
+    )
+    require_positive(
+        config.chunking.twotower_score_query_chunk_size,
+        "base.chunking.twotower_score_query_chunk_size",
     )
     require_positive(config.chunking.pair_chunk_size, "base.chunking.pair_chunk_size")
 
@@ -1329,3 +1346,58 @@ def parse_twotower_config(raw: Mapping[str, Any]) -> TwoTowerConfig:
 def load_twotower_config(path: Path) -> TwoTowerConfig:
     """Read and validate configs/recall/r6_twotower.yaml."""
     return parse_twotower_config(load_yaml(path))
+
+
+# ---------------------------------------------------------------- m4_union_check.yaml
+
+
+@dataclass(frozen=True)
+class UnionCheckConfig:
+    """Settings from configs/m4_union_check.yaml (proposal §5.7).
+
+    Attributes:
+        union_recall_target: G2, the target union recall of the six channels (0.24).
+        r3_max_union_recall_drop: Pre-registered R3 rule: if removing R3's
+            candidates outside A(a) lowers the pooled union recall by less than
+            this (absolute), R3 becomes "A(a) only".
+        manual_selection: Channel -> config keys that replace the rule's
+            D-phase selection (each has a docs/decisions.md record).
+    """
+
+    union_recall_target: float
+    r3_max_union_recall_drop: float
+    manual_selection: dict[str, dict[str, Any]]
+
+
+def parse_union_check_config(raw: Mapping[str, Any]) -> UnionCheckConfig:
+    """Build a UnionCheckConfig from the parsed content of configs/m4_union_check.yaml.
+
+    Raises:
+        ValueError: If a key is missing or unknown, a number is out of (0, 1),
+            or a manual_selection entry is not a non-empty mapping.
+    """
+    where = "m4_union_check"
+    check_keys(raw, {"union_recall_target", "r3_active_pool_rule", "manual_selection"}, where)
+    raw_rule = get_mapping(raw, "r3_active_pool_rule", where)
+    check_keys(raw_rule, {"max_union_recall_drop"}, f"{where}.r3_active_pool_rule")
+    manual: dict[str, dict[str, Any]] = {}
+    for channel, overrides in get_mapping(raw, "manual_selection", where).items():
+        if not isinstance(overrides, Mapping) or not overrides:
+            raise ValueError(f"{where}.manual_selection.{channel} must be a non-empty mapping")
+        manual[str(channel)] = dict(overrides)
+    config = UnionCheckConfig(
+        union_recall_target=get_float(raw, "union_recall_target", where),
+        r3_max_union_recall_drop=get_float(
+            raw_rule, "max_union_recall_drop", f"{where}.r3_active_pool_rule"
+        ),
+        manual_selection=manual,
+    )
+    for name in ("union_recall_target", "r3_max_union_recall_drop"):
+        if not 0 < getattr(config, name) < 1:
+            raise ValueError(f"{where}: {name} must be in (0, 1), got {getattr(config, name)}")
+    return config
+
+
+def load_union_check_config(path: Path) -> UnionCheckConfig:
+    """Read and validate configs/m4_union_check.yaml."""
+    return parse_union_check_config(load_yaml(path))

@@ -50,7 +50,12 @@ from hmrec.recall.twotower.data import (
     load_customer_lines_before,
     load_window_lines,
 )
-from hmrec.recall.twotower.infer import TWOTOWER_SPEC, TwoTowerResources, twotower_candidates
+from hmrec.recall.twotower.infer import (
+    TWOTOWER_SPEC,
+    TwoTowerChunks,
+    TwoTowerResources,
+    twotower_candidates,
+)
 from hmrec.recall.twotower.train import (
     DeviceTables,
     FineTuneArrays,
@@ -175,7 +180,7 @@ class TwoTowerChainChannel:
         self,
         config: TwoTowerConfig,
         resources: TwoTowerResources,
-        chunk_sizes: tuple[int, int],
+        chunks: TwoTowerChunks,
         checkpoint_file: Callable[[str], Path],
         alarm_customers: np.ndarray,
         memory: MemoryConfig,
@@ -186,7 +191,7 @@ class TwoTowerChainChannel:
         Args:
             config: R6 settings with e_update > 0.
             resources: Model (changed in place week by week) and tables.
-            chunk_sizes: (query chunk size, pair chunk size) for prediction.
+            chunks: Chunk sizes of prediction.
             checkpoint_file: fold name -> path of the model after that fold's fine-tune.
             alarm_customers: Users kept out of every fine-tune.
             memory: Memory limit and sampling interval.
@@ -196,7 +201,7 @@ class TwoTowerChainChannel:
             raise ValueError("the chain channel needs e_update > 0; use TwoTowerChannel")
         self.config = config
         self.resources = resources
-        self.chunk_sizes = chunk_sizes
+        self.chunks = chunks
         self.checkpoint_file = checkpoint_file
         self.alarm_customers = alarm_customers
         self.memory = memory
@@ -224,9 +229,7 @@ class TwoTowerChainChannel:
             raise ValueError(f"queries must belong to one fold, got {folds}")
         self._check_order(inputs)
         # Predict FIRST: the model has not seen any purchase on or after inputs.anchor.
-        candidates = twotower_candidates(
-            self.config, self.resources, queries, inputs, self.chunk_sizes
-        )
+        candidates = twotower_candidates(self.config, self.resources, queries, inputs, self.chunks)
         self.fine_tune_on_week(str(folds[0]), inputs)
         return candidates
 

@@ -23,12 +23,16 @@ import pytest
 from hmrec.eval.metrics import (
     average_precision_at_k,
     equal_fold_mean,
+    label_hits,
     macro_mean,
+    metric_from_hits,
     ndcg_at_k,
     per_fold_means,
     query_weighted_mean,
+    ranked_hits,
     recall_at_k,
     union_recall,
+    union_recall_from_hits,
 )
 
 REL = 1e-12  # tolerance for comparing with a fraction written in a different order
@@ -229,6 +233,37 @@ def test_metrics_are_identical_after_shuffling_rows() -> None:
         # Exact equality on purpose, not approx: results must be bit-identical.
         assert macro_mean(original) == macro_mean(shuffled)
         assert equal_fold_mean(original) == equal_fold_mean(shuffled.sample(fraction=1.0, seed=3))
+
+
+# ---------------------------------------------------------------- several metrics, one join
+
+
+@pytest.mark.parametrize("seed", [1, 7, 23])
+def test_metrics_from_one_join_are_bit_identical(seed: int) -> None:
+    # ranked_hits joins once; every metric from it must equal the stand-alone function
+    # exactly (the D-phase records and the "strictly better" rule depend on exact values).
+    predictions, labels = _random_example(seed)
+    hits = ranked_hits(predictions.sample(fraction=1.0, shuffle=True, seed=seed), labels)
+    stand_alone = {"recall": recall_at_k, "ndcg": ndcg_at_k, "map": average_precision_at_k}
+    for kind, function in stand_alone.items():
+        for k in (1, 3, 12, 20, 100):
+            assert metric_from_hits(kind, hits, labels, k).equals(function(predictions, labels, k))
+
+
+def test_metric_from_hits_rejects_unknown_kind() -> None:
+    hits = ranked_hits(PREDICTIONS, LABELS)
+    with pytest.raises(ValueError, match="metric kind must be one of"):
+        metric_from_hits("precision", hits, LABELS, 3)
+
+
+@pytest.mark.parametrize("seed", [1, 7])
+def test_union_recall_from_hits_equals_union_recall(seed: int) -> None:
+    predictions, labels = _random_example(seed)
+    # Two "channels": the same candidates twice, so every pair is a duplicate.
+    doubled = pl.concat([predictions, predictions])
+    hits = label_hits(doubled, labels)
+    assert hits.height < doubled.height  # only the label pairs are kept
+    assert union_recall_from_hits(hits, labels).equals(union_recall(doubled, labels))
 
 
 # ---------------------------------------------------------------- invalid input

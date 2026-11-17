@@ -10,7 +10,7 @@ For a fold with anchor a:
   3. Item vectors for the active pool A(a) only (outputs are limited to A(a), §2.4).
   4. Top-quota per query with hmrec.recall.vector_scoring (shared with R5):
      selection by a float32 matrix product per chunk of
-     dense_score_query_chunk_size queries, stored score from vectors.dot_pairs
+     twotower_score_query_chunk_size queries, stored score from vectors.dot_pairs
      (so it equals the tt_dot feature exactly), order score DESC, article_idx ASC.
 
 The model is a fixed checkpoint (config.base_epoch); nothing is trained here.
@@ -168,6 +168,23 @@ def encode_articles(
     return np.concatenate(parts).astype(np.float32, copy=False)
 
 
+@dataclass(frozen=True)
+class TwoTowerChunks:
+    """Chunk sizes of R6 prediction (configs/base.yaml, chunking). They change memory, not results.
+
+    Attributes:
+        encode_queries: Customers (or articles) per model forward pass
+            (chunking.dense_score_query_chunk_size).
+        score_queries: Queries per chunk of the user x active-article score
+            matrix (chunking.twotower_score_query_chunk_size).
+        pairs: (customer, article) pairs per dot_pairs chunk (chunking.pair_chunk_size).
+    """
+
+    encode_queries: int
+    score_queries: int
+    pairs: int
+
+
 def query_vectors(
     config: TwoTowerConfig,
     resources: TwoTowerResources,
@@ -193,7 +210,7 @@ def twotower_candidates(
     resources: TwoTowerResources,
     queries: pl.DataFrame,
     inputs: RecallInputs,
-    chunk_sizes: tuple[int, int],
+    chunks: TwoTowerChunks,
 ) -> pl.DataFrame:
     """Top-quota of A(a) per query with the CURRENT model (no training here).
 
@@ -202,19 +219,18 @@ def twotower_candidates(
         resources: Model and tables.
         queries: One row per query; columns query_id, customer_idx.
         inputs: The fold.
-        chunk_sizes: (query chunk size, pair chunk size) from configs/base.yaml.
+        chunks: Chunk sizes from configs/base.yaml.
     """
     if queries.height == 0 or inputs.active_pool.height == 0:
         return TWOTOWER_SPEC.schema.to_frame()
-    query_chunk_size, pair_chunk_size = chunk_sizes
-    vectors = query_vectors(config, resources, queries, inputs, query_chunk_size)
+    vectors = query_vectors(config, resources, queries, inputs, chunks.encode_queries)
     candidates = candidates_from_vectors(
         queries,
         vectors,
         inputs.active_pool,
         config.quota,
-        query_chunk_size,
-        pair_chunk_size,
+        chunks.score_queries,
+        chunks.pairs,
         TWOTOWER_SPEC,
     )
     log_memory(LOGGER, f"{inputs.anchor}: {candidates.height} candidates")
@@ -228,13 +244,12 @@ class TwoTowerChannel:
         self,
         config: TwoTowerConfig,
         resources: TwoTowerResources,
-        query_chunk_size: int,
-        pair_chunk_size: int,
+        chunks: TwoTowerChunks,
     ) -> None:
         """Store the config, the loaded model and the chunk sizes (configs/base.yaml)."""
         self.config = config
         self.resources = resources
-        self.chunk_sizes = (query_chunk_size, pair_chunk_size)
+        self.chunks = chunks
 
     @property
     def output_spec(self) -> OutputSpec:
@@ -243,8 +258,10 @@ class TwoTowerChannel:
 
     def vectors(self, queries: pl.DataFrame, inputs: RecallInputs) -> UserItemVectors:
         """User vectors of the query customers and item vectors of A(a)."""
-        return query_vectors(self.config, self.resources, queries, inputs, self.chunk_sizes[0])
+        return query_vectors(
+            self.config, self.resources, queries, inputs, self.chunks.encode_queries
+        )
 
     def generate(self, queries: pl.DataFrame, inputs: RecallInputs) -> pl.DataFrame:
         """R6 candidates for `queries` (Top-quota of A(a) per query)."""
-        return twotower_candidates(self.config, self.resources, queries, inputs, self.chunk_sizes)
+        return twotower_candidates(self.config, self.resources, queries, inputs, self.chunks)

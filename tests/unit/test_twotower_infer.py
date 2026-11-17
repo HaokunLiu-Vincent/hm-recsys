@@ -13,6 +13,7 @@ from pathlib import Path
 
 import numpy as np
 import polars as pl
+import pytest
 import torch
 from conftest import (
     TINY_N_ARTICLES,
@@ -35,6 +36,7 @@ from hmrec.recall.twotower.data import (
 from hmrec.recall.twotower.infer import (
     TWOTOWER_SPEC,
     TwoTowerChannel,
+    TwoTowerChunks,
     TwoTowerResources,
     query_histories,
 )
@@ -47,6 +49,7 @@ PAD = TINY_N_ARTICLES
 LINES = [(0, 1, 3), (0, 2, 8), (0, 2, 8), (1, 4, 9)]
 POISON = [(0, 5, 10), (1, 3, 12), (2, 0, 10)]
 ACTIVE = [0, 1, 3, 4]
+CHUNKS = TwoTowerChunks(encode_queries=2, score_queries=2, pairs=3)
 QUERIES = make_queries([(11, 0), (12, 1), (13, 2)])
 CONFIG = dataclasses.replace(
     load_twotower_config(REPO / "configs" / "recall" / "r6_twotower.yaml"),
@@ -73,7 +76,7 @@ def _resources() -> TwoTowerResources:
 
 
 def _channel() -> TwoTowerChannel:
-    return TwoTowerChannel(CONFIG, _resources(), query_chunk_size=2, pair_chunk_size=3)
+    return TwoTowerChannel(CONFIG, _resources(), CHUNKS)
 
 
 def test_histories_as_of_the_anchor() -> None:
@@ -123,7 +126,7 @@ def test_tie_break_by_article_idx() -> None:
         text=same.text[0].expand_as(same.text).clone(),
         codes=same.codes[0].expand_as(same.codes).clone(),
     )
-    channel = TwoTowerChannel(CONFIG, dataclasses.replace(resources, features=identical), 2, 3)
+    channel = TwoTowerChannel(CONFIG, dataclasses.replace(resources, features=identical), CHUNKS)
     candidates = channel.generate(QUERIES, make_recall_inputs(LINES, 10, active_pool=ACTIVE))
     for query in candidates.partition_by("query_id"):
         assert query.sort("rank")["article_idx"].to_list() == [0, 1]
@@ -134,3 +137,12 @@ def test_no_queries_gives_an_empty_valid_table() -> None:
     result = _channel().generate(empty, make_recall_inputs(LINES, 10, active_pool=ACTIVE))
     assert result.height == 0
     assert result.schema == TWOTOWER_SPEC.schema
+
+
+@pytest.mark.parametrize("score_queries", [1, 2, 3, 100])
+def test_score_chunk_size_does_not_change_the_candidates(score_queries: int) -> None:
+    # The score chunk only bounds memory: any size gives the same table as one big chunk.
+    inputs = make_recall_inputs(LINES, 10, active_pool=ACTIVE)
+    reference = _channel().generate(QUERIES, inputs)
+    chunks = TwoTowerChunks(encode_queries=2, score_queries=score_queries, pairs=3)
+    assert TwoTowerChannel(CONFIG, _resources(), chunks).generate(QUERIES, inputs).equals(reference)

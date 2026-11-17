@@ -17,20 +17,24 @@ import polars as pl
 from hmrec.eval.metrics import (
     ARTICLE_IDX,
     FOLD,
+    METRIC_KINDS,
     QUERY_ID,
     VALUE,
     average_precision_at_k,
     check_labels,
+    label_hits,
     macro_mean,
+    metric_from_hits,
     ndcg_at_k,
     per_fold_means,
     query_weighted_mean,
+    ranked_hits,
     recall_at_k,
     union_recall,
+    union_recall_from_hits,
 )
 
 IS_HIT = "is_hit"
-METRIC_KINDS = ("recall", "ndcg", "map")
 
 
 def parse_metric(name: str) -> tuple[str, int]:
@@ -85,6 +89,34 @@ class FoldEvaluator:
         if kind == "ndcg":
             return ndcg_at_k(predictions, self.labels, k)
         return average_precision_at_k(predictions, self.labels, k)
+
+    def per_query_many(
+        self, candidates: pl.DataFrame, metrics: Sequence[str]
+    ) -> dict[str, pl.DataFrame]:
+        """Several metrics of the same candidates with ONE check and ONE join with the labels.
+
+        Args:
+            candidates: One row per (query_id, article_idx) with rank.
+            metrics: e.g. ["recall@100", "ndcg@12", "map@12"].
+
+        Returns:
+            Metric name -> per-query table (query_id, fold, value), with exactly
+            the values per_query gives for each metric alone.
+        """
+        parsed = {metric: parse_metric(metric) for metric in metrics}
+        hits = ranked_hits(candidates.select(QUERY_ID, ARTICLE_IDX, "rank"), self.labels)
+        return {
+            metric: metric_from_hits(kind, hits, self.labels, k)
+            for metric, (kind, k) in parsed.items()
+        }
+
+    def hits(self, candidates: pl.DataFrame) -> pl.DataFrame:
+        """The rows of `candidates` whose (query_id, article_idx) is a label (all columns kept)."""
+        return label_hits(candidates, self.labels)
+
+    def union_recall_of_hits(self, hits: pl.DataFrame) -> pl.DataFrame:
+        """Union recall per query from rows returned by `hits` (of one or more channels)."""
+        return union_recall_from_hits(hits, self.labels)
 
     def union_recall(self, candidates: pl.DataFrame) -> pl.DataFrame:
         """Union recall of every query of this fold (proposal §2.5), with no cut-off.

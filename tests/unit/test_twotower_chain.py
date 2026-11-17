@@ -19,8 +19,8 @@ import polars as pl
 import pytest
 import torch
 from conftest import FIXTURE_DAY_ZERO, make_queries, make_recall_inputs
+from test_twotower_infer import CHUNKS, _resources
 from test_twotower_infer import CONFIG as INFER_CONFIG
-from test_twotower_infer import _resources
 
 from hmrec.config import TwoTowerChainConfig, TwoTowerConfig, load_base_config
 from hmrec.data.day_index import day_index_to_date
@@ -127,7 +127,7 @@ def _chain(tmp_path: Path) -> TwoTowerChainChannel:
     return TwoTowerChainChannel(
         CONFIG,
         _resources(),
-        (2, 3),
+        CHUNKS,
         lambda fold: tmp_path / f"{fold}.pt",
         ALARM,
         MEMORY,
@@ -142,13 +142,13 @@ def _fold(name: str, anchor_day: int) -> tuple[pl.DataFrame, RecallInputs]:
 
 def test_each_week_is_predicted_before_the_model_trains_on_it(tmp_path: Path) -> None:
     chain = _chain(tmp_path)
-    frozen = TwoTowerChannel(CONFIG, _resources(), 2, 3)  # same start weights, never updated
+    frozen = TwoTowerChannel(CONFIG, _resources(), CHUNKS)  # same start weights, never updated
     d1_queries, d1_inputs = _fold("D1", 40)
     assert chain.generate(d1_queries, d1_inputs).equals(frozen.generate(d1_queries, d1_inputs))
     # D2 is predicted by the model fine-tuned on D1 (saved as D1.pt), before D2 training.
     after_d1 = _resources()
     load_checkpoint(after_d1.model, tmp_path / "D1.pt")
-    after_d1_channel = TwoTowerChannel(CONFIG, after_d1, 2, 3)
+    after_d1_channel = TwoTowerChannel(CONFIG, after_d1, CHUNKS)
     d2_queries, d2_inputs = _fold("D2", 47)
     expected = after_d1_channel.generate(d2_queries, d2_inputs)
     assert chain.generate(d2_queries, d2_inputs).equals(expected)
