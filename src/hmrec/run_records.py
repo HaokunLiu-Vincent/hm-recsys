@@ -122,7 +122,7 @@ def append_run_row(path: Path, row: dict[str, str]) -> None:
 
 
 def check_memory_limit(peak: ProcessPeakMemory, limit_gb: float, label: str) -> None:
-    """Fail if the process's TRUE peak RSS is above the limit (proposal §1.3: about 6 GB).
+    """Fail if the process's TRUE peak RSS is above the limit (proposal §1.3: 7 GB).
 
     Called after the run row is written, so the run is on record; the error
     then stops a driver that runs the steps one after another.

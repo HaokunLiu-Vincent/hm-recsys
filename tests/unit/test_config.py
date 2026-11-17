@@ -85,9 +85,10 @@ def test_parse_base_config_reads_all_fields() -> None:
 
 def test_repo_base_yaml_matches_agents_md_limits() -> None:
     config = load_base_config(REPO_CONFIGS / "base.yaml")
-    # AGENTS.md §4: 6 threads, ~6 GB peak per task.
+    # AGENTS.md §4: 6 threads; the true peak of one process is at most 7 GB
+    # (6 GB until 2026-11-18, see docs/decisions.md).
     assert config.num_threads == 6
-    assert config.memory.limit_gb == 6.0
+    assert config.memory.limit_gb == 7.0
     assert config.paths.data_root == "data"
     assert config.paths.artifacts_root == "artifacts"
 
