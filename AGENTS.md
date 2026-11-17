@@ -106,7 +106,7 @@ H&M 个性化时尚推荐（Kaggle H&M 数据集）。目标：预测每个用�
 完整目录见 `docs/proposal.md` §14。关键规则：
 
 ```
-scripts/  →  src/hmrec/{recall, fusion, features, ranker, hpo, pipeline}  →  src/hmrec/{data, eval, vectors, locks, csv_records, run_records}  →  config / paths
+scripts/  →  src/hmrec/{recall, fusion, features, ranker, hpo, pipeline}  →  src/hmrec/{data, eval, vectors, locks, csv_records, run_records, feature_files}  →  config / paths
 ```
 
 - 上层可以 import 下层，**下层不能 import 上层**。
@@ -114,6 +114,7 @@ scripts/  →  src/hmrec/{recall, fusion, features, ranker, hpo, pipeline}  → 
 - `src/hmrec/vectors.py`（用户 / 商品向量、批量点积、保存 / 读取）属于底层，`recall/` 和 `features/` 都可以 import 它（见 proposal §14.1）。R5 / R6 的召回分数和 §8.3 的 `wals_dot` / `tt_dot` 都只通过它计算。
 - `src/hmrec/locks.py`（读取并校验 `configs/locks/` 的锁定文件、核对文件 sha256）也属于底层，与 `vectors.py` 同层，只依赖 `config.py` 和标准库；`recall/` 和 `features/` 都可以 import 它。从锁定文件**构建** channel 在 `src/hmrec/recall/locked.py`（见 §3.3）。
 - `src/hmrec/csv_records.py`（只追加、表头固定的结果表 `results/*.csv` 的读写）和 `src/hmrec/run_records.py`（每个进程一行的运行记录：耗时、采样峰值、真实峰值）也属于底层，只依赖标准库和 `memory.py`；任何上层模块和 `eval/` 都可以 import 它们。
+- `src/hmrec/feature_files.py`（每个 fold 特征文件的记录 `features.json` 和核对函数）也属于底层，只依赖标准库、polars 和 `locks.py`：`features/` 写记录，`ranker/` 在读取特征之前调用 `verify_feature_files` 核对，两者互不 import。
 - `src/hmrec/pipeline.py`（把一个 fold 的各步各用一个独立进程依次运行，并写每个 fold 的摘要）属于上层，与 `recall/`、`hpo/` 同层：它可以 import `eval/` 和底层模块，但 `recall/`、`features/`、`ranker/` 不能 import 它。
 - `scripts/` 只做三件事：解析命令行参数、调用 `src/` 里的函数、写结果。**不在 scripts 里写业务逻辑。**
 - `notebooks/` 只做探索和画图，`src/` 不能依赖 notebook 中的任何代码。

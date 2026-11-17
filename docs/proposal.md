@@ -90,17 +90,17 @@
 | R5 WALS（180 天） | ~0.5–1 GB | **D1（W2，默认配置）：整体峰值 3.10 GB**（`/usr/bin/time` 最大 RSS；MemoryTracker 采样：拟合 0.96 GB，打分 2.11 GB）；耗时 63.8 秒（拟合 53.0 秒，打分 10.8 秒）。矩阵 71.1 万用户 × 5.2 万商品，590 万个非零值。**峰值来自打分**而不是拟合：打分按 `chunking.dense_score_query_chunk_size` = 5,000 个 query 分块，每块 5,000 × 20,764 个活跃商品的 float32 分数矩阵约 0.41 GB，再加 `np.partition` 的副本（分块为 1 万时整体峰值 4.05 GB；两种分块的 Recall@100 都是 11.36%，候选行数相同）。当前 `implicit` 的 macOS wheel 没有链接 OpenMP，拟合实际是**单线程**（`num_threads=6` 不起作用） | 稀疏 CSR，没问题 |
 | R6 Two-Tower 训练 | ~1.5–2 GB | **训练数组生成（base 窗口，2026-11-17）：峰值 4.70 GB**（取较保守的值：两次运行 MemoryTracker 采样分别为 3.35 GB 和 4.70 GB，任务只有约 4.5 秒，0.5 秒的采样间隔误差大；`/usr/bin/time` 最大 RSS 4.15 GB，含读数据），耗时 4.6 秒；616 万个样本，数组共 670 MB（`history` int32 470 MB、`history_mask` 118 MB）。**200 步 benchmark（占位模型，batch 512）**：MPS 进程最大 RSS 2.00 GB，MPS 张量占用 1.17 GB（驱动共持有 2.02 GB，统一内存，与 RSS 部分重叠）；CPU 进程最大 RSS 2.34 GB。真实模型（训练全程）待测 | 用户历史预先存成 int32 数组 `[N, 20]`；商品特征表（~10.5 万 × 896 维，约 380 MB）整块放进 MPS 显存；batch 直接按下标取，不用 DataLoader |
 | 候选生成（每周） | 合并前最多约 3,940 万行，全部放在内存约 0.73 GB（D3 约 1.07 GB）；单个 channel 最多约 0.15 GB；合并去重后约 **2,520 万行**（每个 query 平均 307 个；计算见表下 ①） | **M4 实测（D1–D4，2026-11-17，M5 锁定的配置，即 R3 只输出 `A(a)`）**：合并前 D1 3,219 万行、D3 4,947 万行（只保留 `query_id`、`article_idx`、`rank` 三列时约 0.36 / 0.55 GB）；去重后每个 query 平均 **307** 个候选（P50 320，P90 364；上限 480），D1 约 2,440 万行、D3 约 3,661 万行。R3 切换之前：平均 313（P50 327，P90 373），合并前 D1 3,268 万行、D3 5,015 万行。**内存**：第一次 M4 union 检查（四周一起处理）整个进程的真实峰值 6.66 GB（`/usr/bin/time`；0.5 秒采样只看到 5.22 GB），超过 6 GB；改为一次只处理一个 fold 后（R3 切换后的重跑）降到 **4.78 GB**（来源：`/usr/bin/time -l` 的终端输出，**没有写入运行日志**；日志里采样到的最大值是 4.72 GB）。**这个 4.78 GB 不包含 R6 现场预测**：那次运行 R1、R2、R4、R5、R6 的候选都从已有文件读回，只有 R3 是现场生成的。**单路的真实峰值**（每路一个进程，含 R6 现场预测）已在 M5 的 D1 核对中测得，见表下"M5 锁定配置在 D1 上的单路实测"：最高是 R4 的 4.20 GB。**M6 实测（F1–T4 共 12 周，2026-11-17，`results/m6_runs.csv`）**：每个 (fold, channel) 一个进程，所以不存在"六路在一个进程里"的峰值；12 周中任何进程的真实峰值最高 **4.70 GB**（F2 的 R6，含预测、全部商品向量和这一周的 fine-tune），各路范围：R1 1.9–2.1、R2 0.9–1.1、R3 1.0–1.1、R4 3.8–4.3、R5 3.6–4.2、R6 4.3–4.7 GB。监控进程（读回六路候选、统计去重后的候选数；F、V 周另算 recall）最高 2.12 GB。每周去重后的候选数平均 304–310（P50 317–324，P90 359–364），与 D 阶段的 307 一致。合并成宽表（`fusion/union.py`）的峰值留到 M6 后半 | 每个 channel 单独写 Parquet，再按 query 分块合并去重 |
-| 特征宽表（每周，§8） | 一周全放进内存约 **5.4 GB**（2,520 万行 × 232 B），不可行；按 1 万 query 分块后每块约 **0.66 GB**，P90 的块约 0.79 GB（计算见表下 ④）。12 周（F、V、T）的特征 Parquet 未压缩约 **61 GB**，压缩后估计 18–37 GB（计算见表下 ⑤） | 待测 | **按 query 分块计算**（每块 1 万个 query），每块算完直接写成一个 Parquet row group / part 文件，不在内存中保留整周 |
-| Ranker 训练（4 周） | 负采样 1:40 约 1,100 万行，1:80 约 2,170 万行（上限）；原始 float32 特征约 2.3–4.5 GB，分箱后约 0.6–1.1 GB（计算见表下 ②） | 待测 | **流式加载（stream loading）**：每周特征按 row group 存 Parquet，用 LightGBM 的 `lgb.Sequence` 分批读入构建 `Dataset`，原始特征不必一次性放进内存；构建后的分箱数据（每个值 1 字节）约 0.5–1 GB，存成 LightGBM binary 文件复用 |
-| Ranker 推理（每周，不采样） | 一次全放进内存约 **5.3 GB**；按 1 万 query 分块后每块约 **0.64 GB**，P90 的块约 0.76 GB（计算见表下 ③） | 待测 | **按 query 分块打分**（每块 1 万个 query） |
+| 特征宽表（每周，§8） | 一周全放进内存约 **6.9 GB**（2,520 万行 × 292 B），不可行；按 1 万 query 分块后每块约 **0.83 GB**，P90 的块约 0.99 GB（计算见表下 ④）。12 周（F、V、T）的特征 Parquet 未压缩约 **77 GB**，压缩后估计 23–46 GB（计算见表下 ⑤）。以上按 71 个特征计（2026-11-17 从 56 个增加到 71 个） | 待测 | **按 query 分块计算**（每块 1 万个 query），每块算完直接写成一个 Parquet row group / part 文件，不在内存中保留整周 |
+| Ranker 训练（4 周） | 负采样 1:40 约 1,100 万行，1:80 约 2,170 万行（上限）；原始 float32 特征约 2.9–5.7 GB，分箱后约 0.7–1.4 GB（计算见表下 ②；71 个特征） | 待测 | **流式加载（stream loading）**：每周特征按 row group 存 Parquet，用 LightGBM 的 `lgb.Sequence` 分批读入构建 `Dataset`，原始特征不必一次性放进内存；构建后的分箱数据（每个值 1 字节）约 0.5–1 GB，存成 LightGBM binary 文件复用 |
+| Ranker 推理（每周，不采样） | 一次全放进内存约 **6.7 GB**；按 1 万 query 分块后每块约 **0.81 GB**，P90 的块约 0.96 GB（计算见表下 ③；71 个特征） | 待测 | **按 query 分块打分**（每块 1 万个 query） |
 
-**候选生成、Ranker 训练、Ranker 推理、特征宽表几行的估算过程**（2026-11-16 按实测 query 数重算；2026-11-17 按 M4 实测的候选数重算，同日 M5 锁定时再按 R3 切换后的候选数 307 重算；1 GB = 1024³ B）。共同输入：每周平均 **8.2 万** query（D3 最多 12.0 万；F、V、T 周 6.9–8.6 万），每个 query 平均约 **3.4** 个 label（去重后；F、V 周 3.2–3.6）；6 路 quota 合计 100 + 30 + 50 + 100 + 100 + 100 = **480**；合并去重后每个 query 平均 **307** 个候选，P50 320，P90 364（M4 在 D1–D4 上实测，M5 锁定的配置，即 R3 只输出 `A(a)`；R3 切换之前为 313 / 327 / 373，最初假设 250）；特征 **56** 个。F、V、T 共 12 周的 query 数实测为 6.9–8.6 万，合计 **917,354**，平均 7.64 万。
+**候选生成、Ranker 训练、Ranker 推理、特征宽表几行的估算过程**（2026-11-16 按实测 query 数重算；2026-11-17 按 M4 实测的候选数重算，同日 M5 锁定时再按 R3 切换后的候选数 307 重算；1 GB = 1024³ B）。共同输入：每周平均 **8.2 万** query（D3 最多 12.0 万；F、V、T 周 6.9–8.6 万），每个 query 平均约 **3.4** 个 label（去重后；F、V 周 3.2–3.6）；6 路 quota 合计 100 + 30 + 50 + 100 + 100 + 100 = **480**；合并去重后每个 query 平均 **307** 个候选，P50 320，P90 364（M4 在 D1–D4 上实测，M5 锁定的配置，即 R3 只输出 `A(a)`；R3 切换之前为 313 / 327 / 373，最初假设 250）；特征 **71** 个（最初 56 个，2026-11-17 增加 15 个，见 §8）。F、V、T 共 12 周的 query 数实测为 6.9–8.6 万，合计 **917,354**，平均 7.64 万。
 
 - ① **候选生成**：合并前最多 8.2 万 × 480 ≈ 3,940 万行（D3：12.0 万 × 480 ≈ 5,760 万行）。每行约 20 B（`query_id`、`article_idx`、`rank` 各 int32 4 B，`score` float32 4 B，`channel` 用 Categorical 约 4 B）→ 3,940 万 × 20 B ≈ 0.73 GB（D3 ≈ 1.07 GB）。每个 channel 单独写盘，单个 channel 最多 8.2 万 × 100 × 20 B ≈ 0.15 GB。合并去重后 8.2 万 × 307 ≈ **2,520 万行**（R3 切换之前 2,570 万，最初估算 2,050 万；D3：12.0 万 × 305 ≈ 3,660 万行）。
-- ② **Ranker 训练**：每周正样本 ≈ 8.2 万 query × 3.4 label × 24%（G2 的 union recall 目标；M4 在 D1–D4 上实测 25.2%，正样本和下面的行数相应多约 5%）≈ 6.7 万。每个正样本配 r 个负样本：r = 40 时 6.7 万 × 41 ≈ 274 万行/周，4 周 ≈ **1,100 万行**；r = 80 时 6.7 万 × 81 ≈ 542 万行/周，4 周 ≈ **2,170 万行**（候选不够时负样本全取，所以这是上限）。原始特征 56 × 4 B = 224 B/行 → 1,100 万 × 224 B ≈ 2.3 GB，2,170 万 × 224 B ≈ 4.5 GB；分箱后每个值 1 B → 1,100 万 × 56 B ≈ 0.57 GB，2,170 万 × 56 B ≈ 1.1 GB。r = 80 时原始特征接近 6 GB 上限，所以必须流式加载。
-- ③ **Ranker 推理**：每周 8.2 万 × 307 = 2,520 万行 × 224 B ≈ 5.64 × 10⁹ B ≈ **5.3 GB**（最初估算 4.3 GB；V、T 周最多 8.3 万 query，差不多）。按 1 万 query 分块：1 万 × 307 × 224 B ≈ 6.9 × 10⁸ B ≈ **0.64 GB/块**（最初估算 0.52 GB）；候选多的块按 P90 算：1 万 × 364 × 224 B ≈ 0.76 GB/块。
-- ④ **特征宽表**：每行 56 个 float32 特征 224 B，加上 `query_id`、`article_idx` 两个 int32 共 8 B → **232 B/行**。一周 2,520 万行 × 232 B ≈ 5.84 × 10⁹ B ≈ 5.4 GB，接近 6 GB 上限，所以不能整周放进内存。按 1 万 query 分块：1 万 × 307 × 232 B ≈ 7.1 × 10⁸ B ≈ **0.66 GB/块**；按 P90：1 万 × 364 × 232 B ≈ 0.79 GB/块。
-- ⑤ **12 周特征 Parquet 的磁盘占用**：F1–F4、V1–V4、T1–T4 共 917,354 个 query × 307 ≈ **2.82 亿行**；未压缩 2.82 亿 × 232 B ≈ 6.53 × 10¹⁰ B ≈ **61 GB**（平均每周约 5.1 GB）。Parquet 压缩比现在只能估计：候选文件（ID、rank、score）压缩后约为原始大小的 18%（预检查 5 路 4 周 1.25 亿行 449 MB），浮点特征压缩得差一些，按 30%–60% 估计为 **约 18–37 GB**。M6 生成 F1 后先实测一周的大小再外推。当前磁盘可用空间约 520 GB，足够。
+- ② **Ranker 训练**：每周正样本 ≈ 8.2 万 query × 3.4 label × 24%（G2 的 union recall 目标；M4 在 D1–D4 上实测 25.2%，正样本和下面的行数相应多约 5%）≈ 6.7 万。每个正样本配 r 个负样本：r = 40 时 6.7 万 × 41 ≈ 274 万行/周，4 周 ≈ **1,100 万行**；r = 80 时 6.7 万 × 81 ≈ 542 万行/周，4 周 ≈ **2,170 万行**（候选不够时负样本全取，所以这是上限）。原始特征 71 × 4 B = 284 B/行 → 1,100 万 × 284 B ≈ 2.9 GB，2,170 万 × 284 B ≈ 5.7 GB；分箱后每个值 1 B → 1,100 万 × 71 B ≈ 0.73 GB，2,170 万 × 71 B ≈ 1.4 GB。r = 80 时原始特征已经贴近 6 GB 上限，所以必须流式加载。（按 56 个特征时是 2.3 / 4.5 GB 和 0.57 / 1.1 GB。）
+- ③ **Ranker 推理**：每周 8.2 万 × 307 = 2,520 万行 × 284 B ≈ 7.16 × 10⁹ B ≈ **6.7 GB**（56 个特征时 5.3 GB，最初估算 4.3 GB；V、T 周最多 8.3 万 query，差不多）。按 1 万 query 分块：1 万 × 307 × 284 B ≈ 8.7 × 10⁸ B ≈ **0.81 GB/块**（56 个特征时 0.64 GB）；候选多的块按 P90 算：1 万 × 364 × 284 B ≈ 0.96 GB/块。
+- ④ **特征宽表**：每行 71 个特征按 float32 计 284 B，加上 `query_id`、`article_idx` 两个 int32 共 8 B → **292 B/行**（实际存储略小：8 个类别特征是 int16，每行 276 B）。一周 2,520 万行 × 292 B ≈ 7.36 × 10⁹ B ≈ 6.9 GB，超过 6 GB 上限，所以不能整周放进内存。按 1 万 query 分块：1 万 × 307 × 292 B ≈ 9.0 × 10⁸ B ≈ **0.83 GB/块**；按 P90：1 万 × 364 × 292 B ≈ 0.99 GB/块。（56 个特征时是 232 B/行、5.4 GB、0.66 / 0.79 GB。）
+- ⑤ **12 周特征 Parquet 的磁盘占用**：F1–F4、V1–V4、T1–T4 共 917,354 个 query × 307 ≈ **2.82 亿行**；未压缩 2.82 亿 × 292 B ≈ 8.23 × 10¹⁰ B ≈ **77 GB**（平均每周约 6.4 GB；56 个特征时 61 GB）。Parquet 压缩比现在只能估计：候选文件（ID、rank、score）压缩后约为原始大小的 18%（预检查 5 路 4 周 1.25 亿行 449 MB），浮点特征压缩得差一些，按 30%–60% 估计为 **约 23–46 GB**。M6 生成 F1 后先实测一周的大小再外推。当前磁盘可用空间约 520 GB，足够。
 - 说明：307 是 R3 改为只输出 `A(a)` 之后重跑 union 检查的实测值（`results/m4_union_check_r3_active_pool.csv`，4 周合并 307.1）。切换之前是 313：R3 在 `A(a)` 外的候选约占 R3 行数的 23%（平均每个 query 约 7 行），切换后其中一部分名额由池内的同款商品补上，R3 平均每个 query 的行数从 29.8 降到 24.1，合并去重后平均少 5.8 个。
 
 以上除"实测"列外都是估算值，后续各阶段实测后继续填写"实测"列。M0 query / label 生成实测于 2026-11-16（`scripts/m0_build_queries.py`）。M0 预处理实测（2026-11-15）：常驻内存是读回 Parquet 后的 Polars `estimated_size()`；峰值是 `MemoryTracker` 的采样 RSS（间隔 0.5 秒，是下限，见下一段）。其他 M0 产物的常驻内存：customers 37 MB，articles 3 MB，customer ID 映射 89 MB，按 `article_idx` 对齐的图像 / 文本 embedding 206 MB / 155 MB。
@@ -612,7 +612,9 @@ Recency-only 的分数 = `1 / age_days`，`age_days` 取用户最近一次购买
 
 ---
 
-## 8. Ranker 宽表特征（初版，共约 56 个）
+## 8. Ranker 宽表特征（共 71 个）
+
+> 2026-11-17：最初的 56 个之外新增 15 个（B 组 2、C 组 1、D 组 1、E 组 11），总数 71。新增是在**特征锁定之前、没有任何 Ranker 结果的情况下**做的设计修改，依据是 H&M 比赛第一名方案对用户–商品交互特征和多时间窗口的强调（`docs/decisions.md`）。下面各表中新增的特征标 **（新增）**。
 
 ### 8.1 原则
 
@@ -621,6 +623,16 @@ Recency-only 的分数 = `1 / age_days`，`age_days` 取用户最近一次购买
 - 不使用原始 ID（`customer_id`、`article_id`、`product_code`）作为特征。
 - 类目字段作为 LightGBM categorical feature。
 - 缺失值保留为 NaN，LightGBM 会自己处理。
+
+**落实后的约定（M6，`configs/features.yaml`、`src/hmrec/features/`）**：
+
+- **宽表的列**：`query_id`、`article_idx`（int32，只作键，不是特征），然后是下面 71 个特征，顺序与 `configs/features.yaml` 一致。没有 `customer_idx`，也**没有 label 列**（label 在 M7 的 `ranker/sampling.py` 中才拼接）。
+- **dtype**：数值特征一律 float32，缺失为 NaN；8 个类别特征（§8.4 的 6 个商品类目、§8.5 的 `club_member_status` 和 `fashion_news_frequency`）是 int16 整数编码：0 = 缺失，1..K = 该字段全部取值排序后的序号。编码表由 `articles`、`customers` 的全部行生成，所有 fold 共用一份，保存在 `artifacts/features/category_codes.json`；后面的 fold 重新生成后必须与它完全相同。
+- **"购买行数 / 次数"都按购买行计**（同一用户同一天买同一商品两行算 2），与 R1、R2 的计数方式一致。唯一的例外是 `item_repurchase_ratio_52w`（见 §8.4）。
+- **"距今天数"** = `anchor_day − t_dat_day`，昨天 = 1。
+- **窗口**：1w = `[a−7, a)`，prev_1w = `[a−14, a−7)`，4w = `[a−28, a)`，52w = `[a−364, a)`；没写窗口的特征用全部历史 `t_dat < a`。每个窗口都通过 `data/asof.py` 取数。
+- **缺失值规则**：计数类特征没有数据时为 0；"距今天数"、均值、占比、比值在无法定义时为 NaN（从没买过、窗口内没有数据、分母为 0、任一侧缺失）。
+- **输出**：`artifacts/features/{fold}/part-{i}.parquet`，每 `chunking.query_chunk_size` 个 query 一个文件，按 `(query_id, article_idx)` 排序，同一个 query 的行连续且不跨文件；最后写 `features.json`，它存在才表示这个 fold 完成。生成后不覆盖。
 
 ### 8.2 A 组：召回来源（14 个）
 
@@ -635,7 +647,9 @@ Recency-only 的分数 = `1 / age_days`，`age_days` 取用户最近一次购买
 
 WALS 和 Two-Tower 的原始分数放在 B 组，因为 B 组对所有候选都计算，覆盖面更大。
 
-### 8.3 B 组：对所有候选都计算的稠密分数（5 个）
+落实（`src/hmrec/fusion/union.py`、`fusion/rrf.py`、`features/source.py`）：六路按 `(query_id, article_idx)` 合并去重，每个候选一行。`pop_is_fallback` 在 R1 召回的行上是 0 / 1，**R1 没有召回的行为 NaN**（与其他来源列一致）。`n_channels`、`best_rank` 存为 float32。`rrf_score` 用 float64 按固定顺序（pop、rep、sib、icf、wals、tt）求和后存为 float32。RRF baseline（§9.5）的排序：`rrf_score DESC`，再 `best_rank ASC`，再 `article_idx ASC`。
+
+### 8.3 B 组：对所有候选都计算的稠密分数（7 个）
 
 这组特征不管候选来自哪一路，都会计算。通常是最有用的一组。
 
@@ -646,8 +660,17 @@ WALS 和 Two-Tower 的原始分数放在 B 组，因为 B 组对所有候选都�
 | `pop_bucket_score` | 该商品在用户年龄桶里的 R1 衰减热度分数（不受 Top-100 限制） |
 | `img_sim_hist` | 商品 CLIP 向量与用户最近 20 件购买的 CLIP 平均向量的 cosine 相似度。平均向量只用这 20 件中有图像向量的商品。**商品本身没有图像向量，或用户最近 20 件购买都没有图像向量时，取 NaN** |
 | `txt_sim_hist` | 同上，换成 MiniLM 文本向量。文本覆盖全部商品，所以只有在**用户没有历史购买（`t_dat < a` 内没有购买）时取 NaN** |
+| `tt_sim_max_hist` **（新增）** | 候选商品与用户最近 20 件购买（与 `img_sim_hist` 同一份历史）的相似度中的**最大值**。相似度 = 该 fold 保存的 R6 商品向量的点积（向量已 L2 归一化）。用户没有历史时为 NaN |
+| `tt_sim_top5_hist` **（新增）** | 同上，取最大的 5 个相似度的平均；历史不足 5 件时取全部。用户没有历史时为 NaN |
 
-### 8.4 C 组：商品特征（16 个）
+落实（`src/hmrec/features/dense.py`）：
+
+- `tt_dot`、`wals_dot` 用 M6 保存的向量和 `vectors.dot_pairs` 计算（与 R5、R6 的 `score` 是同一个函数）。`tt_dot` 用的是预测这一周时的模型（这一周 fine-tune 之前），对所有候选都有值。**每个 fold 全量检查**：被 R6 召回的行，`tt_dot` 与 R6 候选的 `score` 逐位相同；被 R5 召回的行，`wals_dot` 与 R5 的 `score` 逐位相同。
+- `pop_bucket_score` 读 R1 保存的桶内分数表；表里没有的 (年龄桶, 商品) 记为 **0**（该年龄桶在窗口内没有人买过，衰减热度就是 0）。
+- `img_sim_hist`、`txt_sim_hist`："最近 20 件购买"与 Two-Tower 用的是**同一个函数**（`src/hmrec/data/histories.py` 的 `recent_purchase_histories`：同一天同一商品算一件，不同天买同一商品算多件，从近到远）。平均向量 = 这 20 件中有向量的那些的简单平均（同一商品出现几次就计几次），**平均后做 L2 归一化**；候选商品的向量也重新归一化，两者的点积就是 cosine。
+- `tt_sim_max_hist`、`tt_sim_top5_hist`：与上面两个"平均向量"特征不同，它们看的是**单件**历史商品与候选的相似度，只要有一件很像就会高。同一商品在 20 件中出现两次就计两次。读取向量时检查 R6 商品向量的范数为 1（±1e-3）。按 query 逐个计算（一个 query 的候选在宽表中连续），内存只有"该 query 的候选数 × 历史件数"的一个小矩阵；这一步的耗时单独记入 `features.json` 和 `results/m6_runs.csv`。
+
+### 8.4 C 组：商品特征（17 个）
 
 | 特征 | 定义 |
 |---|---|
@@ -661,6 +684,7 @@ WALS 和 Two-Tower 的原始分数放在 B 组，因为 B 组对所有候选都�
 | `item_online_share_4w` | `[a−28d, a)` 内线上渠道（`sales_channel_id=2`）的占比 |
 | `item_buyer_age_mean_4w` | `[a−28d, a)` 内买家的平均年龄 |
 | `item_repurchase_ratio_52w` | `[a−364d, a)` 内买过它的用户中，买过 2 次及以上的比例 |
+| `item_discount_ratio` **（新增）** | `[a−7d, a)` 的成交均价 ÷ `[a−364d, a)` 的成交均价（小于 1 表示上周卖得比全年便宜）；任一窗口没有销售为 NaN |
 | `product_type_no` | 类目（categorical） |
 | `product_group_name` | 类目（categorical） |
 | `garment_group_no` | 类目（categorical） |
@@ -668,7 +692,15 @@ WALS 和 Two-Tower 的原始分数放在 B 组，因为 B 组对所有候选都�
 | `section_no` | 类目（categorical） |
 | `colour_group_code` | 颜色（categorical） |
 
-### 8.5 D 组：用户特征（11 个）
+落实（`src/hmrec/features/item.py`，每个 fold 对商品目录的全部商品各算一行）：
+
+- `item_days_since_first_sale`："第一次被购买"指数据中（2018-09-20 起）的第一条购买行，所以数据开始之前就在卖的商品，这个值最多约 650 天。从没卖出过的商品，两个"距今天数"都是 NaN。
+- `item_price_mean_4w`、`item_online_share_4w`：对 4w 内的购买行求平均 / 占比；4w 内没有购买行时为 NaN。
+- `item_buyer_age_mean_4w`：对 4w 内的**不同买家**求平均（每个买家只算一次），只用年龄已知的买家；没有这样的买家时为 NaN。
+- `item_repurchase_ratio_52w`："买过 2 次及以上"指在 **2 个或更多不同的日期**买过；同一天的多行（一次买多件）不算复购。52w 内没有人买过时为 NaN。
+- **价格均值**（`item_price_mean_4w`、`item_discount_ratio` 的两个均值、`user_price_mean_52w`，以及由它们得到的 `ui_price_ratio`）：聚合前把 `price` 转成 Float64，算完再转成 float32。多线程 group_by 的求和顺序不固定，但在 float64 下只影响第 16 位左右，远小于 float32 的精度；有测试保证同一份数据打乱行序后这些特征的 float32 结果完全相同。
+
+### 8.5 D 组：用户特征（12 个）
 
 | 特征 | 定义 |
 |---|---|
@@ -682,8 +714,11 @@ WALS 和 Two-Tower 的原始分数放在 B 组，因为 B 组对所有候选都�
 | `user_price_mean_52w` | `[a−364d, a)` 内的平均成交价 |
 | `user_online_share_52w` | `[a−364d, a)` 内的线上占比 |
 | `user_uniq_items_52w` | `[a−364d, a)` 内买过的不同商品数 |
+| `user_purchase_days_52w` **（新增）** | `[a−364d, a)` 内有购买的不同日期数；没有则为 0 |
 
-### 8.6 E 组：用户–商品交叉特征（10 个）
+落实（`src/hmrec/features/user.py`，只计算该 fold 的 query 用户）：`age` 用表中的原值（16、17 岁照常保留，不截断），未知为 NaN；`fn`、`active` 是 float32 的 0 / 1。`user_price_mean_52w`、`user_online_share_52w` 在 52w 内没有购买时为 NaN。
+
+### 8.6 E 组：用户–商品交叉特征（21 个）
 
 | 特征 | 定义 |
 |---|---|
@@ -697,10 +732,25 @@ WALS 和 Two-Tower 的原始分数放在 B 组，因为 B 组对所有候选都�
 | `ui_share_colour_52w` | 同上，按 `colour_group_code` |
 | `ui_price_ratio` | `item_price_mean_4w / user_price_mean_52w` |
 | `ui_age_gap` | `|age − item_buyer_age_mean_4w|` |
+| `ui_decay_ptype`、`ui_decay_garment`、`ui_decay_section`、`ui_decay_colour` **（新增）** | 用户在 `t_dat < a` 的全部历史中，与候选商品同 `product_type_no` / `garment_group_no` / `section_no` / `colour_group_code` 的每一条购买行，按 `exp(−age_days / 30)` 加权求和；没有则为 0。τ 固定为 30（`configs/features.yaml` 的 `decay_tau_days`），**不是超参数** |
+| `ui_days_since_ptype`、`ui_days_since_section` **（新增）** | 距用户最近一次购买同 `product_type_no` / `section_no` 商品的天数；没买过为 NaN |
+| `ui_share_section_52w`、`ui_share_pgroup_52w` **（新增）** | 与 `ui_share_*_52w` 相同的定义，属性换成 `section_no` 和 `product_group_name` |
+| `ui_lift_ptype_52w` **（新增）** | `ui_share_ptype_52w` ÷ 全站 52w 内该 `product_type_no` 的购买行占比；用户 52w 内没有购买，或全站占比为 0 时为 NaN |
+| `ui_channel_gap` **（新增）** | `|user_online_share_52w − item_online_share_4w|`；任一侧缺失为 NaN |
+| `ui_attr_match_cnt` **（新增）** | 6 个类目属性中，候选商品的取值出现在用户最近 20 件购买里的属性个数（0–6）；用户没有历史时为 NaN |
+
+落实（`src/hmrec/features/user_item.py`）：
+
+- `ui_cnt_pcode`、`ui_days_since_pcode` 的"同 `product_code` 商品"**包括候选商品本身**。
+- `ui_share_*_52w` = 用户 52w 内与候选同类目的购买行数 / 用户 52w 内的全部购买行数。用户 52w 内没有购买时为 NaN（0 / 0）；有购买但没有同类目的为 0。
+- `ui_price_ratio`：任一侧缺失、或用户均价为 0 时为 NaN。`ui_age_gap`：年龄未知、或商品 4w 内没有年龄已知的买家时为 NaN。
 
 ### 8.7 特征的冻结和检查
 
-- 特征列表、类型、窗口在 M6 之前写进 `configs/locks/features.lock.yaml`，V 阶段**不调特征**。
+- 特征列表和 dtype 写在 `configs/features.yaml`（加载时逐项核对：必须正好是 §8.2–§8.6 的 71 个，顺序、分组、类别特征都不能变）。`configs/locks/features.lock.yaml` 在 F1 的特征经确认之后再写入，目前还没有写（原计划是"M6 之前"）。V 阶段**不调特征**。
+- **每个 fold 生成后自动检查**（`src/hmrec/features/build.py`）：行数等于去重后的候选数（`results/m6_candidates.csv` 的 union 行）；没有重复的 `(query_id, article_idx)`；`tt_dot` / `wals_dot` 与 R6 / R5 的 `score` 逐位相同；每个特征的缺失率、最小值、最大值、均值写进 `results/m6_features.csv`。
+- **独立核对**（`scripts/checks/check_features.py`）：不使用 `features/`、`fusion/`、`asof`、`vectors` 的任何代码，用最朴素的循环对随机 1,000 行重新计算 25 个特征（每组至少 2 个，其中 6 个是新增的），与宽表比较。
+- **特征文件的记录和核对**（`src/hmrec/feature_files.py`）：每个 fold 的 `features.json` 记录每个 part 文件的 sha256、行数，以及列清单。`verify_feature_files` 核对：列清单与预期一致、磁盘上的 part 文件正好是记录的那些、每个文件的 sha256 / 行数 / 列都一致。**M7 读取任何一个 fold 的特征之前必须先调用它。**
 - 每个特征都要有一个时间截断测试：把 anchor 当天及之后的交易全部删掉，重新计算，结果必须完全一致。
 - 训练结束后输出 feature importance（gain），只用来分析，不用来增删特征。
 
@@ -870,7 +920,7 @@ hm-recsys/
 │   ├── hpo/                     # D 阶段和 V 阶段的搜索网格
 │   │   ├── d_phase.yaml
 │   │   └── v_phase.yaml
-│   ├── features.yaml            # 宽表特征列表（§8）
+│   ├── features.yaml            # 宽表的 71 个特征、dtype、哪些是类别特征，以及窗口、衰减 τ 等设置（§8）
 │   ├── ranker.yaml              # LightGBM 固定参数（§9.3）
 │   └── locks/                   # 锁定后的配置，只能新增，不能修改
 │       ├── channels.lock.yaml   # M5：R1–R5 的完整配置、名额、trial_id、D 阶段分数（只作记录）、选择依据
@@ -888,6 +938,7 @@ hm-recsys/
 │   ├── vectors.py               # 用户 / 商品向量（WALS、Two-Tower 共用）：按 (customer_idx, article_idx) 批量点积、保存 / 读取
 │   ├── locks.py                 # 读取并校验 configs/locks/ 的锁定文件；文件 sha256 核对（底层，recall / features 都可以用）
 │   ├── csv_records.py           # 只追加、表头固定的结果表（results/*.csv）的读写
+│   ├── feature_files.py         # 每个 fold 特征文件的记录（features.json：各 part 的 sha256、行数、列清单）和核对；M7 读特征前调用
 │   ├── run_records.py           # results/m6_runs.csv：每个进程一行（耗时、采样峰值、真实峰值）；真实峰值超限时停下
 │   ├── pipeline.py              # M6：一个 fold 的各步各用一个进程依次运行；每个 fold 的一行摘要
 │   │
@@ -898,6 +949,7 @@ hm-recsys/
 │   │   ├── metadata.py          # 读写 data/processed/metadata.json；scan_processed_parquet 先校验再读表
 │   │   ├── folds.py             # Fold dataclass；读取并校验 fold_manifest
 │   │   ├── asof.py              # 唯一做日期过滤的地方：history 窗口和 label 周（防泄漏的唯一入口）
+│   │   ├── histories.py         # "用户在某天之前最近 N 件购买"的唯一实现；Two-Tower 和特征（img / txt_sim_hist）共用
 │   │   ├── catalog.py           # 商品目录 C、活跃池 A(a)
 │   │   └── queries.py           # 每周的 query 名单和 label 集合 G_q
 │   │
@@ -924,17 +976,19 @@ hm-recsys/
 │   │       └── chain.py         # §6 的训练链：先预测、再 fine-tune
 │   │
 │   ├── fusion/
-│   │   ├── union.py             # 6 路合并去重，pivot 成宽表的来源列
-│   │   └── rrf.py               # rrf_score 计算；RRF baseline 排序
+│   │   ├── union.py             # 6 路合并去重：每个 (query, article) 一行，各路的 rank / score 成列
+│   │   └── rrf.py               # rrf_score、n_channels、best_rank；RRF baseline 排序
 │   │
-│   ├── features/
-│   │   ├── base.py              # FeatureGroup 接口：输入 anchor + 候选，输出特征列
+│   ├── features/                # 不 import recall/，不读 label；只读 artifacts/ 里的文件
+│   │   ├── base.py              # FoldData；按窗口取购买行（经 asof）并加 age_days；缺失值规则
+│   │   ├── categories.py        # 类别特征的整数编码表（所有 fold 共用，保存并核对）
 │   │   ├── source.py            # A 组：召回来源特征
-│   │   ├── dense.py             # B 组：tt_dot、wals_dot 等稠密分数
-│   │   ├── item.py              # C 组
-│   │   ├── user.py              # D 组
-│   │   ├── user_item.py         # E 组
-│   │   └── build.py             # 按 query 分块拼接所有特征组，写 Parquet
+│   │   ├── dense.py             # B 组：tt_dot、wals_dot、pop_bucket_score、img / txt_sim_hist
+│   │   ├── item.py              # C 组：每个 fold 一张商品表
+│   │   ├── user.py              # D 组：每个 fold 一张 query 用户表
+│   │   ├── user_item.py         # E 组：用户-商品 / product_code / 类目的聚合小表，再 join 到候选
+│   │   ├── stats.py             # 每个特征的缺失率、最小值、最大值、均值（results/m6_features.csv）
+│   │   └── build.py             # 一个 fold：读入、按 query 分块合并和计算、自动检查、写 part 文件
 │   │
 │   ├── ranker/
 │   │   ├── sampling.py          # query 内随机负采样
@@ -972,7 +1026,7 @@ hm-recsys/
 │   ├── m6_generate_candidates.py   # --fold F1 [--channel ...]：用锁定配置生成一个 fold 的候选（不读 label）
 │   ├── m6_monitor_candidates.py    # --fold F1：监控一个 fold 的候选（F、V 周读 label，T 周不读）
 │   ├── m6_run_folds.py             # --first-fold F1 --last-fold T4：按时间顺序逐个 fold 运行，每步一个进程
-│   ├── m6_build_features.py        # --fold F1 ...
+│   ├── m6_build_features.py        # --fold F1：生成一个 fold 的宽表特征（一个 fold 一个进程，不读 label）
 │   ├── m7_ranker_hpo.py
 │   └── m8_final_eval.py
 │
@@ -1014,7 +1068,9 @@ hm-recsys/
 │   ├── labels/{fold}.parquet    # query_id, fold, article_idx（只有 eval/ 和 ranker/sampling.py 能读）
 │   ├── candidates/{fold}/{channel}.parquet        # channel = r1_popularity ... r6_twotower；生成后冻结，不覆盖
 │   ├── candidates/{fold}/r1_bucket_scores.parquet # R1 完整的桶内分数表 (age_bucket, article_idx, score)，特征用
-│   ├── features/{fold}/part-*.parquet
+│   ├── features/{fold}/part-*.parquet             # 宽表：query_id, article_idx + 71 个特征；每块 query 一个文件
+│   ├── features/{fold}/features.json              # 最后写入，表示这个 fold 完成：各 part 的 sha256 和行数、列清单、检查的行数
+│   ├── features/category_codes.json               # 类别特征的编码表，所有 fold 共用
 │   ├── lgb_datasets/{run_id}/   # LightGBM binary dataset
 │   ├── models/wals/{fold}/                        # R5 向量（vectors.py 的格式）：该 fold 的 query 用户，全部有向量的商品
 │   ├── models/twotower/vectors/{fold}/            # R6 向量：该 fold 的 query 用户，商品目录的全部商品；fine-tune 之前的模型
@@ -1032,6 +1088,7 @@ hm-recsys/
     ├── m6_runs.csv                   # M6：每个进程一行（fold、channel 或 monitor、耗时、采样峰值、真实峰值）
     ├── m6_candidates.csv             # M6 监控：每个 fold 每一路和六路 union 各一行（T 周没有基于 label 的列）
     ├── m6_twotower_chain.csv         # M6：训练链每个模型的 sha256 和 fine-tune 的行数、loss、耗时
+    ├── m6_features.csv               # M6：每个 fold 每个特征的缺失率、最小值、最大值、均值
     ├── v_phase.csv
     └── t_phase.csv
 ```
@@ -1039,13 +1096,14 @@ hm-recsys/
 ### 14.1 分层规则
 
 ```
-scripts/  →  src/hmrec/{recall, fusion, features, ranker, hpo, pipeline}  →  src/hmrec/{data, eval, vectors, locks, csv_records, run_records}  →  config / paths
+scripts/  →  src/hmrec/{recall, fusion, features, ranker, hpo, pipeline}  →  src/hmrec/{data, eval, vectors, locks, csv_records, run_records, feature_files}  →  config / paths
 ```
 
 - 上层可以调用下层，**下层不能 import 上层**。例如 `data/` 不能 import `recall/`。
 - `recall/`、`features/`、`ranker/` 之间互不 import，通过 `artifacts/` 里的文件交接。
 - `locks.py` 属于底层（只依赖 `config.py` 和标准库）：它只读取、校验 `configs/locks/` 的锁定文件。`recall/` 和 `features/` 都可以 import 它（特征需要某一路的锁定参数时从这里取，不经过 `recall/`）。从锁定文件**构建** channel 在 `recall/locked.py`。
 - `csv_records.py`（只追加、表头固定的结果表的读写）和 `run_records.py`（每个进程一行的运行记录：耗时、采样峰值、真实峰值）属于底层，只依赖标准库和 `memory.py`。
+- `feature_files.py`（特征文件的记录和核对）属于底层，只依赖标准库、polars 和 `locks.py`：`features/` 写记录，`ranker/` 核对，两者互不 import。
 - `pipeline.py`（一个 fold 的各步各用一个独立进程依次运行；每个 fold 的摘要）属于上层，与 `recall/`、`hpo/` 同层：它可以 import `eval/` 和底层模块，`recall/`、`features/`、`ranker/` 不能 import 它。
 - `vectors.py` 属于底层（只依赖 numpy 和标准库），`recall/` 和 `features/` 都可以 import 它：R5 / R6 训练后用它把向量存到 `artifacts/models/{wals,twotower}/{fold}/`，§8.3 的 `wals_dot`、`tt_dot` 用它读取并计算点积。召回分数和点积特征用同一个函数计算，所以同一个 (用户, 商品) 的 R5 `score` 与 `wals_dot` 完全相同。
 - 所有按时间取历史数据的操作都必须经过 `data/asof.py`。
@@ -1061,7 +1119,8 @@ scripts/  →  src/hmrec/{recall, fusion, features, ranker, hpo, pipeline}  → 
 | `recall/generate.py`（R5，通过 `vectors.py`） | `artifacts/models/wals/{fold}/`：`user_customer_idx.npy`、`user_vectors.npy`、`item_article_idx.npy`、`item_vectors.npy`、`vectors.json`（来源、fold） | 用户向量只存该 fold 的 query 用户（其中没有向量的不出现），商品向量全部保存；R5 候选的 `score` 与这些向量的点积逐位相同 | `features/dense.py`（`wals_dot`，通过 `vectors.py`） |
 | `recall/generate.py`（R6，通过 `vectors.py`） | `artifacts/models/twotower/vectors/{fold}/`（同样的 5 个文件） | 用户向量：该 fold 的 query 用户；商品向量：**商品目录的全部商品**（R2 的候选可能在 `A(a)` 外）；用预测这一周时的模型计算（这一周 fine-tune **之前**）；R6 候选的 `score` 与这些向量的点积逐位相同 | `features/dense.py`（`tt_dot`，通过 `vectors.py`） |
 | `recall/generate.py`（R6 训练链） | `artifacts/models/twotower/chain_locked/{fold}.pt`，sha256 记在 `results/m6_twotower_chain.csv` | 在该 fold 上 fine-tune 之后的模型；T4 没有 | 下一个 fold 的 R6（加载前核对 sha256） |
-| `fusion/union.py` + `features/build.py` | `artifacts/features/{fold}/part-*.parquet` | `query_id, article_idx`，§8 的全部特征列 | `ranker/` |
+| `fusion/union.py` + `features/build.py` | `artifacts/features/{fold}/part-*.parquet`、`features.json` | `query_id, article_idx`（int32）和 §8 的 71 个特征（float32；8 个类别特征为 int16 编码），**没有 label 列**；按 `(query_id, article_idx)` 排序，同一个 query 不跨文件；`features.json` 记录各 part 的 sha256、行数和列清单 | `ranker/`（先用 `feature_files.verify_feature_files` 核对，再读取；label 在 `ranker/sampling.py` 中拼接） |
+| `features/categories.py` | `artifacts/features/category_codes.json` | 每个类别字段的取值列表（位置 + 1 = 编码，0 = 缺失），所有 fold 共用 | `ranker/`（解释类别编码时） |
 | `ranker/predict.py` | `artifacts/predictions/{run_id}/{fold}.parquet` | `query_id, article_idx, score, rank` | `eval/` |
 
 Label 只在 `eval/` 和 `ranker/sampling.py` 中读取，**recall 和特征代码永远不读 label**。

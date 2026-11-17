@@ -471,3 +471,62 @@
 - **内存、耗时、磁盘**：任何进程的真实峰值最高 4.70 GB（F2 的 R6），每个 fold 的最高值都来自 R6（4.29–4.70 GB）。F1 用时 323 秒，F2–T4 共 3,251 秒，合计约 60 分钟。磁盘：候选 1.5 GB（每周 110–140 MB）、R5 向量 676 MB、R6 向量 1.0 GB、训练链模型 369 MB，共约 3.6 GB。
 - **提醒**：以上 F、V 的分数只是监控，没有用来选择任何东西；T 周的指标留到 M8。
 - **proposal 已同步**：§1.3（候选生成一行的实测）、§1.4（每周 fine-tune 的实测）。
+
+## 2026-11-17 M6 后半（宽表特征）的实现决定，以及 proposal 没写清楚之处的解释（待用户确认）
+
+以下都是在**生成任何一周的特征之前**确定的。这一条写的是 proposal §8 第一版的 56 个特征；在 commit 之前又新增了 15 个（共 71 个），见下一条。六路候选和 recall 配置没有任何改动。
+
+- **需要用户确认的解释**（proposal §8 的定义没有写到这一层；每一条都已写进 §8 对应小节的"落实"说明）：
+  1. **`pop_is_fallback`**：R1 没有召回的行取 **NaN**，而不是 0。理由：与其他来源列一致（"没被这一路召回则为 NaN"）；0 会和"来自桶内列表"混在一起。
+  2. **"购买行数 / 次数"一律按购买行计**（`item_cnt_*`、`user_cnt_*`、`ui_cnt_item`、`ui_cnt_pcode`，以及 `ui_share_*` 的分子分母）：同一用户同一天买同一商品两行算 2。理由：与 R1、R2 的计数方式一致。
+  3. **`item_repurchase_ratio_52w` 是第 2 条的例外**："买过 2 次及以上"按 **2 个或更多不同的日期**计。理由：同一天的多行通常是一次买多件，不是复购；按行计会把"一次买两件"算成复购。
+  4. **`item_buyer_age_mean_4w`**：对 4w 内的**不同买家**求平均（每个买家一次），只用年龄已知的买家。另一种读法是按购买行加权。
+  5. **`age`**：用表中的原值，16、17 岁（R1 中归入 `AGE_INVALID` 桶）照常保留，不截断、不置为缺失。
+  6. **`item_days_since_first_sale`**："第一次被购买"是数据中（2018-09-20 起）的第一条购买行，不是商品真实的上架日期。
+  7. **`ui_cnt_pcode` / `ui_days_since_pcode`**："同 `product_code` 商品"包括候选商品本身。
+  8. **`ui_share_*_52w`**：分母是用户 52w 内的全部购买行数；用户 52w 内没有购买时为 NaN，有购买但没有同类目的为 0。
+  9. **`ui_price_ratio` / `ui_age_gap`**：任一侧缺失为 NaN；用户均价为 0 时比值也为 NaN。
+  10. **`img_sim_hist` / `txt_sim_hist` 的平均向量**：对最近 20 件中有向量的那些做简单平均，同一商品在 20 件中出现几次就计几次（不同天买同一商品算多件，这是 Two-Tower 历史的定义）；平均后 L2 归一化；候选商品的向量也重新归一化（原始向量的范数只保证在 1 ± 1e-3 以内）。
+  11. **类别特征的存储**：int16 编码，0 = 缺失，1..K = 排序后的取值序号；`fn`、`active`、`n_channels`、`best_rank` 存为 float32。宽表只有 `query_id`、`article_idx` 和 56 个特征，**不带 `customer_idx`**。
+  12. **`configs/locks/features.lock.yaml` 暂不写**（proposal §8.7 原文是"M6 之前写入"）。按用户要求，等 F1 的特征确认后再锁定。
+- **其他实现决定**：
+  1. **"最近 20 件购买"只有一份实现**：`recall/twotower/data.py` 中建历史的函数（`daily_purchases`、`build_histories`、`load_customer_lines_before`、`load_all_lines_before`）移到 `src/hmrec/data/histories.py`，新增 `recent_purchase_histories`；R6 推理的 `query_histories` 和特征代码都调用它。只是移动，行为不变（原有测试全部通过）；按用户要求，在生成特征之前用 M5 的锁定核对对 R6 做一次回归检查。
+  2. **所有窗口都通过 `data/asof.py` 取数**，包括 prev_1w：它是"在 anchor 之前 7 天结束、长 7 天"的窗口（`history_window(anchor − 7d, 7)`），而不是先取 14 天再自己按日期切。
+  3. **每个 fold 先算三类表，再按 query 分块 join**：商品表（商品目录全部商品）、query 用户表、用户-商品 / product_code / 类目的聚合小表（只算 query 用户）。分块大小用 `chunking.query_chunk_size`；512 维 / 384 维的 cosine 另按 `configs/features.yaml` 的 `embedding_pair_chunk_size` 分块。分块只影响内存，不影响结果（有测试）。
+  4. **特征代码不 import `recall/`，不读 label**（扫描测试覆盖 `features/`、`fusion/`、`data/histories.py` 和 `scripts/m6_build_features.py`）。R1 分数表、R5 / R6 向量、六路候选都按文件读取。
+  5. **完成标记和不覆盖**：`features.json` 最后写入；已有它的 fold 跳过；只有 part 文件没有它，视为没做完，报错，不自动清理。自动检查（行数、无重复、两项逐位相同）不通过时不写 `features.json`。
+  6. **均值类特征的可复现性**：`item_price_mean_4w` 等用 Polars 的 group_by 求平均，多线程下 float64 的求和顺序不固定，转成 float32 后极少数值可能在最后一位不同。这不影响任何检查（逐位相同的两项检查用的是 `dot_pairs`，不经过 group_by），但两次运行的特征文件不保证逐字节相同。
+  7. **独立核对脚本** `scripts/checks/check_features.py`：容差为相对 1e-5（宽表存 float32，脚本用 float64 计算）；计数、天数、排名要求完全相等。
+- **没有做的**：`load_fold_data`、`load_candidates`、`load_dense_sources` 三个读盘函数没有单元测试，会在 F1 的运行中第一次执行；`ranker/` 还没有开始。
+- **proposal 已同步**：§8.1–§8.7（落实后的定义）、§14、§14.2。
+
+## 2026-11-17 特征从 56 个增加到 71 个（锁定之前的设计修改）；12 条解释已确认；特征文件的 sha256 记录
+
+- **时间点和性质**：这是在**特征锁定之前、没有生成任何一周的特征、也没有任何 Ranker 结果**的情况下做的设计修改，不是根据分数做的选择。依据是 H&M 比赛第一名方案对用户–商品交互特征和多时间窗口的强调。`configs/locks/features.lock.yaml` 仍未写入。
+- **上一条中的 12 条解释，用户已全部确认**，第 3 条（`item_repurchase_ratio_52w` 按不同日期计）和第 4 条（`item_buyer_age_mean_4w` 按不同买家平均）按当时的读法执行。
+- **新增 15 个特征**（定义见 proposal §8，表中标"新增"；`configs/features.yaml` 更新为 71 个，加载时的数量和名称检查同步更新）：
+  - **B 组 +2**：`tt_sim_max_hist`、`tt_sim_top5_hist`。候选与用户最近 20 件购买（与 `img_sim_hist` 同一份历史）之间，R6 商品向量点积的最大值、最大 5 个的平均（不足 5 件取全部）；没有历史为 NaN。
+  - **C 组 +1**：`item_discount_ratio` = `[a−7, a)` 成交均价 ÷ `[a−364, a)` 成交均价；任一窗口没有销售为 NaN。
+  - **D 组 +1**：`user_purchase_days_52w` = 52w 内有购买的不同日期数；没有为 0。
+  - **E 组 +11**：`ui_decay_ptype` / `garment` / `section` / `colour`（全部历史中同属性购买行按 `exp(−age_days / 30)` 加权求和，没有为 0）；`ui_days_since_ptype` / `section`；`ui_share_section_52w`、`ui_share_pgroup_52w`；`ui_lift_ptype_52w`（用户占比 ÷ 全站 52w 占比）；`ui_channel_gap`；`ui_attr_match_cnt`（6 个类目属性中，候选的取值出现在最近 20 件购买里的个数）。
+  - 各组数量：A 14、B 7、C 17、D 12、E 21，共 71。类别特征仍是 8 个。
+- **两个固定值写进配置，不是超参数**：`decay_tau_days: 30`（`ui_decay_*` 的 τ，与 R2 / R3 / R4 seed 衰减的 τ 相同）、`history_similarity_top_k: 5`。
+- **实现上的解释**（新增特征中 proposal / 用户说明没有写到的细节）：
+  1. `ui_decay_*`、`ui_days_since_*` 按购买行计，"同属性"包括候选商品本身；衰减在 float64 中求和后存为 float32。
+  2. `ui_lift_ptype_52w` 的"全站占比"= 全部用户（不只是 query 用户）52w 内该 `product_type_no` 的购买行数 ÷ 全部购买行数；该类型 52w 内没有任何购买时占比为 0，lift 为 NaN。
+  3. `tt_sim_*`：同一商品在最近 20 件中出现两次（不同天各买一次）就计两次；读取 R6 向量时检查商品向量的范数为 1（±1e-3），否则报错。按 query 逐个计算，不需要额外的分块参数（一个 query 只有"候选数 × 历史件数"的小矩阵）；这一步的耗时单独累计，写进 `features.json` 和 `results/m6_runs.csv` 的 detail，内存在每个分块之后记入日志。
+  4. `ui_attr_match_cnt` 用的"最近 20 件购买"与 `img_sim_hist`、R6 是同一份（`data/histories.py`），所以 52w 之外的旧购买也算在内。
+  5. `item_discount_ratio`：年窗口包含上周，所以上周有销售的商品一定有年均价；只有上周没有销售时为 NaN。
+- **价格均值类特征**（`item_price_mean_4w`、`user_price_mean_52w`、`item_discount_ratio` 的两个均值，以及由它们得到的 `ui_price_ratio`）：聚合前把 `price` 转成 Float64，算完再转 float32。新增测试：4,000 行随机价格的数据打乱行序 5 次，这些特征的 float32 结果完全相同。（最初的实现已经是先转 Float64；这次补上说明和测试。）
+- **特征文件的记录和核对**：新增底层模块 `src/hmrec/feature_files.py`。每个 fold 的 `features.json` 记录每个 part 文件的 sha256、行数，以及列清单；`verify_feature_files` 核对列清单、文件集合、每个文件的 sha256 / 行数 / 列。**M7 读取特征之前必须调用它。**放在底层是因为 `features/` 写、`ranker/` 读，两者不能互相 import。AGENTS.md §5 和 proposal §14.1 的分层图已加入这个模块。
+- **按 71 个特征重算的估算**（proposal §1.3 已更新）：宽表每行 292 B（实际存储 276 B）；一周约 6.9 GB，每块（1 万 query）约 0.83 GB；Ranker 推理每块约 0.81 GB；12 周特征 Parquet 未压缩约 77 GB，压缩后估计 23–46 GB；Ranker 训练的原始特征 r = 80 时约 5.7 GB，贴近 6 GB 上限（本来就要求流式加载）。
+- **备选特征清单（未实现）**：
+  1. 用户的购买间隔，以及"距上次购买天数 ÷ 平均间隔"；
+  2. 商品的典型复购间隔；
+  3. 用户的折扣偏好；
+  4. 商品买家年龄的分布宽度；
+  5. 商品在类目内的热度排名；
+  6. ItemCF 对全部候选的分数（现在只有被 R4 召回的行才有 `icf_score`）。
+
+  这些留到第一版 Ranker 的 feature importance 出来之后，按 §4 的规则在 V1–V4 上**作为一个整体候选**来评估（不逐个挑选）。`postal_code` 相关的特征留给下一版，因为 M0 预处理时删掉了这一列，需要重跑预处理。
+- **测试**：每个新增特征都有手算例子和时间截断测试（anchor 当天及之后的"有毒"交易不改变结果）；独立核对脚本覆盖其中 6 个（`tt_sim_max_hist`、`item_discount_ratio`、`user_purchase_days_52w`、`ui_decay_ptype`、`ui_days_since_section`、`ui_attr_match_cnt`），共核对 25 个特征。
