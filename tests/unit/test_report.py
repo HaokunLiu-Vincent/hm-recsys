@@ -63,3 +63,15 @@ def test_summarize_folds_hand_computed() -> None:
     assert summary.pooled == 0.5
     assert summary.equal_fold == pytest.approx((0.25 + 2 / 3) / 2)
     assert summary.group_scores == {"only_D2": pytest.approx(2 / 3), "both": 0.5}
+
+
+def test_fold_evaluator_union_recall_counts_duplicates_once() -> None:
+    # q1 labels {10, 11}: candidates 10 (twice, from two channels) and 30 -> 1/2.
+    # q2 label {12}: candidate 12 -> 1.
+    candidates = pl.DataFrame(
+        {"query_id": [1, 1, 1, 2], "article_idx": [10, 10, 30, 12]},
+        schema={"query_id": pl.Int32, "article_idx": pl.Int32},
+    )
+    per_query = FoldEvaluator("D1", LABELS).union_recall(candidates)
+    assert per_query["query_id"].to_list() == [1, 2]
+    assert per_query["value"].to_list() == [0.5, 1.0]

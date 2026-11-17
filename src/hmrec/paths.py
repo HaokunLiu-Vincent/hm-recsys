@@ -270,6 +270,15 @@ class ProjectPaths:
         """artifacts/hpo/{phase}/{channel}/{trial_id}/: per-trial side files (pool flags)."""
         return self.artifacts_root / "hpo" / phase / channel / trial_id
 
+    @property
+    def union_precheck_dir(self) -> Path:
+        """artifacts/hpo/D/union_precheck/: R1-R5 union pre-check (kept apart from M4)."""
+        return self.artifacts_root / "hpo" / "D" / "union_precheck"
+
+    def union_precheck_candidates_file(self, fold: str, channel: str, trial_id: str) -> Path:
+        """artifacts/hpo/D/union_precheck/{fold}/{channel}_{trial_id}.parquet."""
+        return self.union_precheck_dir / fold / f"{channel}_{trial_id}.parquet"
+
     # ------------------------------------------------------------ results (committed)
 
     @property
@@ -280,6 +289,11 @@ class ProjectPaths:
     def d_phase_steps_file(self, channel: str) -> Path:
         """results/d_phase_steps/{channel}.csv: every step's candidates and decision."""
         return self.results_root / "d_phase_steps" / f"{channel}.csv"
+
+    @property
+    def union_precheck_results_file(self) -> Path:
+        """results/d_phase_union_precheck.csv: union recall table of the R1-R5 pre-check."""
+        return self.results_root / "d_phase_union_precheck.csv"
 
     @property
     def v_phase_results_file(self) -> Path:

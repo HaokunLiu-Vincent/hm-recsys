@@ -52,6 +52,12 @@ def test_build_paths_derives_everything_from_roots(tmp_path: Path) -> None:
         "/abs/artifacts/predictions/run7/T4.parquet"
     )
     assert paths.d_phase_results_file == tmp_path / "results" / "d_phase.csv"
+    assert paths.union_precheck_candidates_file("D2", "r5_wals", "abc123") == Path(
+        "/abs/artifacts/hpo/D/union_precheck/D2/r5_wals_abc123.parquet"
+    )
+    assert paths.union_precheck_results_file == (
+        tmp_path / "results" / "d_phase_union_precheck.csv"
+    )
 
 
 def test_m0_outputs_live_in_data_processed(tmp_path: Path) -> None:

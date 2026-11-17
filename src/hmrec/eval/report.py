@@ -26,6 +26,7 @@ from hmrec.eval.metrics import (
     per_fold_means,
     query_weighted_mean,
     recall_at_k,
+    union_recall,
 )
 
 IS_HIT = "is_hit"
@@ -84,6 +85,19 @@ class FoldEvaluator:
         if kind == "ndcg":
             return ndcg_at_k(predictions, self.labels, k)
         return average_precision_at_k(predictions, self.labels, k)
+
+    def union_recall(self, candidates: pl.DataFrame) -> pl.DataFrame:
+        """Union recall of every query of this fold (proposal §2.5), with no cut-off.
+
+        Args:
+            candidates: Candidate rows of one or more channels; columns query_id,
+                article_idx. An article returned by several channels counts once.
+
+        Returns:
+            Columns query_id, fold, value (float64); one row per labelled query
+            (a query with no candidate gets 0).
+        """
+        return union_recall(candidates.select(QUERY_ID, ARTICLE_IDX), self.labels)
 
     def mark_hits(self, candidates: pl.DataFrame) -> pl.DataFrame:
         """`candidates` with a bool column is_hit: True if (query_id, article_idx) is a label."""
