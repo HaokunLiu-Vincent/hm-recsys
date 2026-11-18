@@ -14,9 +14,13 @@ from pathlib import Path
 
 REPO = Path(__file__).resolve().parents[2]
 SRC = REPO / "src" / "hmrec"
+# The scripts of the final evaluation, by name. scripts/m8_diagnostics.py is NOT one of them:
+# it belongs to the descriptive diagnostics written after the formal run (hmrec.diagnostics),
+# which have their own rules (tests/unit/test_diag_code_rules.py).
+M8_SCRIPTS = (REPO / "scripts" / "m8_final_eval.py", REPO / "scripts" / "m8_step.py")
 # The code of the final evaluation. ADD every new M8 module here when it is written.
 M8_FILES = (
-    *sorted((REPO / "scripts").glob("m8_*.py")),
+    *M8_SCRIPTS,
     *sorted((SRC / "final").glob("*.py")),
     SRC / "eval" / "final_eval.py",
     SRC / "ranker" / "final_window.py",
@@ -192,7 +196,7 @@ def test_m8_processes_never_import_torch() -> None:
     # Every hmrec import of an M8 script is one of those modules (or below them).
     allowed = ("hmrec.final.", "hmrec.pipeline", "hmrec.threads", "hmrec.logging_utils",
                "hmrec.ranker.ablation")  # fmt: skip
-    for path in sorted((REPO / "scripts").glob("m8_*.py")):
+    for path in M8_SCRIPTS:
         for line in _text(path).splitlines():
             if line.startswith("from hmrec"):
                 assert line.split()[1].startswith(allowed), f"{path.name}: {line}"

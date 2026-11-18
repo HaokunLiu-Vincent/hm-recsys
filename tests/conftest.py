@@ -26,6 +26,9 @@ LIGHTGBM_SIDE_PREFIXES = (
     "test_speed_test",
     "test_m7_",
     "test_final_",  # M8, the final evaluation: it trains LightGBM models too
+    # The diagnostics after M8 train nothing, but they read the Ranker lock and the metric
+    # tables through modules that import lightgbm (hmrec.ranker.locked, hmrec.hpo.v_records).
+    "test_diag_",
 )
 LIGHTGBM_OPTION = "--lightgbm-side"
 _skipped_files: list[str] = []
