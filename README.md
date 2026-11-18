@@ -54,6 +54,10 @@ read; the verdict was written by code to `results/t_phase_goals.csv`):
 | G2 | union recall of the six channels ≥ 24% on every one of T1–T4 | lowest week (T1) 27.88% | **met** |
 | G3 | LambdaMART MAP@12 strictly above the RRF baseline on at least 3 of the 4 weeks | above on all 4 | **met** |
 
+**Kaggle late submission** (one submission, made on 2026-11-19 after the T1–T4 evaluation; the
+procedure was recorded before the run and the score is only reported): Public 0.03548, Private
+0.03600 (§4.6 of the report; branch `kaggle-late-submission`).
+
 **Three things to know when reading these numbers:**
 
 1. **T is 19.8% higher than V** (V1–V4 pooled: 0.032713, `results/v_phase_metrics.csv`), contrary
