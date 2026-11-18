@@ -91,6 +91,14 @@ def test_smaller_ratio_is_a_subset_of_a_larger_ratio() -> None:
     assert set(_pairs(samples[1])) < set(_pairs(samples[2])) < set(_pairs(samples[4]))
 
 
+def test_a_ratio_sample_does_not_depend_on_the_other_ratios_drawn_with_it() -> None:
+    # M7 drew three ratios in one pass; the final evaluation (M8) draws only the locked
+    # one. The rows of that ratio must be the same either way.
+    alone = sample_chunk(ROWS, LABELS, SEED, [2])[2]
+    with_others = sample_chunk(ROWS, LABELS, SEED, [1, 2, 3])[2]
+    assert alone.equals(with_others)
+
+
 def test_a_query_sample_does_not_depend_on_chunking_or_row_order() -> None:
     together = sample_chunk(ROWS, LABELS, SEED, [2])[2]
     only_q1 = sample_chunk(ROWS.filter(pl.col("query_id") == 1), LABELS, SEED, [2])[2]

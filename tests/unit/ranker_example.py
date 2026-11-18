@@ -155,8 +155,8 @@ def write_learnable_fold(
     write_labels(paths.labels_file(fold), fold, labels)
 
 
-def tiny_ranker_config(**overrides: Any) -> RankerConfig:
-    """configs/ranker.yaml shrunk for tiny data: 20 trees, checkpoints every 10.
+def tiny_ranker_raw(**overrides: Any) -> dict[str, Any]:
+    """The raw content of configs/ranker.yaml shrunk for tiny data: 20 trees, checkpoints every 10.
 
     `overrides` replace top-level keys of the raw config (e.g. histogram={...}).
     """
@@ -185,7 +185,12 @@ def tiny_ranker_config(**overrides: Any) -> RankerConfig:
     raw["dataset_params"] = {**raw["dataset_params"], "min_data_in_bin": 1}
     raw["train_params"] = {**raw["train_params"], "min_data_per_group": 5}
     raw.update(overrides)
-    return parse_ranker_config(raw)
+    return raw
+
+
+def tiny_ranker_config(**overrides: Any) -> RankerConfig:
+    """tiny_ranker_raw as a parsed RankerConfig."""
+    return parse_ranker_config(tiny_ranker_raw(**overrides))
 
 
 def tiny_base_config() -> BaseConfig:

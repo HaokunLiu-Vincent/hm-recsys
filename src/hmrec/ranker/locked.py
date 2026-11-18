@@ -13,7 +13,7 @@ After M7 the final evaluation (M8) gets everything about the Ranker from here:
 Code that runs after the lock must NOT read the tuned defaults or the fixed
 parameters from configs/ranker.yaml, must NOT read configs/hpo/v_phase.yaml and
 must NOT replay the selection on results/v_phase*.csv to get a configuration.
-tests/unit/test_ranker_locked.py scans the M8 code for those names.
+tests/unit/test_final_code_rules.py scans the M8 code for those names.
 
 What comes from where:
 

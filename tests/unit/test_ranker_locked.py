@@ -209,36 +209,3 @@ def test_tuned_params_are_read_from_two_sections_of_the_lock() -> None:
     tuned = locked_tuned_params(lock)
     assert (tuned.num_leaves, tuned.min_data_in_leaf) == (31, 500)  # `model`
     assert tuned.negatives_per_positive == 40  # `sampling`
-
-
-# ---------------------------------------------------------------- code rule for M8
-
-# The code of the final evaluation. ADD every new M8 module here when it is written.
-M8_FILES = (*sorted((REPO / "scripts").glob("m8_*.py")),)
-# Ways to get a Ranker configuration that are closed after the lock: configs/ranker.yaml
-# (tuned defaults and fixed parameters), the V-phase grid, the V-phase result tables and
-# the modules that replay the selection.
-PRE_LOCK_RANKER_NAMES = (
-    "load_ranker_config",
-    "ranker_config_file",
-    "tuned_defaults",
-    "load_v_phase_grid",
-    "v_phase_grid_file",
-    "v_phase_results_file",
-    "v_phase_metrics_file",
-    "v_phase_steps_file",
-    "hmrec.hpo.v_phase",
-    "hmrec.hpo.v_lock",
-    "hmrec.hpo.speed_test",
-)
-
-
-def test_m8_code_gets_the_ranker_configuration_only_from_the_lock() -> None:
-    assert [path.name for path in M8_FILES] == ["m8_final_eval.py"]
-    offenders = [
-        f"{path.name}: {name}"
-        for path in M8_FILES
-        for name in PRE_LOCK_RANKER_NAMES
-        if name in path.read_text(encoding="utf-8")
-    ]
-    assert offenders == []

@@ -20,7 +20,13 @@ from pathlib import Path
 
 import pytest
 
-LIGHTGBM_SIDE_PREFIXES = ("test_ranker_", "test_v_", "test_speed_test", "test_m7_")
+LIGHTGBM_SIDE_PREFIXES = (
+    "test_ranker_",
+    "test_v_",
+    "test_speed_test",
+    "test_m7_",
+    "test_final_",  # M8, the final evaluation: it trains LightGBM models too
+)
 LIGHTGBM_OPTION = "--lightgbm-side"
 _skipped_files: list[str] = []
 
