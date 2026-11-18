@@ -56,7 +56,7 @@ from hmrec.ranker.dataset import (
     read_dataset_record,
     save_dataset,
 )
-from hmrec.ranker.predict import RANK, SCORE, score_rows
+from hmrec.ranker.predict import RANK, SCORE, query_chunks, score_rows
 from hmrec.ranker.sampling import LABEL, read_sample_record, record_file, verify_sample_file
 from hmrec.ranker.train import (
     dataset_params,
@@ -256,7 +256,9 @@ def score_fold(
     """Score ALL candidates of a fold (no sampling) and keep the Top-K at every checkpoint.
 
     The frozen wide table is verified first, then read one part file at a time
-    (a part holds whole queries), so only one part is in memory.
+    (a part holds whole queries), so only one part is in memory. A part is scored
+    in pieces of `scoring_query_chunk_size` whole queries: the float32 feature
+    matrix and its copies exist for one piece only (memory only, same scores).
 
     Returns:
         (k -> Top-K table of the whole fold, number of candidate rows scored).
@@ -267,17 +269,18 @@ def score_fold(
     for part in feature_files.parts:
         rows = experiment.apply(pl.read_parquet(features_dir / part.name))
         n_rows += rows.height
-        tops = score_rows(
-            booster,
-            rows,
-            experiment.feature_names,
-            num_trees,
-            inputs.ranker.checkpoint_every,
-            inputs.ranker.top_k,
-            inputs.base.num_threads,
-        )
-        for k, top in tops.items():
-            tables.setdefault(k, []).append(top)
+        for chunk in query_chunks(rows, inputs.ranker.scoring_query_chunk_size):
+            tops = score_rows(
+                booster,
+                chunk,
+                experiment.feature_names,
+                num_trees,
+                inputs.ranker.checkpoint_every,
+                inputs.ranker.top_k,
+                inputs.base.num_threads,
+            )
+            for k, top in tops.items():
+                tables.setdefault(k, []).append(top)
         LOGGER.info("scored %s (%d rows)", part.name, rows.height)
     return {k: pl.concat(frames) for k, frames in tables.items()}, n_rows
 

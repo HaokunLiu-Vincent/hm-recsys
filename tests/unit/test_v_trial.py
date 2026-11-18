@@ -38,14 +38,16 @@ from hmrec.hpo.v_trial import (
     TrialSpec,
     build_and_save_dataset,
     check_trial_settings,
+    load_planned_dataset,
     model_config,
     plan_dataset,
     ranker_config_id,
     rrf_baseline_row,
     run_trial,
+    score_fold,
 )
 from hmrec.ranker.sampling import sample_fold
-from hmrec.ranker.train import load_model
+from hmrec.ranker.train import load_model, train_ranker, training_params
 
 N_QUERIES = 60
 
@@ -182,6 +184,25 @@ def test_trial_trains_scores_and_evaluates(inputs: TrialInputs) -> None:
     # Outputs are never replaced: the same trial again stops before training.
     with pytest.raises(FileExistsError, match="outputs of this trial already exist"):
         run_trial(inputs, _spec(inputs), "c")
+
+
+def test_score_fold_does_not_depend_on_the_scoring_chunk_size(inputs: TrialInputs) -> None:
+    plan = plan_dataset(inputs, "full", "V1", 2, "c")
+    params = training_params(inputs.ranker, inputs.ranker.tuned_defaults, "col_wise", 2)
+    dataset, _ = load_planned_dataset(plan, params)
+    booster, _ = train_ranker(dataset, params, 20, 10)
+    features_dir = inputs.paths.features_dir("V1")
+    results = []
+    for chunk_size in (7, 1, 10_000):  # 7 is the test config; a part holds 30 queries
+        ranker = replace(inputs.ranker, scoring_query_chunk_size=chunk_size)
+        variant = replace(inputs, ranker=ranker)
+        results.append(score_fold(booster, features_dir, plan.experiment, variant, 20))
+    (first_tops, first_rows), *others = results
+    assert first_rows == N_QUERIES * CANDIDATES_PER_QUERY
+    for tops, n_rows in others:
+        assert n_rows == first_rows
+        for k in (10, 20):
+            assert tops[k].equals(first_tops[k])  # same rows, ranks and scores, bit for bit
 
 
 def _check_script():  # noqa: ANN202 (a module loaded from a file)

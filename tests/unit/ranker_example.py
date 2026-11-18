@@ -166,6 +166,7 @@ def tiny_ranker_config(**overrides: Any) -> RankerConfig:
             "num_trees": 20,
             "checkpoint_every": 10,
             "train_metric_every": 10,
+            "scoring_query_chunk_size": 7,
             "sampling": {"seed": 42, "ratios": [2, 4], "row_group_rows": 64},
             "tuned_defaults": {
                 "num_leaves": 4,

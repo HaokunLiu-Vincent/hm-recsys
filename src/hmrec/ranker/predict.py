@@ -7,7 +7,7 @@ THE DEFINITION of "the score with k trees" used by M7 and M8 (staged_raw_scores)
 
 computed with booster.predict(start_iteration=..., num_iteration=checkpoint_every,
 raw_score=True) and added up in float64, in this order. Every tree is evaluated
-once, and one pass gives the scores at every checkpoint (100, 200, ..., 2000).
+once, and one pass gives the scores at every checkpoint (100, 200, ..., 1000).
 
 It is NOT bit-identical to booster.predict(num_iteration=k): the same trees are
 added in another order, so the two differ by floating-point rounding (about
@@ -123,6 +123,41 @@ def top_k_per_query(
         pl.int_range(1, pl.len() + 1, dtype=pl.Int32).over(QUERY_ID).alias(RANK)
     )
     return ranked.filter(pl.col(RANK) <= top_k)
+
+
+def query_chunks(rows: pl.DataFrame, queries_per_chunk: int) -> Iterator[pl.DataFrame]:
+    """Cut a table of whole queries into consecutive pieces of at most N whole queries.
+
+    Used to score a part file in smaller pieces: only memory changes, because a
+    row's score does not depend on which other rows are scored with it, and a
+    query is never split, so its Top-K is taken from all of its candidates.
+
+    Args:
+        rows: One row per (query_id, article_idx); the rows of a query are adjacent
+            and query_id never decreases (the wide table is sorted this way).
+        queries_per_chunk: Maximum number of queries per piece.
+
+    Yields:
+        The pieces in order; concatenated they are exactly `rows`.
+
+    Raises:
+        ValueError: If query_id decreases somewhere (a query could then be split).
+    """
+    if queries_per_chunk <= 0:
+        raise ValueError(f"queries_per_chunk must be > 0, got {queries_per_chunk}")
+    query_ids = rows[QUERY_ID].to_numpy()
+    if len(query_ids) == 0:
+        return
+    steps = np.diff(query_ids)
+    if np.any(steps < 0):
+        raise ValueError("rows must be sorted by query_id before they are cut into chunks")
+    # First row of every query, then the end of the table.
+    starts = np.concatenate(([0], np.flatnonzero(steps) + 1, [len(query_ids)]))
+    n_queries = len(starts) - 1
+    for first_query in range(0, n_queries, queries_per_chunk):
+        last_query = min(first_query + queries_per_chunk, n_queries)
+        start, stop = int(starts[first_query]), int(starts[last_query])
+        yield rows.slice(start, stop - start)
 
 
 def score_rows(

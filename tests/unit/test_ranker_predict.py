@@ -14,6 +14,7 @@ from hmrec.hpo.v_trial import (
 from hmrec.ranker.predict import (
     checkpoints,
     feature_matrix,
+    query_chunks,
     score_rows,
     staged_raw_scores,
     top_k_per_query,
@@ -124,3 +125,46 @@ def test_score_rows_ranks_every_query_at_every_checkpoint(inputs: TrialInputs) -
     for top in tops.values():
         assert top.height == 5 * n_queries  # 12 candidates per query, Top-5 kept
         assert top.group_by("query_id").agg(pl.col("rank").max())["rank"].unique().to_list() == [5]
+
+
+# ---------------------------------------------------------------- scoring in query chunks
+
+
+def test_query_chunks_keep_whole_queries_in_order() -> None:
+    rows = pl.DataFrame(
+        {"query_id": [3, 3, 3, 5, 8, 8, 9], "article_idx": [1, 2, 3, 1, 1, 2, 1]},
+        schema={"query_id": pl.Int32, "article_idx": pl.Int32},
+    )
+    chunks = list(query_chunks(rows, 2))
+    # 4 queries (3, 5, 8, 9) in pieces of 2 queries: {3, 5} and {8, 9}; no query is split.
+    assert [chunk["query_id"].to_list() for chunk in chunks] == [[3, 3, 3, 5], [8, 8, 9]]
+    assert pl.concat(chunks).equals(rows)
+    assert [chunk.height for chunk in query_chunks(rows, 1)] == [3, 1, 2, 1]
+    assert [chunk.height for chunk in query_chunks(rows, 100)] == [7]
+    assert list(query_chunks(rows.head(0), 2)) == []
+
+
+def test_query_chunks_refuse_unsorted_rows_and_bad_sizes() -> None:
+    unsorted = pl.DataFrame({"query_id": [3, 5, 3]}, schema={"query_id": pl.Int32})
+    # Query 3 appears twice, apart: cutting between them would split its candidates.
+    with pytest.raises(ValueError, match="sorted by query_id"):
+        list(query_chunks(unsorted, 1))
+    with pytest.raises(ValueError, match="queries_per_chunk must be > 0"):
+        list(query_chunks(unsorted, 0))
+
+
+@pytest.mark.parametrize("queries_per_chunk", [1, 7, 30])
+def test_scoring_in_chunks_gives_identical_scores_and_top_k(
+    inputs: TrialInputs, queries_per_chunk: int
+) -> None:
+    # A row's score does not depend on the rows scored with it, and a query is never
+    # split. So scores (bit for bit), ranks and the Top-K rows must be exactly the same.
+    booster, rows = _model_and_rows(inputs)
+    whole = score_rows(booster, rows, booster.feature_name(), 20, 10, 12, 2)
+    pieces: dict[int, list[pl.DataFrame]] = {}
+    for chunk in query_chunks(rows, queries_per_chunk):
+        for k, top in score_rows(booster, chunk, booster.feature_name(), 20, 10, 12, 2).items():
+            pieces.setdefault(k, []).append(top)
+    assert sorted(pieces) == sorted(whole)
+    for k, frames in pieces.items():
+        assert pl.concat(frames).equals(whole[k])
