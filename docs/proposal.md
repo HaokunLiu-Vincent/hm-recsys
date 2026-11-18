@@ -60,7 +60,7 @@
 | 机器 | MacBook Pro，Apple **M1 Max**（10 核 CPU + 32 核 GPU） |
 | 项目可用 CPU | **6 核** |
 | 项目可用 GPU | **28 核**（PyTorch **MPS** 后端） |
-| 项目可用内存 | **8 GB 统一内存（unified memory），CPU 和 GPU 共用**。这是项目自己定的预算；本机的物理内存是 32 GB |
+| 项目可用内存 | **12 GB 统一内存（unified memory），CPU 和 GPU 共用**（2026-11-18 之前是 8 GB，见 §1.3）。这是项目自己定的预算；本机的物理内存是 32 GB |
 | 云端 | 不使用。只有本机跑不了时才考虑 Colab |
 
 ### 1.2 软件约定
@@ -76,11 +76,13 @@
 | Python 环境 | — | **Python 3.12**（`.python-version`），由 **uv** 管理（`.venv`）；依赖写在 `pyproject.toml`，精确版本由 **`uv.lock`** 锁定（进 git） |
 | 开发工具 | — | `ruff` 格式化和 lint；**Pyright**（`standard` 模式）类型检查；`pytest` 测试。与 §15 一致 |
 
-### 1.3 8 GB 内存的约束和对策
+### 1.3 内存预算（12 GB）的约束和对策
 
-8 GB 是最主要的限制。它是项目自己定的内存预算（§1.1；本机物理内存 32 GB）。**单个进程的真实峰值上限为 8 GB**（`configs/base.yaml` 的 `memory.limit_gb`），等于预算。**重任务一次只跑一个**，不并行。
+内存是最主要的限制。预算是项目自己定的（§1.1；本机物理内存 32 GB），现在是 12 GB。**单个进程的真实峰值上限为 12 GB**（`configs/base.yaml` 的 `memory.limit_gb`），等于预算。**重任务一次只跑一个**，不并行。
 
-上限的变化（都在 2026-11-18，见 `docs/decisions.md`）：最初是"约 6 GB"；F1 特征生成的真实峰值是 6.10 GB，用户决定不改代码，把上限调到 7 GB（"留 1 GB 余量"）；随后 V1 的真实峰值是 7.002 GB，而本机物理内存是 32 GB，"留余量防止交换"的理由不成立，上限改为等于预算的 8 GB。下表和表下说明中写于此前的"6 GB 上限""6 GB 以内"指当时的上限，作为记录保留，没有改写。
+上限只是警戒线：超过时进程在写完运行记录之后报错，让人来决定；它不参与任何计算，不影响结果和速度。**分块设置（`configs/base.yaml` 的 `chunking`、`configs/ranker.yaml` 的 `scoring_query_chunk_size` 等）不随上限放宽**，每个进程的真实峰值照常记录。到 2026-11-18 为止实测的最高真实峰值是 V2 特征生成的 7.25 GB。
+
+上限的变化（都在 2026-11-18，见 `docs/decisions.md`）：最初是"约 6 GB"；F1 特征生成的真实峰值是 6.10 GB，用户决定不改代码，把上限调到 7 GB（"留 1 GB 余量"）；随后 V1 的真实峰值是 7.002 GB，而本机物理内存是 32 GB，"留余量防止交换"的理由不成立，上限改为等于当时预算的 8 GB；M7 第 1 步之后、第 2 步之前，预算和上限一起改为 12 GB。下表、表下说明和后面各节中写于此前的"6 GB 上限""6 GB 以内""8 GB"指当时的上限，作为记录保留，没有改写。
 
 | 任务 | 估算内存 | 实测 | 对策 |
 |---|---|---|---|
@@ -129,7 +131,7 @@
 - **采样峰值**（`MemoryTracker`，`peak_rss` / `sampled_peak_rss_gb`）：后台线程用 psutil 定时采样 RSS（间隔见 `configs/base.yaml` 的 `memory.sample_interval_seconds`），取所有采样值和开始、结束读数中的最大值。可以**分阶段**测（每个阶段一个 tracker），用来定位内存用在哪里；但比采样间隔还短的瞬时峰值测不到，所以只是**下限**。
 - **真实峰值**（`read_process_peak_memory`，`process_max_rss_gb`）：标准库 `resource.getrusage(RUSAGE_SELF).ru_maxrss`，操作系统记录的、进程启动以来的最大 RSS，不会漏掉瞬时峰值，与 `/usr/bin/time -l` 读的是同一个计数器。但它**只有整个进程的一个数**，不能清零，所以说不出峰值出在哪个阶段。单位随系统不同（macOS 是字节，Linux 是 KB），由 `ru_maxrss_to_bytes` 换算。子进程不计入本进程的 RSS，另外记录 `RUSAGE_CHILDREN`（已结束的子进程中最大的一个，不是总和）。
 
-是否超过上限（8 GB；2026-11-18 之前是 6 GB，当天曾短暂为 7 GB）**以真实峰值为准**；采样峰值用来找出是哪个阶段造成的。每个 `MemoryTracker` 结束时两种数字都写进日志（真实峰值在相邻两个阶段的日志之间变大，说明尖峰出在后一个阶段）；脚本在最后一步调用 `log_process_peak_memory`，并把真实峰值写进这次运行的结果记录（M5 的锁定核对写到 `results/m5_lock_check.csv`）。**2026-11-17（M5）之前的数字**：上表中标为"采样"或 MemoryTracker 的都是采样峰值（下限）；标为 `/usr/bin/time` 的是真实峰值，但只出现在终端输出里，没有写入运行日志。MPS 张量占用的统一内存不一定全部计入 RSS，两种峰值都受此影响。
+是否超过上限（12 GB；2026-11-18 之前是 6 GB，当天先后改为 7 GB、8 GB、12 GB）**以真实峰值为准**；采样峰值用来找出是哪个阶段造成的。每个 `MemoryTracker` 结束时两种数字都写进日志（真实峰值在相邻两个阶段的日志之间变大，说明尖峰出在后一个阶段）；脚本在最后一步调用 `log_process_peak_memory`，并把真实峰值写进这次运行的结果记录（M5 的锁定核对写到 `results/m5_lock_check.csv`）。**2026-11-17（M5）之前的数字**：上表中标为"采样"或 MemoryTracker 的都是采样峰值（下限）；标为 `/usr/bin/time` 的是真实峰值，但只出现在终端输出里，没有写入运行日志。MPS 张量占用的统一内存不一定全部计入 RSS，两种峰值都受此影响。
 
 ### 1.4 Two-Tower 速度估算（M1 Max）
 
@@ -905,7 +907,7 @@ V4 结束后、T1 之前，把 Ranker 配置写进 `configs/locks/ranker.lock.ya
 
 ## 11. 实施顺序（Milestones）
 
-内存只有 8 GB，**重任务一次只跑一个**。
+内存预算是 12 GB（§1.3），**重任务一次只跑一个**。
 
 | # | 内容 | 产出 | 完成标准 | 状态 |
 |---|---|---|---|---|
@@ -916,7 +918,7 @@ V4 结束后、T1 之前，把 Ranker 配置写进 `configs/locks/ranker.lock.ya
 | M4 | D 阶段 union 检查（§5.7） | union recall 表 | **G2 达标**，否则回到 M2 / M3 | **完成**（4 周合并 25.24%，G2 达标；R3 按预先登记的规则改为只输出 `A(a)`） |
 | M5 | **冻结全部 recall 配置**（打 git tag） | `channels.lock.yaml`、`twotower.lock.yaml` | 之后不再修改 | **完成**（2026-11-17 写入锁定文件；锁定后在 D1 上重新生成候选、与记录逐位核对的结果，以及 tag，见 `docs/decisions.md`） |
 | M6 | 逐周生成 F1–T4 的候选和宽表特征（Two-Tower 沿训练链逐周推进） | `artifacts/candidates/`、`artifacts/features/` | 每周通过时间截断测试 | 12 周的候选（2026-11-17）和特征（2026-11-18）都已生成并通过检查；特征已锁定（`features.lock.yaml`，tag `lock-features-v1`）。待用户确认 |
-| M7 | Ranker 在 V1–V4 上滚动 HPO + baseline + 系统 ablation | `results/v_phase.csv` | `ranker.lock.yaml`；**G1、G3 在 V 上达标** | 代码和测试已写（2026-11-18，§9.7）；选择规则已写进 `configs/hpo/v_phase.yaml`。测速已完成（2026-11-18，§9.7）：选定 row-wise，默认配置 300 棵在 V1 上 MAP@12 0.0297（RRF baseline 0.0185）。树的上限改为 1000。下一步：只运行第 1 步（6 组参数 × 4 周）和 V1–V4 的 RRF baseline，结束后停下汇报 |
+| M7 | Ranker 在 V1–V4 上滚动 HPO + baseline + 系统 ablation | `results/v_phase.csv` | `ranker.lock.yaml`；**G1、G3 在 V 上达标** | 代码和测试已写（2026-11-18，§9.7）；选择规则已写进 `configs/hpo/v_phase.yaml`。测速已完成（2026-11-18，§9.7）：选定 row-wise，默认配置 300 棵在 V1 上 MAP@12 0.0297（RRF baseline 0.0185）。树的上限改为 1000。**第 1 步已完成**（2026-11-18，24 个 trial，结果在 `results/v_phase*.csv`，记录见 `docs/decisions.md`）：按规则保留默认配置（31 叶、`min_data_in_leaf` 500、r = 40），k = 500，V1–V4 合并 MAP@12 **0.032713**；五个候选在各自的 k 上都低于默认（−0.21% 到 −0.56%）。RRF baseline 合并 0.019419（四周 0.018511 / 0.019064 / 0.020604 / 0.019662）。**G1 目前达标**，但只高出 0.032 约 2.2%，而且 V 上的分数偏乐观（k 和参数就是在这四周上选的），所以 T 上是否达标现在不能确定；**G3 目前达标**（4 周都高于 baseline）。下一步：第 2 步（r = 60、80，各 4 周）；选中的不是 80 且赢家的 k 不是 1000 时，继续做去掉 R6 的 ablation 和 feature importance。`ranker.lock.yaml` 还没有写 |
 | M8 | T1–T4 最终评估 | 最终报告 | 报告 G1–G3 | |
 
 M2 中计算量小的 R1–R3 可以和 M3 的 Two-Tower 训练同时跑；R4 建图和 R5 拟合不要和 Two-Tower 同时跑。

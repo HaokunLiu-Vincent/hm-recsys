@@ -84,7 +84,7 @@ H&M 个性化时尚推荐（Kaggle H&M 数据集）。目标：预测每个用�
 
 | 资源 | 限制 |
 |---|---|
-| 内存 | **项目的内存预算是 8 GB，CPU 和 GPU 共用**（项目自己定的预算；本机物理内存 32 GB）。单个进程的真实峰值上限为 **8 GB**，等于预算 |
+| 内存 | **项目的内存预算是 12 GB，CPU 和 GPU 共用**（项目自己定的预算；本机物理内存 32 GB）。单个进程的真实峰值上限为 **12 GB**，等于预算。上限是警戒线，不影响任何计算结果；分块设置不随它放宽 |
 | CPU | 6 线程：`num_threads=6`，`n_jobs=6`，`OMP_NUM_THREADS=6` |
 | GPU | Apple M1 Max，PyTorch **MPS**（`device="mps"`）。没有 CUDA |
 | Python | **3.12**（`.python-version`），环境由 **uv** 管理（`.venv` + `uv.lock`） |
