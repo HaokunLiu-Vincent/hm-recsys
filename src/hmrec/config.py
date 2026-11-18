@@ -2195,3 +2195,123 @@ def parse_final_eval_config(raw: Mapping[str, Any]) -> FinalEvalConfig:
 def load_final_eval_config(path: Path) -> FinalEvalConfig:
     """Read and validate configs/m8_final.yaml."""
     return parse_final_eval_config(load_yaml(path))
+
+
+# ---------------------------------------------------------------- m8_diagnostics.yaml
+
+# The phases whose folds have recorded Ranker / baseline / union-recall numbers
+# (results/v_phase*.csv and results/m6_candidates.csv; results/t_phase*.csv).
+DIAGNOSTIC_RESULT_PHASES = ("V", "T")
+DIAGNOSTIC_LABEL_PHASES = ("D", "F", "V", "T")
+
+
+@dataclass(frozen=True)
+class DiagnosticsConfig:
+    """Settings from configs/m8_diagnostics.yaml: descriptive diagnostics after M8.
+
+    Nothing here selects or tunes anything; the values only say what is described.
+
+    Attributes:
+        decomposition_phases: Phases of table A (one row per fold).
+        concentration_phases: Phases of table B (one row per fold).
+        query_group_phases: Phases of table C (one row per fold and query group).
+        bootstrap_phases: Phases of table D (the folds of a phase are pooled).
+        top_article_counts: Table B: the N of "the N most bought articles", ascending.
+        new_article_days: Table B: an article is new if its first sale is in
+            [anchor - new_article_days, anchor).
+        recent_purchase_days: Table C: a customer bought recently if the last
+            purchase is at most this many days before the anchor.
+        bootstrap_replicates: Table D: number of bootstrap replicates.
+        bootstrap_seed: Table D: seed of the random draws.
+        confidence_level: Table D: e.g. 0.95 for the 2.5% and 97.5% quantiles.
+    """
+
+    decomposition_phases: tuple[str, ...]
+    concentration_phases: tuple[str, ...]
+    query_group_phases: tuple[str, ...]
+    bootstrap_phases: tuple[str, ...]
+    top_article_counts: tuple[int, ...]
+    new_article_days: int
+    recent_purchase_days: int
+    bootstrap_replicates: int
+    bootstrap_seed: int
+    confidence_level: float
+
+
+def _get_phases(
+    raw: Mapping[str, Any], key: str, where: str, allowed: tuple[str, ...]
+) -> tuple[str, ...]:
+    """A non-empty list of distinct phases, each one of `allowed`."""
+    phases = get_str_list(raw, key, where)
+    if not phases or len(set(phases)) != len(phases) or not set(phases) <= set(allowed):
+        raise ValueError(f"{where}.{key} must be distinct phases from {allowed}, got {phases}")
+    return phases
+
+
+def _get_top_article_counts(raw: Mapping[str, Any], where: str) -> tuple[int, ...]:
+    """`top_article_counts`: a non-empty, strictly ascending list of positive integers."""
+    value = raw["top_article_counts"]
+    is_int_list = isinstance(value, list) and all(
+        isinstance(item, int) and not isinstance(item, bool) for item in value
+    )
+    if not is_int_list or not value or value[0] <= 0 or sorted(set(value)) != value:
+        raise ValueError(
+            f"{where}.top_article_counts must be ascending positive integers, got {value!r}"
+        )
+    return tuple(value)
+
+
+def parse_diagnostics_config(raw: Mapping[str, Any]) -> DiagnosticsConfig:
+    """Build a DiagnosticsConfig from the parsed content of configs/m8_diagnostics.yaml.
+
+    Raises:
+        ValueError: If a key is missing or unknown, a phase list is empty, repeats
+            or names a phase without the needed records, or a number is out of range.
+    """
+    where = "m8_diagnostics"
+    keys = {
+        "decomposition_phases",
+        "concentration_phases",
+        "concentration",
+        "query_group_phases",
+        "query_groups",
+        "bootstrap_phases",
+        "bootstrap",
+    }
+    check_keys(raw, keys, where)
+    concentration = get_mapping(raw, "concentration", where)
+    check_keys(concentration, {"top_article_counts", "new_article_days"}, f"{where}.concentration")
+    query_groups = get_mapping(raw, "query_groups", where)
+    check_keys(query_groups, {"recent_purchase_days"}, f"{where}.query_groups")
+    bootstrap = get_mapping(raw, "bootstrap", where)
+    check_keys(bootstrap, {"n_replicates", "seed", "confidence_level"}, f"{where}.bootstrap")
+    result_phases = DIAGNOSTIC_RESULT_PHASES
+    config = DiagnosticsConfig(
+        decomposition_phases=_get_phases(raw, "decomposition_phases", where, result_phases),
+        concentration_phases=_get_phases(
+            raw, "concentration_phases", where, DIAGNOSTIC_LABEL_PHASES
+        ),
+        query_group_phases=_get_phases(raw, "query_group_phases", where, result_phases),
+        bootstrap_phases=_get_phases(raw, "bootstrap_phases", where, result_phases),
+        top_article_counts=_get_top_article_counts(concentration, f"{where}.concentration"),
+        new_article_days=get_int(concentration, "new_article_days", f"{where}.concentration"),
+        recent_purchase_days=get_int(query_groups, "recent_purchase_days", f"{where}.query_groups"),
+        bootstrap_replicates=get_int(bootstrap, "n_replicates", f"{where}.bootstrap"),
+        bootstrap_seed=get_int(bootstrap, "seed", f"{where}.bootstrap"),
+        confidence_level=get_float(bootstrap, "confidence_level", f"{where}.bootstrap"),
+    )
+    require_positive(config.new_article_days, f"{where}.concentration.new_article_days")
+    require_positive(config.recent_purchase_days, f"{where}.query_groups.recent_purchase_days")
+    require_positive(config.bootstrap_replicates, f"{where}.bootstrap.n_replicates")
+    if config.bootstrap_seed < 0:
+        raise ValueError(f"{where}.bootstrap.seed must be >= 0, got {config.bootstrap_seed}")
+    if not 0 < config.confidence_level < 1:
+        raise ValueError(
+            f"{where}.bootstrap.confidence_level must be in (0, 1), got {config.confidence_level}"
+        )
+    return config
+
+
+def load_diagnostics_config(path: Path) -> DiagnosticsConfig:
+    """Read and validate configs/m8_diagnostics.yaml."""
+    return parse_diagnostics_config(load_yaml(path))

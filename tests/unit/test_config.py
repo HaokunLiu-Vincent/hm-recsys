@@ -19,6 +19,7 @@ from hmrec.config import (
     load_base_config,
     load_candidate_run_config,
     load_catalog_config,
+    load_diagnostics_config,
     load_features_config,
     load_final_eval_config,
     load_itemcf_config,
@@ -36,6 +37,7 @@ from hmrec.config import (
     parse_base_config,
     parse_candidate_run_config,
     parse_catalog_config,
+    parse_diagnostics_config,
     parse_features_config,
     parse_final_eval_config,
     parse_itemcf_config,
@@ -720,3 +722,67 @@ def test_m8_final_config_refuses_missing_and_unknown_keys() -> None:
     del raw["rehearsal"]
     with pytest.raises(ValueError, match="missing keys"):
         parse_final_eval_config(raw)
+
+
+# ---------------------------------------------------------------- m8_diagnostics.yaml
+
+
+def _diagnostics_raw() -> dict:
+    return copy.deepcopy(load_yaml(REPO_CONFIGS / "m8_diagnostics.yaml"))
+
+
+def test_repo_m8_diagnostics_yaml_holds_what_the_user_asked_for() -> None:
+    config = load_diagnostics_config(REPO_CONFIGS / "m8_diagnostics.yaml")
+    # A and C: V1-T4. B: all 16 weeks D1-T4. D: T and V, each pooled over its 4 weeks.
+    assert config.decomposition_phases == ("V", "T")
+    assert config.concentration_phases == ("D", "F", "V", "T")
+    assert config.query_group_phases == ("V", "T")
+    assert config.bootstrap_phases == ("T", "V")
+    assert config.top_article_counts == (100, 1000)
+    assert config.new_article_days == 28
+    assert config.recent_purchase_days == 30
+    assert config.bootstrap_replicates == 1000
+    assert config.bootstrap_seed == 42
+    assert config.confidence_level == 0.95
+
+
+def test_m8_diagnostics_config_refuses_bad_values() -> None:
+    cases = [
+        # D and F folds have no recorded Ranker results: tables A, C and D cannot cover them.
+        (("decomposition_phases",), ["D", "V"], "must be distinct phases from"),
+        (("query_group_phases",), ["F"], "must be distinct phases from"),
+        (("bootstrap_phases",), ["T", "T"], "must be distinct phases from"),
+        (("concentration_phases",), [], "must be distinct phases from"),
+        (("concentration_phases",), ["X"], "must be distinct phases from"),
+        (("concentration", "top_article_counts"), [1000, 100], "ascending positive integers"),
+        (("concentration", "top_article_counts"), [0, 100], "ascending positive integers"),
+        (("concentration", "top_article_counts"), [], "ascending positive integers"),
+        (("concentration", "top_article_counts"), [100.0], "ascending positive integers"),
+        (("concentration", "new_article_days"), 0, "must be > 0"),
+        (("query_groups", "recent_purchase_days"), -1, "must be > 0"),
+        (("bootstrap", "n_replicates"), 0, "must be > 0"),
+        (("bootstrap", "seed"), -1, "seed must be >= 0"),
+        (("bootstrap", "confidence_level"), 95, "must be in \\(0, 1\\)"),  # 95 is not 95%
+        (("bootstrap", "confidence_level"), 1.0, "must be in \\(0, 1\\)"),
+    ]
+    for keys, value, message in cases:
+        raw = _diagnostics_raw()
+        node = raw
+        for key in keys[:-1]:
+            node = node[key]
+        node[keys[-1]] = value
+        with pytest.raises(ValueError, match=message):
+            parse_diagnostics_config(raw)
+
+
+def test_m8_diagnostics_config_refuses_missing_and_unknown_keys() -> None:
+    for section in (None, "concentration", "query_groups", "bootstrap"):
+        raw = _diagnostics_raw()
+        node = raw if section is None else raw[section]
+        node["surprise"] = 1
+        with pytest.raises(ValueError, match="surprise"):
+            parse_diagnostics_config(raw)
+    raw = _diagnostics_raw()
+    del raw["bootstrap"]["seed"]
+    with pytest.raises(ValueError, match="seed"):
+        parse_diagnostics_config(raw)

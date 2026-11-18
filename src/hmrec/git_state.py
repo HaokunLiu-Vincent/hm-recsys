@@ -12,6 +12,7 @@ recall channels and with them torch; hmrec.hpo.runner still re-exports them.
 """
 
 import subprocess
+from collections.abc import Sequence
 from pathlib import Path
 
 from hmrec.logging_utils import get_logger
@@ -93,3 +94,39 @@ def code_changed_since(repo_root: Path, earlier_commit: str) -> bool:
             f"git cannot compare {earlier_commit!r} with HEAD: {result.stderr.strip()}"
         )
     return result.returncode == 1
+
+
+def changed_existing_files(repo_root: Path, earlier_commit: str, paths: Sequence[str]) -> list[str]:
+    """Files under `paths` that existed at `earlier_commit` and are changed or gone at HEAD.
+
+    A file ADDED since `earlier_commit` is not listed: new files are allowed. A
+    renamed file counts as deleted (renames are not followed), so moving a file
+    away is seen. Compares committed trees only, like code_changed_since.
+
+    Args:
+        repo_root: Root of the git repository.
+        earlier_commit: A full commit hash recorded by an earlier run.
+        paths: Files or folders relative to repo_root, e.g. ("configs", "src/hmrec/final").
+
+    Returns:
+        One entry per changed file, "<status> <path>" with git's status letter
+        (M = modified, D = deleted, T = type changed), in git's order. Empty if
+        every file that existed then is unchanged.
+
+    Raises:
+        ValueError: If git cannot compare the two commits.
+    """
+    command = ["git", "diff", "--name-status", "--no-renames", earlier_commit, "HEAD", "--"]
+    result = subprocess.run(
+        [*command, *paths], cwd=repo_root, capture_output=True, text=True, check=False
+    )
+    if result.returncode != 0:
+        raise ValueError(
+            f"git cannot compare {earlier_commit!r} with HEAD: {result.stderr.strip()}"
+        )
+    changed: list[str] = []
+    for line in result.stdout.splitlines():
+        status, _, name = line.partition("\t")
+        if status != "A":  # "A" = added since the earlier commit, which is allowed
+            changed.append(f"{status} {name}")
+    return changed

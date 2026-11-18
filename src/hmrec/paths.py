@@ -124,6 +124,11 @@ class ProjectPaths:
         return self.configs_dir / "m8_final.yaml"
 
     @property
+    def m8_diagnostics_config_file(self) -> Path:
+        """configs/m8_diagnostics.yaml: what the descriptive diagnostics after M8 describe."""
+        return self.configs_dir / "m8_diagnostics.yaml"
+
+    @property
     def m6_config_file(self) -> Path:
         """configs/m6_candidates.yaml: monitoring and stop settings of M6 candidate generation."""
         return self.configs_dir / "m6_candidates.yaml"
@@ -591,6 +596,31 @@ class ProjectPaths:
     def m8_runs_file(self) -> Path:
         """results/m8_runs.csv: one row per M8 helper process (sampling, Dataset, monitor, ...)."""
         return self.results_root / "m8_runs.csv"
+
+    @property
+    def t_diag_label_access_file(self) -> Path:
+        """results/t_diag_label_access.csv: every later read of T labels for diagnostics."""
+        return self.results_root / "t_diag_label_access.csv"
+
+    @property
+    def t_diag_decomposition_file(self) -> Path:
+        """results/t_diag_decomposition.csv: union recall, Recall@12, their ratio and MAP@12."""
+        return self.results_root / "t_diag_decomposition.csv"
+
+    @property
+    def t_diag_concentration_file(self) -> Path:
+        """results/t_diag_concentration.csv: how concentrated each label week's purchases are."""
+        return self.results_root / "t_diag_concentration.csv"
+
+    @property
+    def t_diag_query_groups_file(self) -> Path:
+        """results/t_diag_query_groups.csv: query groups by purchase history and their scores."""
+        return self.results_root / "t_diag_query_groups.csv"
+
+    @property
+    def t_diag_bootstrap_file(self) -> Path:
+        """results/t_diag_bootstrap.csv: bootstrap confidence intervals of the pooled MAP@12."""
+        return self.results_root / "t_diag_bootstrap.csv"
 
 
 def build_paths(config: BaseConfig, project_root: Path) -> ProjectPaths:

@@ -215,3 +215,24 @@ def test_paths_of_the_final_evaluation(tmp_path: Path) -> None:
         lgb / "t_phase" / "minus_r6" / "T1_r40"
     )
     assert paths.ranker_dataset_dir("full", "V4", 40) == lgb / "full" / "V4_r40"
+
+
+def test_paths_of_the_diagnostics_after_m8(tmp_path: Path) -> None:
+    paths = build_paths(make_config("data", "artifacts"), tmp_path)
+    results = tmp_path / "results"
+    assert paths.m8_diagnostics_config_file == tmp_path / "configs" / "m8_diagnostics.yaml"
+    assert paths.t_diag_label_access_file == results / "t_diag_label_access.csv"
+    assert paths.t_diag_decomposition_file == results / "t_diag_decomposition.csv"
+    assert paths.t_diag_concentration_file == results / "t_diag_concentration.csv"
+    assert paths.t_diag_query_groups_file == results / "t_diag_query_groups.csv"
+    assert paths.t_diag_bootstrap_file == results / "t_diag_bootstrap.csv"
+    # The diagnostics' tables are other files than the records of the formal run.
+    diag_files = {
+        paths.t_diag_label_access_file,
+        paths.t_diag_decomposition_file,
+        paths.t_diag_concentration_file,
+        paths.t_diag_query_groups_file,
+        paths.t_diag_bootstrap_file,
+    }
+    assert len(diag_files) == 5 and all(path.name.startswith("t_diag_") for path in diag_files)
+    assert paths.t_phase_label_access_file not in diag_files

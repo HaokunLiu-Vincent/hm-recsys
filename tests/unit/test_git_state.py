@@ -84,3 +84,35 @@ def test_code_changed_since_fails_on_a_commit_git_does_not_know(tmp_path: Path) 
     _commit(tmp_path, "src/model.py", "x = 1\n")
     with pytest.raises(ValueError, match="git cannot compare"):
         git_state_module.code_changed_since(tmp_path, "0" * 40)
+
+
+def test_changed_existing_files_allows_new_files_only(tmp_path: Path) -> None:
+    _git(tmp_path, "init", "-q")
+    _commit(tmp_path, "configs/m8_final.yaml", "goals: 1\n")
+    _commit(tmp_path, "src/hmrec/final/gate.py", "x = 1\n")
+    start = _commit(tmp_path, "scripts/m8_step.py", "y = 1\n")
+    protected = ("configs", "src/hmrec/final", "scripts/m8_step.py")
+    assert git_state_module.changed_existing_files(tmp_path, start, protected) == []
+    # NEW files under the protected paths, and any change outside them, are allowed.
+    _commit(tmp_path, "configs/m8_diagnostics.yaml", "seed: 42\n")
+    _commit(tmp_path, "src/hmrec/final/new_module.py", "z = 1\n")
+    _commit(tmp_path, "src/hmrec/diagnostics/run.py", "w = 1\n")
+    _commit(tmp_path, "scripts/m8_diagnostics.py", "v = 1\n")
+    assert git_state_module.changed_existing_files(tmp_path, start, protected) == []
+    # A file that existed then and is modified, deleted or moved away is reported.
+    _commit(tmp_path, "configs/m8_final.yaml", "goals: 2\n")
+    _git(tmp_path, "rm", "-q", "scripts/m8_step.py")
+    _git(tmp_path, "mv", "src/hmrec/final/gate.py", "src/hmrec/final/renamed.py")
+    _git(tmp_path, "commit", "-q", "-m", "delete and rename")
+    assert git_state_module.changed_existing_files(tmp_path, start, protected) == [
+        "M configs/m8_final.yaml",
+        "D scripts/m8_step.py",
+        "D src/hmrec/final/gate.py",
+    ]
+
+
+def test_changed_existing_files_fails_on_a_commit_git_does_not_know(tmp_path: Path) -> None:
+    _git(tmp_path, "init", "-q")
+    _commit(tmp_path, "src/model.py", "x = 1\n")
+    with pytest.raises(ValueError, match="git cannot compare"):
+        git_state_module.changed_existing_files(tmp_path, "0" * 40, ("src",))
