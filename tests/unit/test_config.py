@@ -93,10 +93,11 @@ def test_parse_base_config_reads_all_fields() -> None:
 
 def test_repo_base_yaml_matches_agents_md_limits() -> None:
     config = load_base_config(REPO_CONFIGS / "base.yaml")
-    # AGENTS.md §4: 6 threads; the true peak of one process is at most 8 GB, the
-    # project's memory budget (6 GB, then 7 GB, until 2026-11-18; see docs/decisions.md).
+    # AGENTS.md §4: 6 threads; the true peak of one process is at most 12 GB, the
+    # project's memory budget (6 GB, 7 GB, then 8 GB before; see docs/decisions.md,
+    # 2026-11-18). The expected value changed because the user changed the limit.
     assert config.num_threads == 6
-    assert config.memory.limit_gb == 8.0
+    assert config.memory.limit_gb == 12.0
     assert config.paths.data_root == "data"
     assert config.paths.artifacts_root == "artifacts"
 

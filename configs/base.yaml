@@ -12,12 +12,15 @@ num_threads: 6               # CPU threads for Polars / LightGBM / implicit (AGE
 
 memory:
   # Upper limit of the TRUE peak RSS (ru_maxrss) of one process, in GB (proposal §1.3).
-  # It equals the project's memory budget of 8 GB. The budget is the project's own
+  # It equals the project's memory budget of 12 GB. The budget is the project's own
   # choice: the machine has 32 GB of physical memory, so no margin below the budget is
-  # needed to avoid swapping. History (docs/decisions.md, 2026-11-18): 6.0, then 7.0
-  # after the F1 feature build peaked at 6.10 GB, then 8.0 after V1 peaked at 7.002 GB;
-  # the feature build code was left unchanged both times.
-  limit_gb: 8.0
+  # needed to avoid swapping. The limit is a warning line only: it changes no computed
+  # result and no speed, and the chunk sizes below were NOT changed with it.
+  # History (docs/decisions.md, 2026-11-18): 6.0, then 7.0 after the F1 feature build
+  # peaked at 6.10 GB, then 8.0 after V1 peaked at 7.002 GB (the feature build code was
+  # left unchanged both times), then 12.0 before step 2 of the V phase. The highest
+  # true peak measured so far is 7.25 GB (V2 feature build).
+  limit_gb: 12.0
   sample_interval_seconds: 0.5  # how often MemoryTracker samples process RSS
 
 chunking:

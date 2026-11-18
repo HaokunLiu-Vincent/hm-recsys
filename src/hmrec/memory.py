@@ -1,11 +1,11 @@
 """Measure process memory and its peak (AGENTS.md §4, proposal §1.3).
 
-The project's memory budget is 8 GB shared by CPU and GPU (the machine itself
+The project's memory budget is 12 GB shared by CPU and GPU (the machine itself
 has 32 GB), and the true peak of one process must stay at or below that budget
 (`memory.limit_gb` in configs/base.yaml). Long tasks log memory at start and end
 with MemoryTracker:
 
-    with MemoryTracker("r4_itemcf D1", logger, limit_gb=8.0, sample_interval_seconds=0.5):
+    with MemoryTracker("r4_itemcf D1", logger, limit_gb=12.0, sample_interval_seconds=0.5):
         run_itemcf(...)
 
 All numbers are RSS (resident set size). There are TWO kinds of peak, and they
