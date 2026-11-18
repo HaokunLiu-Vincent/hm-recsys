@@ -52,18 +52,41 @@ H&M 个性化时尚推荐（Kaggle H&M 数据集）。目标：预测每个用�
 | V1–V4 | Ranker 的 HPO | 修改 recall 配置 |
 | T1–T4 | 用全部锁定配置做最终评估 | **任何调参、任何选择**；HPO 代码路径里不能出现 T fold |
 
+**T1–T4 已经用过一次**（M8 的正式运行，2026-11-18，结果在 `results/t_phase*.csv`）。从现在起：
+
+- **M8 不重跑。** 不重新训练 T 周的模型，不重新计算 T 周的指标来替换已有的记录。`results/t_phase*.csv` 和 `results/m8_*.csv` 是原始记录，不修改。
+- **之后的任何改动（候选、特征、Ranker、任何参数）只能在 V1–V4 上比较和选择。** T 周的结果不能用来挑选、调参或决定是否采用某个改动。
+- 对 T 周的结果可以做描述性的诊断（只描述，不选择、不修改任何东西）；再次读取 T 周的 label 必须有记录，并且先得到用户同意。
+
+**M8 之后的描述性诊断有第二个读 T label 的入口**（2026-11-19，用户同意；细节见 proposal §10.2）：
+
+- 入口是 `src/hmrec/eval/diagnostic_labels.py` 的 `load_diagnostic_evaluator`。读 T 周的 label 要带 `DiagnosticAccess`，它只由 `src/hmrec/diagnostics/access.py` 签发。`eval/final_eval.py`（M8 正式运行的入口）不动。
+- 签发的条件：`results/t_phase_goals.csv` 里已有 G1–G3 三条判定；工作区干净；正式运行那个 commit 时已有的 M8 文件和 `configs/` 下已有文件的内容没有变（允许新增文件）；并且**先**在 `results/t_diag_label_access.csv` 追加一行（时间、commit、用途、脚本），每运行一次一行。
+- **只有诊断代码能用这个入口**：`src/hmrec/diagnostics/`、`scripts/m8_diagnostics.py`。其他代码（M0–M8 的任何模块和脚本）不能 import `hmrec.diagnostics` 和 `hmrec.eval.diagnostic_labels`。诊断代码不能 import 训练、采样、用模型打分的代码，也不能 import M8 的 trial、闸门和 `eval/final_eval.py`；只写 `results/t_diag_*.csv`。`tests/unit/test_diag_code_rules.py` 检查这些，**新写的诊断模块要加进它的文件清单**。
+- 诊断的结果（`results/t_diag_*.csv`）只用来描述，**不能用来选择、调参或决定是否采用某个改动**。
+- **诊断代码提交之后，`scripts/checks/check_ranker_eval.py --area t_phase` 在当前的 HEAD 上不能再运行**：它读 T label 要过 M8 的闸门，闸门要求代码与正式运行的 commit 相同。需要重跑时，先切回 tag `m8-run-v1`（`git checkout m8-run-v1`），跑完再切回来。这个核对在正式运行之后已经跑过一次，结果在 `docs/decisions.md`。
+
 ### 3.3 不能改的东西
 
 - `configs/fold_manifest.yaml` 里的日期。
 - `configs/locks/` 下的任何文件。只能新增，不能修改或删除。
 - `configs/selection_rule.yaml`（选择规则在看分数之前就已提交）。
+- `configs/m8_final.yaml`（M8 的目标周、彩排周和 G1–G3 的判定标准，在读取任何 T 周 label 之前提交）。
+- M8 正式运行开始之后：`results/t_phase*.csv`、`results/m8_*.csv` 里已有的行，以及 M8 的代码逻辑（`src/hmrec/final/`、`eval/final_eval.py`、`ranker/final_window.py`、`scripts/m8_final_eval.py`、`scripts/m8_step.py`；`scripts/m8_diagnostics.py` 是 M8 之后的描述性诊断，不属于 M8 的代码）。正式运行只做一次；发现 bug 只记录、不修复，停下由用户决定。
 - `docs/decisions.md` 的历史记录。只能追加。
 
 需要改动以上内容时，停下来说明原因，等用户确认。
 
+**M8（T1–T4 的最终评估）的规则**（细节见 proposal §10.1）：
+
+- T 周的 label 只能通过 `src/hmrec/eval/final_eval.py` 读取，并且要带 `src/hmrec/final/gate.py` 签发的 `FormalRunPermit`。M6、M7 的入口对 T fold 的保护保持不变。不要在别处构造许可，也不要绕过它直接打开 T 周的 label 文件。（M8 之后的描述性诊断另有一个入口，见 §3.2。）
+- 正式运行之前必须先彩排（`scripts/m8_final_eval.py --stage rehearsal`，目标周 V4，不读 T label），结果要与 M7 的记录逐位相同。彩排没有通过、彩排之后改过代码或配置、或者工作区不干净，正式运行都会被代码拒绝。**不要为了让正式运行开始而修改或删除彩排的记录。**
+- 正式运行（`--stage formal`）只做一次。它中断后可以用同一条命令续跑；代码或配置变了就不能续跑。
+- "HPO 代码路径里不能出现 T fold"在 M8 的含义：做调参和选择的模块（`hpo/v_phase.py`、`hpo/v_lock.py`、`hpo/speed_test.py`、`hpo/runner.py`、`hpo/d_phase.py`）里不能出现 T fold，M8 也不能 import 它们。`hpo/v_trial.py` 里与预测哪一周无关的步骤（训练一个模型、打分、保存）和 `hpo/v_records.py` 的结果表读写，M7 和 M8 共用；它们不做 fold 检查，也不做选择，fold 检查在各自的入口。
+
 **M5 之后，六路 recall 的配置只能通过 `src/hmrec/recall/locked.py` 获取**（它只读 `configs/locks/`；锁定文件的解析在 `src/hmrec/locks.py`）。M6 及之后的代码不能再读 `configs/recall/` 的默认值，也不能从 `results/d_phase.csv` 重放选择来得到配置。R6 的模型文件必须通过这个入口加载：它在加载权重之前核对 sha256，不一致就报错。`tests/unit/test_locked.py` 会扫描 M6–M8 的脚本和 `fusion/`、`features/`、`ranker/`。
 
-**M7 之后，Ranker 的配置只能通过 `src/hmrec/ranker/locked.py` 的 `load_locked_ranker` 获取**（它读 `configs/locks/ranker.lock.yaml`；`configs/ranker.yaml` 只提供两个只影响内存和日志的值）。M8 的代码不能再读 `configs/ranker.yaml` 的调参默认值和固定参数、`configs/hpo/v_phase.yaml`，也不能在 `results/v_phase*.csv` 上重放选择来得到配置（`src/hmrec/hpo/v_lock.py` 只是给测试用的核对，M8 不调用）。这个入口在返回配置之前核对：锁定文件里的设置算出的 `config_id` 与记录一致、引用的 features / channels / twotower 锁定文件的 sha256 一致、本进程的 LightGBM 版本、libomp 版本和 `num_threads` 与记录一致；不一致就报错。`tests/unit/test_ranker_locked.py` 会扫描 M8 的代码，**新写的 M8 模块要加进它的 `M8_FILES`**。
+**M7 之后，Ranker 的配置只能通过 `src/hmrec/ranker/locked.py` 的 `load_locked_ranker` 获取**（它读 `configs/locks/ranker.lock.yaml`；`configs/ranker.yaml` 只提供两个只影响内存和日志的值）。M8 的代码不能再读 `configs/ranker.yaml` 的调参默认值和固定参数、`configs/hpo/v_phase.yaml`，也不能在 `results/v_phase*.csv` 上重放选择来得到配置（`src/hmrec/hpo/v_lock.py` 只是给测试用的核对，M8 不调用）。这个入口在返回配置之前核对：锁定文件里的设置算出的 `config_id` 与记录一致、引用的 features / channels / twotower 锁定文件的 sha256 一致、本进程的 LightGBM 版本、libomp 版本和 `num_threads` 与记录一致；不一致就报错。`tests/unit/test_final_code_rules.py` 会扫描 M8 的代码，**新写的 M8 模块要加进它的 `M8_FILES`**。
 
 ### 3.4 其他禁止事项
 
@@ -108,7 +131,7 @@ H&M 个性化时尚推荐（Kaggle H&M 数据集）。目标：预测每个用�
 完整目录见 `docs/proposal.md` §14。关键规则：
 
 ```
-scripts/  →  src/hmrec/{recall, fusion, features, ranker, hpo, pipeline}  →  src/hmrec/{data, eval, vectors, locks, csv_records, run_records, feature_files, git_state}  →  config / paths
+scripts/  →  src/hmrec/{recall, fusion, features, ranker, hpo, final, diagnostics, pipeline}  →  src/hmrec/{data, eval, vectors, locks, csv_records, run_records, feature_files, git_state}  →  config / paths
 ```
 
 - 上层可以 import 下层，**下层不能 import 上层**。
@@ -119,7 +142,9 @@ scripts/  →  src/hmrec/{recall, fusion, features, ranker, hpo, pipeline}  → 
 - `src/hmrec/csv_records.py`（只追加、表头固定的结果表 `results/*.csv` 的读写）和 `src/hmrec/run_records.py`（每个进程一行的运行记录：耗时、采样峰值、真实峰值）也属于底层，只依赖标准库和 `memory.py`；任何上层模块和 `eval/` 都可以 import 它们。
 - `src/hmrec/feature_files.py`（每个 fold 特征文件的记录 `features.json` 和核对函数）也属于底层，只依赖标准库、polars 和 `locks.py`：`features/` 写记录，`ranker/` 在读取特征之前调用 `verify_feature_files` 核对，两者互不 import。
 - `src/hmrec/git_state.py`（读取 HEAD commit 和工作区是否有未提交的改动）也属于底层，只依赖标准库和 `logging_utils.py`。`hpo/runner.py` 仍然转出这两个函数，M2–M6 的脚本不用改。
-- **M7 的代码不能 import torch**：`ranker/`、`hpo/v_records.py`、`hpo/v_trial.py`、`hpo/v_phase.py`、`hpo/speed_test.py`、`eval/ranker_eval.py` 和 `scripts/m7_*.py`，不能 import torch，也不能 import 会加载 torch 的模块（`recall/`、`hpo/runner.py`、`hpo/d_phase.py` 等）。原因：torch 和 LightGBM 各自加载一份 OpenMP 运行库（libomp），两份在同一个进程里会直接退出（`OMP: Error #15`）、卡死或段错误。`tests/unit/test_m7_code_rules.py` 检查这一条。
+- `src/hmrec/final/`（M8 的最终评估：闸门、trial、彩排比较、recall 监控、G1–G3 判定、驱动）属于上层，与 `hpo/` 同层。它可以 import `eval/`、`ranker/`、`fusion/`、底层模块，以及 `hpo/v_records.py` 和 `hpo/v_trial.py`（见 §3.3 的 M8 规则）；不能 import `recall/`、torch 和做选择的 `hpo` 模块。M6、M7 的代码不能 import `final/`、`eval/final_eval.py`、`ranker/final_window.py`。`tests/unit/test_final_code_rules.py` 检查这些，**新写的 M8 模块要加进它的 `M8_FILES`**。
+- `src/hmrec/diagnostics/`（M8 之后的描述性诊断：读取 T label 的记录和检查、四张描述表的计算、驱动）属于上层，与 `final/`、`hpo/` 同层。它可以 import `eval/`、`fusion/`、`data/`、底层模块、`hpo/v_records.py`（读结果表）、`hpo/selection.py`（只用容差常数）、`ranker/locked.py`、`ranker/runtime.py`、`ranker/ablation.py`（只取锁定配置的 id、树数、Top-K 和宽表的列名）和 `final/goals.py`（只用判定表的列名）。它不能 import 训练、采样、打分的代码，`final/` 的其他模块，`eval/final_eval.py`，`recall/`、`features/` 和 torch；其他代码不能 import 它（见 §3.2）。
+- **M7 的代码不能 import torch**（M8 的代码同样不能）：`ranker/`、`hpo/v_records.py`、`hpo/v_trial.py`、`hpo/v_phase.py`、`hpo/speed_test.py`、`eval/ranker_eval.py` 和 `scripts/m7_*.py`，不能 import torch，也不能 import 会加载 torch 的模块（`recall/`、`hpo/runner.py`、`hpo/d_phase.py` 等）。原因：torch 和 LightGBM 各自加载一份 OpenMP 运行库（libomp），两份在同一个进程里会直接退出（`OMP: Error #15`）、卡死或段错误。`tests/unit/test_m7_code_rules.py` 检查这一条。
 - `src/hmrec/pipeline.py`（把一个 fold 的各步各用一个独立进程依次运行，并写每个 fold 的摘要）属于上层，与 `recall/`、`hpo/` 同层：它可以 import `eval/` 和底层模块，但 `recall/`、`features/`、`ranker/` 不能 import 它。
 - `scripts/` 只做三件事：解析命令行参数、调用 `src/` 里的函数、写结果。**不在 scripts 里写业务逻辑。**
 - `notebooks/` 只做探索和画图，`src/` 不能依赖 notebook 中的任何代码。
@@ -223,7 +248,7 @@ history = transactions.filter(pl.col("t_dat") < anchor_date)
   4. **负采样测试**：所有正样本都保留，每个 query 的负样本数正确，固定 seed 时结果可复现。
   5. **集成测试**：用小数据把一个 fold 从候选生成跑到评估。
 - 测试要快：整个 `make test-fast` 应在 1 分钟内完成。
-- **测试分两个进程运行**（原因同 §5 的"M7 的代码不能 import torch"）：`uv run pytest tests/unit` 只运行 torch 一侧的测试，`uv run pytest tests/unit --lightgbm-side` 只运行 LightGBM 一侧的测试（文件名以 `test_ranker_`、`test_v_`、`test_speed_test`、`test_m7_` 开头，见 `tests/conftest.py`）。`make test-fast` 和 `make test` 两个都跑。新写的测试如果要训练 LightGBM 模型，文件名必须用这些前缀之一，并且不能 import torch；一个测试进程里同时出现 torch 和 lightgbm 时，`tests/conftest.py` 会让这次运行失败。
+- **测试分两个进程运行**（原因同 §5 的"M7 的代码不能 import torch"）：`uv run pytest tests/unit` 只运行 torch 一侧的测试，`uv run pytest tests/unit --lightgbm-side` 只运行 LightGBM 一侧的测试（文件名以 `test_ranker_`、`test_v_`、`test_speed_test`、`test_m7_`、`test_final_`、`test_diag_` 开头，见 `tests/conftest.py`；`test_diag_` 是 M8 之后的诊断，它不训练模型，但读锁定配置和结果表的模块会加载 lightgbm）。`make test-fast` 和 `make test` 两个都跑。新写的测试如果要训练 LightGBM 模型，文件名必须用这些前缀之一，并且不能 import torch；一个测试进程里同时出现 torch 和 lightgbm 时，`tests/conftest.py` 会让这次运行失败。
 
 ---
 
@@ -270,3 +295,14 @@ make test         # uv run pytest tests（单元 + 集成）
 - 锁定配置（M5、M7 等节点）时打 tag，例如 `lock-channels-v1`（由用户打，agent 只给出建议的 tag 名）。
 - 不要提交 `data/`、`artifacts/` 下的文件。
 - 未经用户要求，不要 push。
+
+---
+
+## 11. Documentation language
+
+**English is the primary language of this project (from 2026-11-19).** This section is written in English for that reason.
+
+- **Write in English first.** All new documents, new entries in `docs/decisions.md`, commit messages and code comments (including docstrings) are written in English.
+- **A Chinese version is a translation.** When a Chinese version of a document is needed, save it next to the original as `*.zh-CN.md` (for example `docs/final_report.md` and `docs/final_report.zh-CN.md`). It has the same structure, sections and numbers as the English original, says at the top that it is a translation, and where the two differ the English version prevails. When the English original changes, update the translation in the same task or say in the reply that it is now out of date.
+- **Existing Chinese documents stay as they are for now**: `docs/proposal.md`, the existing entries of `docs/decisions.md`, and this file (sections 1–10). They will be translated in a separate task after tag `v0.1`. Do not translate or rewrite them as part of another task. `docs/decisions.md` stays append-only: new entries are in English, earlier entries are not edited.
+- This rule is about files in the repository. It does not decide the language of replies in a conversation: reply in the language the user writes in, unless the user asks for another.

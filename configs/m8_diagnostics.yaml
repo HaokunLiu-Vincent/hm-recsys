@@ -1,0 +1,40 @@
+# Descriptive diagnostics of the final evaluation (after M8). Read by
+# hmrec.config.load_diagnostics_config; used by scripts/m8_diagnostics.py.
+#
+# The diagnostics only DESCRIBE recorded results. Nothing here selects, tunes or changes
+# anything, no model is trained and M8 is not run again (AGENTS.md §3.2). The results go
+# to results/t_diag_*.csv; results/t_phase*.csv and results/m8_*.csv are never written.
+#
+# Reading the labels of a T fold again is recorded in results/t_diag_label_access.csv
+# BEFORE a label file is opened (hmrec.diagnostics.access).
+
+# A. Decomposition: one row per fold of these phases, from the result tables only (no
+#    label is read): union recall, Recall@12, Recall@12 / union recall and MAP@12, for the
+#    Ranker and for the RRF baseline. Only V and T have these recorded numbers.
+decomposition_phases: [V, T]
+
+# B. How concentrated the purchases of a label week are: one row per fold of these phases.
+concentration_phases: [D, F, V, T]
+concentration:
+  # Share of the week's label pairs that fall on the N most bought articles of that week.
+  # A "purchase" is one de-duplicated (customer, article) pair of the label file.
+  top_article_counts: [100, 1000]
+  # An article is "new" if its first sale is in [anchor - this many days, anchor).
+  new_article_days: 28
+
+# C. Query groups by purchase history before the anchor: one row per (fold, group).
+query_group_phases: [V, T]
+query_groups:
+  # "recent" = the last purchase is at most this many days before the anchor
+  # (user_days_since_last_purchase <= 30; the anchor day itself is never history).
+  recent_purchase_days: 30
+
+# D. Confidence intervals by a cluster bootstrap over customers: the 4 folds of a phase
+#    are pooled, customers are drawn with replacement, and a drawn customer brings ALL of
+#    their queries of these 4 folds. The interval shows the uncertainty of the customer
+#    sample only, NOT the differences between weeks.
+bootstrap_phases: [T, V]
+bootstrap:
+  n_replicates: 1000
+  seed: 42
+  confidence_level: 0.95

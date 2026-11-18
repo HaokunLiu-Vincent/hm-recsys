@@ -14,8 +14,12 @@ Checks:
     2. inside a query the rows are ordered by score DESC, then article_idx ASC;
     3. the recomputed fold means equal the recorded ones (difference < 1e-9).
 
-Labels: the fold's label table is obtained through hmrec.eval.ranker_eval
-(the only allowed reader), which refuses every fold that is not a V fold.
+Labels: for a V fold (areas speed_test, v_phase, m8_rehearsal) the label table is
+obtained through hmrec.eval.ranker_eval, which refuses every fold that is not a V
+fold. For a trial of the final evaluation (area t_phase, a T fold) it is obtained
+through hmrec.eval.final_eval with a FormalRunPermit from hmrec.final.gate: the
+gate refuses unless the rehearsal passed and the formal run was started with this
+code, so this script cannot be the first reader of a T label.
 Any failure raises ValueError (non-zero exit).
 """
 
@@ -31,11 +35,20 @@ from collections import defaultdict  # noqa: E402
 
 import polars as pl  # noqa: E402
 
-from hmrec.data.folds import load_fold_manifest  # noqa: E402
+from hmrec.data.folds import Fold, load_fold_manifest  # noqa: E402
+from hmrec.eval.final_eval import load_final_evaluator  # noqa: E402
 from hmrec.eval.ranker_eval import load_m7_evaluator  # noqa: E402
-from hmrec.hpo.v_records import AREAS, read_metric_rows, results_files  # noqa: E402
+from hmrec.final.gate import formal_run_permit  # noqa: E402
+from hmrec.final.process import load_process_context  # noqa: E402
+from hmrec.hpo.v_records import (  # noqa: E402
+    AREA_T_PHASE,
+    AREAS,
+    FINAL_AREAS,
+    read_metric_rows,
+    results_files,
+)
 from hmrec.logging_utils import get_logger, setup_logging  # noqa: E402
-from hmrec.paths import get_paths  # noqa: E402
+from hmrec.paths import ProjectPaths, get_paths  # noqa: E402
 
 LOGGER = get_logger("check_ranker_eval")
 TOP_K = 12
@@ -46,7 +59,7 @@ TOLERANCE = 1e-9
 def parse_args() -> argparse.Namespace:
     """Parse command-line arguments."""
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument("--area", required=True, choices=AREAS)
+    parser.add_argument("--area", required=True, choices=(*AREAS, *FINAL_AREAS))
     parser.add_argument("--experiment", required=True)
     parser.add_argument("--config-id", required=True)
     parser.add_argument("--fold", required=True)
@@ -132,14 +145,30 @@ def recompute_fold_means(top: pl.DataFrame, label_table: pl.DataFrame) -> tuple[
     return [math.fsum(column) / len(labels) for column in values], len(labels)
 
 
+def read_label_table(paths: ProjectPaths, fold: Fold, area: str) -> pl.DataFrame:
+    """The fold's labels, one row per (query_id, article_idx), through the area's guarded loader.
+
+    Area t_phase: the gate of the final evaluation is passed first (a passed
+    rehearsal and a started formal run, with this code, clean tree); only then
+    are the labels of the T fold read. Every other area: the M7 loader, which
+    accepts V folds only.
+    """
+    labels_file = paths.labels_file(fold.name)
+    if area == AREA_T_PHASE:
+        permit = formal_run_permit(load_process_context(paths))
+        return load_final_evaluator(fold, labels_file, permit).labels
+    return load_m7_evaluator(fold, labels_file).labels
+
+
 def main() -> None:
     """Recompute one trial's metrics at one number of trees and compare."""
     args = parse_args()
     setup_logging(logging.INFO)
     paths = get_paths()
     fold = load_fold_manifest(paths.fold_manifest_file).get(args.fold)
-    # The evaluator checks the phase first; only its label table is used here.
-    label_table = load_m7_evaluator(fold, paths.labels_file(args.fold)).labels
+    # The loader checks the phase (and for a T fold the gate) first; only the label
+    # table is used here.
+    label_table = read_label_table(paths, fold, args.area)
     predictions_file = paths.ranker_predictions_file(
         args.area, args.experiment, args.config_id, args.fold
     )

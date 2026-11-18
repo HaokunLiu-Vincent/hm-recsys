@@ -2065,3 +2065,253 @@ def _validate_ranker_config(config: RankerConfig, where: str) -> None:
 def load_ranker_config(path: Path) -> RankerConfig:
     """Read and validate configs/ranker.yaml."""
     return parse_ranker_config(load_yaml(path))
+
+
+# ---------------------------------------------------------------- m8_final.yaml
+
+FINAL_PHASE = "T"
+# The pre-registered secondary analyses of the final evaluation (reported only).
+FINAL_SECONDARY_EXPERIMENTS = ("minus_r6",)
+
+
+@dataclass(frozen=True)
+class FinalGoals:
+    """The acceptance criteria of the final evaluation (proposal §0.1, §10).
+
+    Written to configs/m8_final.yaml BEFORE any label of a T fold was read and
+    never changed afterwards.
+
+    Attributes:
+        g1_min_pooled_map: G1 is met if the pooled (query-weighted) MAP@12 of the
+            target folds is >= this (0.032).
+        g2_min_union_recall: G2 is met if the union recall of the six channels is
+            >= this on EVERY target fold (0.24).
+        g3_min_folds_above_baseline: G3 is met if the Ranker's MAP@12 is strictly
+            above the RRF baseline's on at least this many target folds (3).
+    """
+
+    g1_min_pooled_map: float
+    g2_min_union_recall: float
+    g3_min_folds_above_baseline: int
+
+
+@dataclass(frozen=True)
+class FinalEvalConfig:
+    """Settings from configs/m8_final.yaml: the final evaluation on the T folds (M8).
+
+    Attributes:
+        phase: "T".
+        target_folds: The folds to predict and report, in time order.
+        metric: The main metric, "map@12".
+        extra_metrics: Reported next to it, e.g. ("recall@12", "ndcg@12").
+        rehearsal_target_fold: The V fold the rehearsal predicts with the M8 code
+            path; its result must equal the recorded V-phase result exactly.
+        goals: The acceptance criteria G1-G3.
+        secondary_experiments: Pre-registered secondary analyses (report only).
+    """
+
+    phase: str
+    target_folds: tuple[str, ...]
+    metric: str
+    extra_metrics: tuple[str, ...]
+    rehearsal_target_fold: str
+    goals: FinalGoals
+    secondary_experiments: tuple[str, ...]
+
+    @property
+    def metrics(self) -> tuple[str, ...]:
+        """All metrics, the main metric first."""
+        return (self.metric, *self.extra_metrics)
+
+
+def _parse_final_goals(raw: Mapping[str, Any], n_folds: int, where: str) -> FinalGoals:
+    """The `goals` section; thresholds must be shares in (0, 1) and a fold count in 1..n."""
+    keys = {"g1_min_pooled_map", "g2_min_union_recall", "g3_min_folds_above_baseline"}
+    check_keys(raw, keys, where)
+    goals = FinalGoals(
+        g1_min_pooled_map=get_float(raw, "g1_min_pooled_map", where),
+        g2_min_union_recall=get_float(raw, "g2_min_union_recall", where),
+        g3_min_folds_above_baseline=get_int(raw, "g3_min_folds_above_baseline", where),
+    )
+    for name in ("g1_min_pooled_map", "g2_min_union_recall"):
+        if not 0 < getattr(goals, name) < 1:
+            raise ValueError(f"{where}.{name} must be in (0, 1), got {getattr(goals, name)}")
+    if not 1 <= goals.g3_min_folds_above_baseline <= n_folds:
+        raise ValueError(
+            f"{where}.g3_min_folds_above_baseline must be in 1..{n_folds}, "
+            f"got {goals.g3_min_folds_above_baseline}"
+        )
+    return goals
+
+
+def parse_final_eval_config(raw: Mapping[str, Any]) -> FinalEvalConfig:
+    """Build a FinalEvalConfig from the parsed content of configs/m8_final.yaml.
+
+    Raises:
+        ValueError: If a key is missing or unknown, the phase is not "T", the
+            folds repeat, a threshold is out of range or a secondary experiment
+            is not a pre-registered one.
+    """
+    where = "m8_final"
+    keys = {
+        "phase",
+        "target_folds",
+        "metric",
+        "extra_metrics",
+        "rehearsal",
+        "goals",
+        "secondary_experiments",
+    }
+    check_keys(raw, keys, where)
+    rehearsal = get_mapping(raw, "rehearsal", where)
+    check_keys(rehearsal, {"target_fold"}, f"{where}.rehearsal")
+    target_folds = get_str_list(raw, "target_folds", where)
+    if not target_folds or len(set(target_folds)) != len(target_folds):
+        raise ValueError(f"{where}.target_folds must be distinct folds, got {target_folds}")
+    config = FinalEvalConfig(
+        phase=get_str(raw, "phase", where),
+        target_folds=target_folds,
+        metric=get_str(raw, "metric", where),
+        extra_metrics=get_str_list(raw, "extra_metrics", where),
+        rehearsal_target_fold=get_str(rehearsal, "target_fold", f"{where}.rehearsal"),
+        goals=_parse_final_goals(
+            get_mapping(raw, "goals", where), len(target_folds), f"{where}.goals"
+        ),
+        secondary_experiments=get_str_list(raw, "secondary_experiments", where),
+    )
+    if config.phase != FINAL_PHASE:
+        raise ValueError(f"{where}.phase must be {FINAL_PHASE!r}, got {config.phase!r}")
+    if len(set(config.metrics)) != len(config.metrics):
+        raise ValueError(f"{where}: metrics repeat: {config.metrics}")
+    unknown = sorted(set(config.secondary_experiments) - set(FINAL_SECONDARY_EXPERIMENTS))
+    if unknown or len(set(config.secondary_experiments)) != len(config.secondary_experiments):
+        raise ValueError(
+            f"{where}.secondary_experiments must be distinct names from "
+            f"{FINAL_SECONDARY_EXPERIMENTS}, got {config.secondary_experiments}"
+        )
+    return config
+
+
+def load_final_eval_config(path: Path) -> FinalEvalConfig:
+    """Read and validate configs/m8_final.yaml."""
+    return parse_final_eval_config(load_yaml(path))
+
+
+# ---------------------------------------------------------------- m8_diagnostics.yaml
+
+# The phases whose folds have recorded Ranker / baseline / union-recall numbers
+# (results/v_phase*.csv and results/m6_candidates.csv; results/t_phase*.csv).
+DIAGNOSTIC_RESULT_PHASES = ("V", "T")
+DIAGNOSTIC_LABEL_PHASES = ("D", "F", "V", "T")
+
+
+@dataclass(frozen=True)
+class DiagnosticsConfig:
+    """Settings from configs/m8_diagnostics.yaml: descriptive diagnostics after M8.
+
+    Nothing here selects or tunes anything; the values only say what is described.
+
+    Attributes:
+        decomposition_phases: Phases of table A (one row per fold).
+        concentration_phases: Phases of table B (one row per fold).
+        query_group_phases: Phases of table C (one row per fold and query group).
+        bootstrap_phases: Phases of table D (the folds of a phase are pooled).
+        top_article_counts: Table B: the N of "the N most bought articles", ascending.
+        new_article_days: Table B: an article is new if its first sale is in
+            [anchor - new_article_days, anchor).
+        recent_purchase_days: Table C: a customer bought recently if the last
+            purchase is at most this many days before the anchor.
+        bootstrap_replicates: Table D: number of bootstrap replicates.
+        bootstrap_seed: Table D: seed of the random draws.
+        confidence_level: Table D: e.g. 0.95 for the 2.5% and 97.5% quantiles.
+    """
+
+    decomposition_phases: tuple[str, ...]
+    concentration_phases: tuple[str, ...]
+    query_group_phases: tuple[str, ...]
+    bootstrap_phases: tuple[str, ...]
+    top_article_counts: tuple[int, ...]
+    new_article_days: int
+    recent_purchase_days: int
+    bootstrap_replicates: int
+    bootstrap_seed: int
+    confidence_level: float
+
+
+def _get_phases(
+    raw: Mapping[str, Any], key: str, where: str, allowed: tuple[str, ...]
+) -> tuple[str, ...]:
+    """A non-empty list of distinct phases, each one of `allowed`."""
+    phases = get_str_list(raw, key, where)
+    if not phases or len(set(phases)) != len(phases) or not set(phases) <= set(allowed):
+        raise ValueError(f"{where}.{key} must be distinct phases from {allowed}, got {phases}")
+    return phases
+
+
+def _get_top_article_counts(raw: Mapping[str, Any], where: str) -> tuple[int, ...]:
+    """`top_article_counts`: a non-empty, strictly ascending list of positive integers."""
+    value = raw["top_article_counts"]
+    is_int_list = isinstance(value, list) and all(
+        isinstance(item, int) and not isinstance(item, bool) for item in value
+    )
+    if not is_int_list or not value or value[0] <= 0 or sorted(set(value)) != value:
+        raise ValueError(
+            f"{where}.top_article_counts must be ascending positive integers, got {value!r}"
+        )
+    return tuple(value)
+
+
+def parse_diagnostics_config(raw: Mapping[str, Any]) -> DiagnosticsConfig:
+    """Build a DiagnosticsConfig from the parsed content of configs/m8_diagnostics.yaml.
+
+    Raises:
+        ValueError: If a key is missing or unknown, a phase list is empty, repeats
+            or names a phase without the needed records, or a number is out of range.
+    """
+    where = "m8_diagnostics"
+    keys = {
+        "decomposition_phases",
+        "concentration_phases",
+        "concentration",
+        "query_group_phases",
+        "query_groups",
+        "bootstrap_phases",
+        "bootstrap",
+    }
+    check_keys(raw, keys, where)
+    concentration = get_mapping(raw, "concentration", where)
+    check_keys(concentration, {"top_article_counts", "new_article_days"}, f"{where}.concentration")
+    query_groups = get_mapping(raw, "query_groups", where)
+    check_keys(query_groups, {"recent_purchase_days"}, f"{where}.query_groups")
+    bootstrap = get_mapping(raw, "bootstrap", where)
+    check_keys(bootstrap, {"n_replicates", "seed", "confidence_level"}, f"{where}.bootstrap")
+    result_phases = DIAGNOSTIC_RESULT_PHASES
+    config = DiagnosticsConfig(
+        decomposition_phases=_get_phases(raw, "decomposition_phases", where, result_phases),
+        concentration_phases=_get_phases(
+            raw, "concentration_phases", where, DIAGNOSTIC_LABEL_PHASES
+        ),
+        query_group_phases=_get_phases(raw, "query_group_phases", where, result_phases),
+        bootstrap_phases=_get_phases(raw, "bootstrap_phases", where, result_phases),
+        top_article_counts=_get_top_article_counts(concentration, f"{where}.concentration"),
+        new_article_days=get_int(concentration, "new_article_days", f"{where}.concentration"),
+        recent_purchase_days=get_int(query_groups, "recent_purchase_days", f"{where}.query_groups"),
+        bootstrap_replicates=get_int(bootstrap, "n_replicates", f"{where}.bootstrap"),
+        bootstrap_seed=get_int(bootstrap, "seed", f"{where}.bootstrap"),
+        confidence_level=get_float(bootstrap, "confidence_level", f"{where}.bootstrap"),
+    )
+    require_positive(config.new_article_days, f"{where}.concentration.new_article_days")
+    require_positive(config.recent_purchase_days, f"{where}.query_groups.recent_purchase_days")
+    require_positive(config.bootstrap_replicates, f"{where}.bootstrap.n_replicates")
+    if config.bootstrap_seed < 0:
+        raise ValueError(f"{where}.bootstrap.seed must be >= 0, got {config.bootstrap_seed}")
+    if not 0 < config.confidence_level < 1:
+        raise ValueError(
+            f"{where}.bootstrap.confidence_level must be in (0, 1), got {config.confidence_level}"
+        )
+    return config
+
+
+def load_diagnostics_config(path: Path) -> DiagnosticsConfig:
+    """Read and validate configs/m8_diagnostics.yaml."""
+    return parse_diagnostics_config(load_yaml(path))

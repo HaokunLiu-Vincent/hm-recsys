@@ -831,3 +831,148 @@
 - **顺带的代码移动**（不改变任何结果）：`model_config` 和 `ranker_config_id` 从 `hpo/v_trial.py` 移到 `ranker/identity.py`，因为锁定入口在 `ranker/`，不能 import `hpo/`；`config.py` 的 `_parse_lightgbm_params` 改为公开的 `parse_lightgbm_params`，供 `locks.py` 解析锁定文件里的 LightGBM 参数。
 - **没有做的**：没有运行任何数据任务；T1–T4 的任何文件都没有读；M8 的代码还没有写（`scripts/m8_final_eval.py` 仍是空壳）。建议的 tag：`lock-ranker-v1`（由用户打）。
 - **proposal 已同步**：§9.6（锁定的内容、入口和核对）、§9.7（V 阶段的结果）、§11（M7 完成）、§14（目录和分层）。AGENTS.md §3.3、§5 写明 Ranker 配置的唯一入口。
+
+## 2026-11-18 M8（T1–T4 的最终评估）：只运行一次；彩排；判定标准；预先登记的次要分析（写于读取任何 T 周 label 之前）
+
+- **时间点**：这条记录、`configs/m8_final.yaml` 和 M8 的全部代码写于任何 T 周的 label 被读取之前。写的过程中只用了小数据（测试里随机生成的 9 个 fold，每个 40 个 query），没有在全量数据上运行任何东西，也没有打开 `artifacts/labels/` 下任何 T 周的文件。
+- **最重要的规则（用户）**：T1–T4 的 label 至今没有被读取过。M8 的正式运行只做一次，看到 T 的结果之后不再修改任何配置、代码逻辑或选择。顺序：写代码和测试（只用小数据）→ 用户 commit → 彩排 → 正式运行。发现 bug 只记录、不修复，停下由用户决定。
+- **配置和输入**：
+  1. Ranker 的配置只通过 `ranker/locked.py` 的 `load_locked_ranker` 取得；候选和特征用 M6 冻结的文件，读取前调用 `verify_feature_files`。
+  2. 训练窗口：T1 ← V1–V4，T2 ← V2、V3、V4、T1，T3 ← V3、V4、T1、T2，T4 ← V4、T1、T2、T3；每次从头训练到锁定的 500 棵。
+  3. 采样：V1–V3 复用 M7 的 r = 40 采样文件并核对 sha256；V4、T1、T2、T3 新采样，方法、seed、比例来自锁定文件。
+  4. T 周的 label 只允许 M8 的入口读取（`eval/final_eval.py`，要带许可）；M6、M7 对 T fold 的保护没有改。
+- **彩排**（不读任何 T 周的 label）：用 M8 的代码路径和锁定配置把 V4 当作目标周跑一遍（训练周 F4、V1、V2、V3）。500 棵时的 MAP@12、Recall@12、NDCG@12 必须与 `results/v_phase_metrics.csv` 中选中配置在 V4 的记录逐位相同，模型的前 500 棵也要与 M7 的模型相同。彩排不通过，正式运行不能开始，用代码强制（`final/gate.py`）。
+- **彩排里 agent 加的比较**（用户要求的是上面两项；下面几项用的是同一条代码路径上的其他部分，任何一项不同都算彩排不通过）：100–400 棵时的三个指标和 query 数；RRF baseline 的指标；去掉 R6 的系统的指标、模型前 500 棵和 Top-12；完整系统保存的 Top-12（500 棵）与 M7 保存的逐行相同；V4 的 recall 监控行与 M6 的记录相同；彩排的 trial 是用当前代码、在干净的工作区里跑的。原因：正式运行里 G2 靠监控的 union recall 判定，G3 靠 baseline 判定，次要分析靠去掉 R6 的路径，这三条路径也应当先在 V4 上被证明与 M7 / M6 一致。
+- **正式运行的内容**：(1) 主结果：T1–T4 每周和合并（query-weighted）的 MAP@12、Recall@12、NDCG@12，以及四周等权平均；(2) RRF baseline 的同样指标；(3) recall 层在 T 周的监控（M6 留到现在的）：每一路的 Recall@quota、六路 union recall、每个 query 的候选数、没有任何一路命中的 query 比例；(4) 预先登记的次要分析：T 上去掉 R6 的 ablation，做法与 M7 相同，只用于报告，不影响任何结论的判定；(5) 判定标准见下；(6) 每个 trial 一个独立进程，记录耗时、真实内存峰值、LightGBM 和 libomp 的版本、git commit，结果写入 `results/t_phase.csv`、`results/t_phase_metrics.csv`，保存每周的 Top-12；(7) 正式运行开始时，在读任何 T label 之前，把"T 周 label 首次读取"的时间和 git commit 记入 `results/t_phase_label_access.csv`。
+- **判定标准**（写在 `configs/m8_final.yaml`，运行后不能改）：
+  - **G1**：T1–T4 合并 MAP@12 ≥ 0.032；
+  - **G2**：T1–T4 **每一周**的六路 union recall ≥ 24%；
+  - **G3**：LambdaMART 的 MAP@12 在 4 周中至少 3 周**严格高于** RRF baseline。
+  判定由 `final/goals.py` 的纯函数完成，结论由代码写入 `results/t_phase_goals.csv`，只写一次；表里已有结论时，再算出不同的结论会报错，不会追加第二组。
+- **闸门怎么强制"彩排通过才能正式运行"和"只运行一次"**（`final/gate.py`）：
+  1. 最近一次彩排比较必须是 `passed`，在干净的工作区里运行，并且 HEAD 的代码和配置（`src/`、`scripts/`、`configs/`、`pyproject.toml`、`uv.lock`）与那次彩排的 commit 相同（`git diff --quiet`）。在两次运行之间提交结果表或文档不算改代码。
+  2. 驱动在启动任何一步之前写下"首次读取"的记录；每个工作进程自己再过一次闸门，没有这条记录就拒绝（所以手工启动的一步不可能成为第一个读 T label 的程序）。
+  3. 这条记录存在之后，HEAD 的代码或配置与它的 commit 不同，任何进程都拒绝。中断的正式运行可以用同一条命令续跑（已记录的步骤跳过）。
+  4. M8 的每个进程都要求工作区干净（比 M7 严格：M7 只警告并记 `git_dirty=True`）。
+  代码做不到的：不能阻止有人手工删除记录或绕开入口直接读文件。这一条写进了 AGENTS.md §3.3。
+- **T 周只在 500 棵处评估**（agent 的做法，已在汇报里标出）：彩排评估 100–500 棵的每个检查点，为了与 M7 比较；正式运行只评估并保存锁定的 500 棵。T 周在其他棵数上的指标用不到，不算出来，事后也就没有可供挑选的东西。500 棵时的分数与是否保留其他检查点无关。
+- **与 proposal §10 原文的冲突**：原文要求报告 Recall@12/20 和 NDCG@12/20；用户这次的要求只列了 @12 的三个指标。锁定文件规定每个 query 只保留 Top-12，算不出 @20。按用户这次的要求实现，§10 已改为只报告 @12，并在 §10.1 写明这一处不同；汇报里向用户指出，由用户在 commit 之前确认。
+- **"HPO 代码路径里不能出现 T fold"在 M8 的落实**（需要用户确认，已在汇报里标出）：M8 没有 import 任何做调参和选择的模块（`hpo/v_phase.py`、`hpo/v_lock.py`、`hpo/speed_test.py`、`hpo/runner.py`、`hpo/d_phase.py`），测试会扫描。但它复用了 `hpo/v_trial.py` 里与预测哪一周无关的四个步骤（Dataset 的计划、训练、打分和保存、RRF baseline 的计算）和 `hpo/v_records.py` 的结果表读写，T fold 会经过这些函数。这样做是为了让彩排和正式运行走的就是 M7 走过的那几个函数；这些函数不做 fold 检查，也不做任何选择。为此 `hpo/v_trial.py` 做了不改变行为的拆分：`plan_dataset` 拆出 `plan_dataset_for_folds`，`_train` 改名为 `train_planned_model`，`_score_and_save` 改为接收评估器的 `score_and_save`，`rrf_baseline_row` 拆出 `rrf_baseline_metric_row`；M7 的入口照旧先做自己的检查再调用它们，M7 的全部测试通过。另一种做法是把这些通用函数移出 `hpo/` 包，改动面更大，没有做。
+- **其他改动**：`eval/monitor.py` 把计算监控行的部分拆成 `build_monitor_rows`（不做阶段检查），M6 的 `monitor_rows` 照旧先检查再调用它；`git_state.py` 新增 `code_changed_since`；`hpo/v_records.py` 的 `results_files` 认识 `t_phase` 和 `m8_rehearsal` 两个新的区域（M7 的脚本不接受它们）；`scripts/checks/check_ranker_eval.py` 可以核对 T 周的 trial，读 T label 也要先过闸门。
+- **测试**（只用小数据）：训练窗口的四种情况；T 周 label 只能从 M8 入口读取（没有许可时文件根本不会被打开；M6、M7 的入口仍然拒绝 T fold）；彩排不通过、没有彩排、彩排之后代码变了、工作区不干净时，正式运行被拒绝且没有任何一步被启动；复用的采样文件 sha256 不一致时报错、Dataset 不会被构建；G1–G3 判定函数的手算例子（恰好等于阈值、差一个浮点数、G2 平均达标但有一周不达标、G3 相等不算）；M8 的模块进了"只能通过锁定入口取配置"的扫描；一个小数据的集成测试走完彩排和正式运行，并确认再次运行不启动任何一步、不改任何结果表。小数据的工作区里，M7 的参照结果是用 M7 自己的代码生成的。
+- **还没有做的**：彩排和正式运行都还没有运行；最终报告不在这一步写。
+- **proposal 已同步**：§10（新增 §10.1）、§11（M8 的状态）、§14（目录、分层、交接的数据）。AGENTS.md §3.3、§5、§7 写明 M8 的规则。
+
+## 2026-11-18 M8 的结果：彩排通过，正式运行完成，G1–G3 都达标；只报告 @12；两处时间戳记的是驱动启动的时间；T 高于 V，原因待诊断
+
+- **只报告 @12 的指标（用户确认；这是在读取任何 T 周 label 之前定的）**：最初的 proposal §10 要求报告 @12 和 @20（Recall@12/20、NDCG@12/20）。`configs/locks/ranker.lock.yaml` 规定每个 query 只保留 Top-12（`scoring.top_k`），@20 的指标算不出来，所以 M8 只报告 MAP@12、Recall@12、NDCG@12。代码和 `configs/m8_final.yaml` 在正式运行之前（commit `18d957f` 及之前）就是这样写的；这条说明按用户的要求放在正式运行之后的文档 commit 里，运行之前没有修改任何被 git 跟踪的文件。
+- **另一处确认（用户）**：M8 复用 `hpo/v_trial.py` 和 `hpo/v_records.py` 中与预测周无关的函数，不违反"HPO 代码路径里不能出现 T fold"这条规则的本意。
+- **运行**：两次运行都在 HEAD `18d957f`、工作区干净的状态下进行（所有行 `git_dirty=False`），LightGBM 4.7.0，libomp 22.1.4，都用 `caffeinate -i`。结果在 `results/m8_rehearsal*.csv`、`results/m8_runs.csv`、`results/t_phase*.csv`，commit `6a0ee92`。没有触发停止条件：所有 M8 进程的真实峰值最大 3.75 GB（上限 12 GB），没有检查失败。
+- **彩排**（`--stage rehearsal`，22:05–22:14，约 8.5 分钟；不读任何 T 周的 label）：**通过，18 项比较与 M7、M6 的记录逐位相同。**
+  - 完整系统在 V4 上 100、200、300、400、500 棵的 MAP@12、Recall@12、NDCG@12 和 query 数（5 项）；500 棵时是 0.034849701577104486 / 0.07797187269574504 / 0.0539127774637354，与 `results/v_phase_metrics.csv` 的文本完全相同。
+  - 去掉 R6 的系统在 100–500 棵的指标（5 项）；RRF baseline 的指标（1 项）。
+  - 两个模型（完整、去掉 R6）的前 500 棵与 M7 的模型相同；两份保存的 Top-12 逐行相同；两个 trial 是用当前代码、在干净的工作区里跑的（6 项）。
+  - V4 的 recall 监控行与 `results/m6_candidates.csv` 中 M6 的记录相同（1 项）。
+  - 彩排期间没有产生任何 T 周的文件。彩排训练用的采样文件（F4、V1、V2、V3，完整和去掉 R6 各一组）的 sha256 记在 `results/m8_rehearsal_check.csv`；正式运行核对了 V1–V3 的文件与之相同。
+- **正式运行**（`--stage formal`，只做了这一次）：22:14:34 开始，22:49:38 结束，约 35 分钟。"T 周 label 首次读取"记在 `results/t_phase_label_access.csv`：2026-11-18T22:14:34，commit `18d957f`。新采样 V4、T1、T2、T3（完整和去掉 R6 各一组），V1–V3 复用 M7 的文件，T4 没有采样。训练周：T1 ← V1 V2 V3 V4，T2 ← V2 V3 V4 T1，T3 ← V3 V4 T1 T2，T4 ← V4 T1 T2 T3（`results/t_phase.csv` 的 `train_folds` 一列）。
+- **主结果和 RRF baseline**（T 周只在锁定的 500 棵处评估；合并 = 按 query 数加权）：
+
+  | | T1 | T2 | T3 | T4 | 合并 | 等权平均 |
+  |---|---|---|---|---|---|---|
+  | query 数 | 80,253 | 75,822 | 72,019 | 68,984 | 297,078 | — |
+  | **LambdaMART MAP@12** | 0.034960 | 0.040270 | 0.039673 | 0.042435 | **0.039194** | 0.039335 |
+  | LambdaMART Recall@12 | 0.080965 | 0.088694 | 0.086791 | 0.092959 | 0.087135 | 0.087352 |
+  | LambdaMART NDCG@12 | 0.054734 | 0.061135 | 0.060277 | 0.063951 | 0.059852 | 0.060024 |
+  | RRF baseline MAP@12 | 0.019151 | 0.021471 | 0.021848 | 0.022411 | 0.021154 | 0.021220 |
+  | RRF baseline Recall@12 | 0.049777 | 0.055978 | 0.057542 | 0.059756 | 0.055559 | 0.055763 |
+  | RRF baseline NDCG@12 | 0.031942 | 0.035476 | 0.036235 | 0.037149 | 0.035094 | 0.035200 |
+  | MAP@12 相对 baseline | +82.6% | +87.6% | +81.6% | +89.4% | — | — |
+
+- **recall 层在 T 周的监控**（M6 留到 M8 的部分；`results/t_phase_recall.csv`）：
+
+  | | T1 | T2 | T3 | T4 |
+  |---|---|---|---|---|
+  | R1 Popularity Recall@100 | 0.122187 | 0.124717 | 0.112166 | 0.127886 |
+  | R2 Repurchase Recall@30 | 0.037431 | 0.042449 | 0.043885 | 0.044764 |
+  | R3 Sibling Recall@50 | 0.029859 | 0.029862 | 0.031628 | 0.030573 |
+  | R4 ItemCF Recall@100 | 0.080344 | 0.085801 | 0.087109 | 0.089116 |
+  | R5 WALS Recall@100 | 0.084065 | 0.090588 | 0.094789 | 0.097827 |
+  | R6 Two-Tower Recall@100 | 0.173262 | 0.189991 | 0.188963 | 0.204582 |
+  | **六路 union recall** | 0.278773 | 0.290767 | 0.290926 | 0.306944 |
+  | 每个 query 的候选数（平均 / P50 / P90） | 306.4 / 321 / 360 | 305.8 / 321 / 361 | 308.3 / 324 / 364 | 304.2 / 320 / 360 |
+  | 没有任何一路命中的 query 比例 | 50.29% | 49.34% | 49.21% | 48.14% |
+
+  T1 有三路被标出"比前 4 周（V1–V4）的平均低 10% 以上"：R3（−12.5%）、R4（−11.2%）、R5（−16.7%）；T2–T4 没有被标出的。同一周 R1 比前 4 周的平均高 35.3%，R6 高 7.5%。这只是报告项，不改任何配置。
+- **预先登记的次要分析：去掉 R6**（只报告，不影响任何判定）：
+
+  | | T1 | T2 | T3 | T4 | 合并 |
+  |---|---|---|---|---|---|
+  | 去掉 R6 MAP@12 | 0.033202 | 0.037679 | 0.037330 | 0.039141 | 0.036724 |
+  | MAP@12 相对完整系统 | −5.03% | −6.43% | −5.91% | −7.76% | −6.30% |
+  | Recall@12 相对完整系统 | −6.93% | −8.21% | −8.53% | −9.84% | −8.37% |
+  | NDCG@12 相对完整系统 | −6.15% | −7.53% | −7.39% | −8.72% | −7.45% |
+
+- **G1–G3 的判定**（标准在 `configs/m8_final.yaml`，读取 T label 之前提交；结论由代码写入 `results/t_phase_goals.csv`）：
+  - **G1 达标**：T1–T4 合并 MAP@12 = 0.039193596845611765 ≥ 0.032。
+  - **G2 达标**：每一周的六路 union recall 都 ≥ 24%；最低的一周是 T1 的 27.88%。
+  - **G3 达标**：LambdaMART 的 MAP@12 在 4 周都严格高于 RRF baseline（要求至少 3 周）。
+- **耗时和内存**：完整系统的 4 个 trial 各 267–279 秒（训练 154–161 秒，0.305–0.319 秒/棵；打分加评估 106–124 秒），真实峰值 2.94–3.14 GB；去掉 R6 的 4 个 trial 各 199–230 秒，3.33–3.57 GB；监控每周约 3 秒、1.8–1.9 GB；baseline 每周约 1.6 秒、0.5 GB；新采样每个 6–8 秒、3.4–3.7 GB；Dataset 每个 5–7 秒、1.5–1.8 GB。
+- **独立核对**（`scripts/checks/check_ranker_eval.py --area t_phase`，正式运行之后、任何代码改动之前运行）：T1–T4 完整系统的 4 个 trial（500 棵），名次顺序和三个指标都与记录一致；去掉 R6 的 4 个 trial 也一致（后 4 个是 agent 加跑的）。
+- **发现的问题：两处时间戳写的是驱动启动的时间，不是事件发生的时间。只记录，不改结果文件，不改 M8 的驱动代码（用户的决定）。**
+  - `results/t_phase_goals.csv` 的 `decided_at` 是 2026-11-18T22:14:34。**实际判定的时间是 22:49:38。** 依据：`results/t_phase.csv` 里最后一个 trial（去掉 R6，T4）的 `finished_at` 是 2026-11-18T22:49:38，判定在它之后才计算；运行日志 `artifacts/runs/m8_final_eval_formal/run.log` 里 "G1 met / G2 met / G3 met" 三行的时间是 22:49:38。
+  - `results/m8_rehearsal_check.csv` 的 `checked_at` 是 2026-11-18T22:05:40。**实际比较完成的时间是 22:14:04。** 依据：`results/m8_rehearsal.csv` 里最后一个彩排 trial（去掉 R6，V4）的 `finished_at` 是 2026-11-18T22:14:03，比较在它之后才做；运行日志 `artifacts/runs/m8_final_eval_rehearsal/run.log` 里 "rehearsal PASSED" 一行的时间是 22:14:04。
+  - 原因：驱动（`scripts/m8_final_eval.py`）在启动时取了一次时间，把同一个值传给了后面写这两条记录的函数。
+  - 影响：只有这两个时间列不准，它们不参与任何数值和判定。`results/t_phase_label_access.csv` 的 `started_at`（22:14:34）是对的，它记的本来就是正式运行开始的时间；`rehearsal_checked_at` 一列是从彩排记录里抄来的，同样是 22:05:40。
+- **T 高于 V，与事先的预期相反，原因待诊断。** 正式运行之前的判断是"V 上的分数偏乐观（k 和参数是在这四周上选的），余量只有 2.2%，T 上有可能低于 0.032"。实际是：
+
+  | 周 | query 数 | LambdaMART MAP@12 | RRF baseline MAP@12 | union recall |
+  |---|---|---|---|---|
+  | V1 | 82,802 | 0.030112 | 0.018511 | 0.254379 |
+  | V2 | 74,833 | 0.031332 | 0.019064 | 0.275415 |
+  | V3 | 71,094 | 0.035029 | 0.020604 | 0.263840 |
+  | V4 | 72,035 | 0.034850 | 0.019662 | 0.276163 |
+  | T1 | 80,253 | 0.034960 | 0.019151 | 0.278773 |
+  | T2 | 75,822 | 0.040270 | 0.021471 | 0.290767 |
+  | T3 | 72,019 | 0.039673 | 0.021848 | 0.290926 |
+  | T4 | 68,984 | 0.042435 | 0.022411 | 0.306944 |
+  | V 合并 | 300,764 | 0.032713 | 0.019419 | — |
+  | T 合并 | 297,078 | 0.039194 | 0.021154 | — |
+
+  LambdaMART 的合并 MAP@12 在 T 上比 V 高 19.8%；RRF baseline 高 8.9%；T 每一周的 union recall 都高于 V 的任何一周；LambdaMART 相对 baseline 的优势也变大了（V 上 +68%，T 上 +82% 到 +89%）。**原因没有查，这里不下结论。** recall 层和 baseline 同时变高，说明至少一部分来自 T 这几周本身更容易召回，但这只是从这张表能读出来的，不是诊断的结论。已知的局限照旧适用：T 阶段不是完全没见过的数据（proposal §12 第 6 条），结果按 retrospective test 报告。
+- **之后的规则（用户）**：不重跑 M8，不训练任何模型，不改任何配置和锁定文件；`results/t_phase*.csv` 和 `results/m8_*.csv` 是原始记录，不修改；接下来的诊断只做描述，不用来选择或修改任何东西。T1–T4 已经用过一次，之后的任何改动只能在 V1–V4 上比较和选择（已写进 AGENTS.md §3.2）。
+- **还没有做的**：描述性诊断（`scripts/m8_diagnostics.py`）还没有写；最终报告还没有写。
+- **proposal 已同步**：§11（M8 的结果）。AGENTS.md §3.2 加了"T1–T4 已经用过一次"的规则。
+
+## 2026-11-19 M8 之后的描述性诊断：第二个读 T label 的入口；四张表的定义；区间的含义（代码已写，还没有在全量数据上运行）
+
+- **背景**：T 上的合并 MAP@12 比 V 高 19.8%，与事先的预期相反，原因没有查（上一条记录）。用户要求做描述性诊断。**规则（用户）**：不重跑 M8，不训练任何模型，不改任何配置和锁定文件；`results/t_phase*.csv` 和 `results/m8_*.csv` 是原始记录，不修改；诊断只做描述，不用来选择或修改任何东西。
+- **现有的单一入口不允许诊断读 T label**。`final/gate.py` 要求 HEAD 的代码和配置（`src/`、`scripts/`、`configs/`、`pyproject.toml`、`uv.lock`）与彩排、正式运行的 commit `18d957f` 完全相同；诊断代码是新代码，一提交就不同了。这是闸门应有的行为。按用户的要求先停下说明了方案，用户同意后才写代码。
+- **决定：加第二个入口，只给描述性诊断用；M8 的代码一行不改。**
+  - 入口：`src/hmrec/eval/diagnostic_labels.py` 的 `load_diagnostic_evaluator`。读 T 周的 label 必须带 `DiagnosticAccess`；D、F、V 周不需要（它们的 label 之前读过很多次）。
+  - `DiagnosticAccess` 只由 `src/hmrec/diagnostics/access.py` 签发，条件是：
+    1. `results/t_phase_goals.csv` 里有 G1、G2、G3 各一条判定（正式运行已结束，再读 label 改变不了结论）。
+    2. 工作区干净。
+    3. 正式运行那个 commit（从判定表的 `git_commit` 读出，`18d957f`，tag `m8-run-v1`）时已有的 M8 文件和 `configs/` 下已有文件的内容没有变；**允许新增文件**（用户的决定：诊断的配置放在新文件 `configs/m8_diagnostics.yaml`）。M8 文件指 `src/hmrec/final/`、`eval/final_eval.py`、`ranker/final_window.py`、`scripts/m8_final_eval.py`、`scripts/m8_step.py`。比较用 `git diff --name-status --no-renames`（新函数 `git_state.changed_existing_files`）：状态不是"新增"的文件都算改动，改名算删除。
+    4. 在打开任何 T label 文件之前，先在 `results/t_diag_label_access.csv` 追加一行：时间、git commit、用途、脚本名。每运行一次追加一行。
+  - `eval/final_eval.py` 不动（用户的决定）。它的说明里写着"唯一入口"，从今天起不再准确；AGENTS.md §3.2 和 proposal §10.2 写明了有第二个入口。
+  - 用测试限制（`tests/unit/test_diag_code_rules.py`）：只有诊断代码 import 这个入口；`DiagnosticAccess` 只在一处创建，而且在记录写入之后；诊断代码不 import 训练、采样、打分的代码和 M8 的 trial、闸门、`eval/final_eval.py`；只写 `results/t_diag_*.csv`；其他代码不 import 诊断代码。
+- **一个后果：诊断代码提交之后，`scripts/checks/check_ranker_eval.py --area t_phase` 在当前的 HEAD 上不能再运行。** 它读 T label 要过 M8 的闸门。需要重跑时先切回 tag `m8-run-v1`。这个核对在正式运行之后、任何代码改动之前已经跑过，结果在上一条记录里。
+- **四张表**（`scripts/m8_diagnostics.py`，配置 `configs/m8_diagnostics.yaml`，结果 `results/t_diag_*.csv`，只追加，每行带 `git_commit` 和 `run_started_at`）：
+  - **A 分解**（V1–T4 每周一行）：union recall、Recall@12、Recall@12 ÷ union recall、MAP@12，LambdaMART 和 RRF baseline 各一组。只用结果表，不读 label。
+  - **B 集中度**（D1–T4 共 16 周，每周一行）：购买量最高的 100 个、1000 个商品各占该周购买的比例；首次销售在 `[anchor − 28, anchor)` 的商品、anchor 之前没有任何销售的商品，各自的个数和占该周购买的比例。
+    - "购买"按 label 文件里去重后的（顾客, 商品）对统计，不是购买行（用户的决定）。
+    - 首次销售日从 `t_dat < anchor` 的交易算出（通过 `data/asof.py` 的 `history_window`，每一周单独读一次）。这超出了最初"只用已保存的 Top-12、候选和 label 文件"的要求：这三类文件里没有商品的首次销售日（宽表里的 `item_days_since_first_sale` 只覆盖 F–T 周的候选商品，D 周没有宽表）。用户同意。
+    - "anchor 当天及之后首次销售的商品"定义为：出现在该周的 label 文件里，而 anchor 之前的交易里没有它。不读 anchor 之后的交易表。这只是对 label 周本身的统计，不进入任何模型或特征。
+  - **C 分组**（V1–T4 每周三行）：按宽表里已保存的 `user_days_since_last_purchase` 分组：NaN 是"无历史"，1–30 是"最近 30 天内买过"，其余是"其他"。每组报告 query 数和占比、union recall、两个系统的 MAP@12。
+  - **D 区间**（T 合并、V 合并）：合并 MAP@12 的 95% 区间，LambdaMART、RRF baseline 和两者之差各一行。
+- **重算和核对**：LambdaMART 的逐 query AP 用保存下来的文件（`artifacts/predictions/.../{fold}_per_query.parquet`，取锁定的 500 棵那一组）。RRF baseline 的逐 query AP 和逐 query 的 union recall 当时没有保存，用冻结的宽表（先核对 sha256）、候选文件和 label 重新算，用的是项目自己的函数（`fusion/rrf.py` 的 `rrf_baseline`、`FoldEvaluator`）。每一周重算出的平均值必须与结果表里的记录相同（容差 1e-12，沿用 `hpo/selection.py` 的 `SCORE_EQUALITY_TOLERANCE`）；三组的 query 数之和必须等于结果表里记录的 query 数；合并值也核对。任何一项不符就报错，四张表都不写（读取记录那一行会留下，因为 label 确实读过了）。
+- **D 的做法：按顾客的 cluster bootstrap（用户的决定，替换了最初"按 query 重抽"的要求）。** 把一个阶段的 4 周合在一起，以顾客（`customer_idx`）为单位有放回地抽，抽的个数等于顾客数；被抽中的顾客带上他在这 4 周里的全部 query；合并 MAP@12 = 被抽中 query 的 AP 之和 ÷ query 数。1000 次，seed 42（写在配置里），取 2.5% 和 97.5% 分位（numpy 默认的线性插值）。"LambdaMART 减 baseline"用同一批抽样（配对）。T 和 V 各做一次，各用同一个 seed 重新开始。原因：同一个顾客在几周里的 query 不是独立的，按 query 重抽会把区间算窄。
+  - **这个区间只反映顾客抽样的不确定性，不反映周与周之间的差别。** 每一次重抽里都是同样的 4 周；它回答的是"换一批顾客，这 4 周的合并分数会差多少"，不回答"换 4 周会差多少"。所以它不能用来判断 T 与 V 的差别是不是偶然。
+- **几处实现上的选择（agent 定的，用户可以改）**：
+  - 用途一栏写的是英文 `descriptive diagnostics`（项目的记录都是英文），不是中文"描述性诊断"。
+  - 诊断的全部计算做完、所有核对通过之后才写四张表；写表之前先写读取记录。重复运行会追加新的行（用 `run_started_at` 区分），不覆盖旧的行。
+  - 四张表各覆盖哪些周，配置里写的是阶段（`[V, T]` 等），不是 fold 名。A、C、D 只允许 V 和 T（只有这两个阶段有 Ranker 的记录）。
+  - 诊断进程会加载 lightgbm（读锁定配置和结果表的模块 import 了它），但不训练也不加载任何模型。它的测试文件以 `test_diag_` 开头，归在 LightGBM 一侧（`tests/conftest.py`）。
+  - `tests/unit/test_final_code_rules.py` 里 M8 脚本的清单从 `scripts/m8_*.py` 的通配改成了两个脚本名（`m8_final_eval.py`、`m8_step.py`）。原来的通配会把 `scripts/m8_diagnostics.py` 也当成 M8 的代码，这是不对的：它是正式运行之后写的诊断，不是 M8 的一部分。M8 文件的预期清单没有变。AGENTS.md §3.3 里 M8 代码的范围也相应写成了这两个脚本名。
+- **没有做的**：没有在全量数据上运行（等用户 commit）；没有读任何 T 周的 label（`results/t_diag_label_access.csv` 还不存在）；最终报告没有写。
+- **proposal 已同步**：新增 §10.2；§10.1、§14、§14.1、§14.2 加了指向。AGENTS.md：§3.2（第二个入口、`check_ranker_eval.py` 要切回 tag）、§3.3、§5、§7。

@@ -119,6 +119,16 @@ class ProjectPaths:
         return self.configs_dir / "hpo" / "v_phase.yaml"
 
     @property
+    def m8_config_file(self) -> Path:
+        """configs/m8_final.yaml: target folds, rehearsal fold and acceptance criteria of M8."""
+        return self.configs_dir / "m8_final.yaml"
+
+    @property
+    def m8_diagnostics_config_file(self) -> Path:
+        """configs/m8_diagnostics.yaml: what the descriptive diagnostics after M8 describe."""
+        return self.configs_dir / "m8_diagnostics.yaml"
+
+    @property
     def m6_config_file(self) -> Path:
         """configs/m6_candidates.yaml: monitoring and stop settings of M6 candidate generation."""
         return self.configs_dir / "m6_candidates.yaml"
@@ -368,10 +378,20 @@ class ProjectPaths:
         """
         return self.lgb_dataset_dir(experiment) / f"{target_fold}_r{ratio}"
 
+    def final_dataset_dir(self, area: str, experiment: str, target_fold: str, ratio: int) -> Path:
+        """artifacts/lgb_datasets/{area}/{experiment}/{target_fold}_r{ratio}/: an M8 Dataset.
+
+        area is "t_phase" or "m8_rehearsal". The area keeps M8's Datasets apart from
+        the V phase's (ranker_dataset_dir): the rehearsal builds its own Dataset of
+        the rehearsal fold instead of loading the one M7 built.
+        """
+        return self.lgb_dataset_dir(area) / experiment / f"{target_fold}_r{ratio}"
+
     def ranker_model_file(self, area: str, experiment: str, config_id: str, fold: str) -> Path:
         """artifacts/models/ranker/{area}/{experiment}/{config_id}/{fold}/model.txt.
 
-        area is "v_phase" or "speed_test"; fold is the fold the model predicts.
+        area is "v_phase", "speed_test", "t_phase" or "m8_rehearsal"; fold is the fold
+        the model predicts.
         """
         return self.model_dir("ranker", area) / experiment / config_id / fold / "model.txt"
 
@@ -529,8 +549,78 @@ class ProjectPaths:
 
     @property
     def t_phase_results_file(self) -> Path:
-        """results/t_phase.csv."""
+        """results/t_phase.csv: one row per trial of the final evaluation (one T fold)."""
         return self.results_root / "t_phase.csv"
+
+    @property
+    def t_phase_metrics_file(self) -> Path:
+        """results/t_phase_metrics.csv: one row per (experiment, T fold): the metric values."""
+        return self.results_root / "t_phase_metrics.csv"
+
+    @property
+    def t_phase_recall_file(self) -> Path:
+        """results/t_phase_recall.csv: recall monitoring of the T folds (channels and union)."""
+        return self.results_root / "t_phase_recall.csv"
+
+    @property
+    def t_phase_goals_file(self) -> Path:
+        """results/t_phase_goals.csv: the verdict on G1-G3, one row per goal."""
+        return self.results_root / "t_phase_goals.csv"
+
+    @property
+    def t_phase_label_access_file(self) -> Path:
+        """results/t_phase_label_access.csv: when the labels of a T fold were first read."""
+        return self.results_root / "t_phase_label_access.csv"
+
+    @property
+    def m8_rehearsal_results_file(self) -> Path:
+        """results/m8_rehearsal.csv: the rehearsal's trial rows (same columns as v_phase.csv)."""
+        return self.results_root / "m8_rehearsal.csv"
+
+    @property
+    def m8_rehearsal_metrics_file(self) -> Path:
+        """results/m8_rehearsal_metrics.csv: the rehearsal's metric rows."""
+        return self.results_root / "m8_rehearsal_metrics.csv"
+
+    @property
+    def m8_rehearsal_recall_file(self) -> Path:
+        """results/m8_rehearsal_recall.csv: the rehearsal's recall monitoring rows."""
+        return self.results_root / "m8_rehearsal_recall.csv"
+
+    @property
+    def m8_rehearsal_check_file(self) -> Path:
+        """results/m8_rehearsal_check.csv: one row per comparison of a rehearsal with M7."""
+        return self.results_root / "m8_rehearsal_check.csv"
+
+    @property
+    def m8_runs_file(self) -> Path:
+        """results/m8_runs.csv: one row per M8 helper process (sampling, Dataset, monitor, ...)."""
+        return self.results_root / "m8_runs.csv"
+
+    @property
+    def t_diag_label_access_file(self) -> Path:
+        """results/t_diag_label_access.csv: every later read of T labels for diagnostics."""
+        return self.results_root / "t_diag_label_access.csv"
+
+    @property
+    def t_diag_decomposition_file(self) -> Path:
+        """results/t_diag_decomposition.csv: union recall, Recall@12, their ratio and MAP@12."""
+        return self.results_root / "t_diag_decomposition.csv"
+
+    @property
+    def t_diag_concentration_file(self) -> Path:
+        """results/t_diag_concentration.csv: how concentrated each label week's purchases are."""
+        return self.results_root / "t_diag_concentration.csv"
+
+    @property
+    def t_diag_query_groups_file(self) -> Path:
+        """results/t_diag_query_groups.csv: query groups by purchase history and their scores."""
+        return self.results_root / "t_diag_query_groups.csv"
+
+    @property
+    def t_diag_bootstrap_file(self) -> Path:
+        """results/t_diag_bootstrap.csv: bootstrap confidence intervals of the pooled MAP@12."""
+        return self.results_root / "t_diag_bootstrap.csv"
 
 
 def build_paths(config: BaseConfig, project_root: Path) -> ProjectPaths:
