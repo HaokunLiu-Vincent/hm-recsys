@@ -2315,3 +2315,135 @@ def parse_diagnostics_config(raw: Mapping[str, Any]) -> DiagnosticsConfig:
 def load_diagnostics_config(path: Path) -> DiagnosticsConfig:
     """Read and validate configs/m8_diagnostics.yaml."""
     return parse_diagnostics_config(load_yaml(path))
+
+
+# ---------------------------------------------------------------- kaggle_submission.yaml
+
+
+@dataclass(frozen=True)
+class KaggleRehearsalConfig:
+    """The `rehearsal` section of configs/kaggle_submission.yaml.
+
+    Attributes:
+        target_fold: The fold the rehearsal predicts again (T4). No label is read.
+        extra_customers: Customers added to the fold's query customers, drawn at
+            random from the customers that are not queries of that fold.
+        extra_customers_seed: Seed of that draw.
+        min_identical_top12_share: Share of the fold's queries whose Top-K list
+            must equal the list M8 saved, in (0, 1].
+    """
+
+    target_fold: str
+    extra_customers: int
+    extra_customers_seed: int
+    min_identical_top12_share: float
+
+
+@dataclass(frozen=True)
+class KaggleConfig:
+    """Settings from configs/kaggle_submission.yaml: the Kaggle late submission.
+
+    Attributes:
+        competition: The Kaggle competition name.
+        week_name: Name of the submission week, used like a fold name ("S").
+        week_anchor: First day of the submission week; inputs use t_dat < anchor.
+        week_label_end: Last day of the submission week, inclusive (it has no labels).
+        query_id_base: query_id of the first customer of a run.
+        shard_customers: Customers per shard (> 0).
+        predictions_per_customer: Articles per customer in the submission file (12).
+        rehearsal: The rehearsal settings.
+        rehearsal_disk_gb: Estimated new files of the rehearsal, in GB.
+        submission_disk_gb: Estimated new files of the real run, in GB.
+        disk_safety_factor: A run needs this many times the estimate as free space (>= 1).
+    """
+
+    competition: str
+    week_name: str
+    week_anchor: date
+    week_label_end: date
+    query_id_base: int
+    shard_customers: int
+    predictions_per_customer: int
+    rehearsal: KaggleRehearsalConfig
+    rehearsal_disk_gb: float
+    submission_disk_gb: float
+    disk_safety_factor: float
+
+
+def _parse_kaggle_rehearsal(raw: Mapping[str, Any], where: str) -> KaggleRehearsalConfig:
+    """The `rehearsal` section; the share must be in (0, 1] and the count positive."""
+    keys = {"target_fold", "extra_customers", "extra_customers_seed", "min_identical_top12_share"}
+    check_keys(raw, keys, where)
+    rehearsal = KaggleRehearsalConfig(
+        target_fold=get_str(raw, "target_fold", where),
+        extra_customers=get_int(raw, "extra_customers", where),
+        extra_customers_seed=get_int(raw, "extra_customers_seed", where),
+        min_identical_top12_share=get_float(raw, "min_identical_top12_share", where),
+    )
+    require_positive(rehearsal.extra_customers, f"{where}.extra_customers")
+    if not 0 < rehearsal.min_identical_top12_share <= 1:
+        raise ValueError(
+            f"{where}.min_identical_top12_share must be in (0, 1], "
+            f"got {rehearsal.min_identical_top12_share}"
+        )
+    return rehearsal
+
+
+def parse_kaggle_config(raw: Mapping[str, Any]) -> KaggleConfig:
+    """Build a KaggleConfig from the parsed content of configs/kaggle_submission.yaml.
+
+    Raises:
+        ValueError: If a key is missing or unknown, a number is not positive, the
+            week does not end after it starts, or query ids would not fit in int32.
+    """
+    where = "kaggle_submission"
+    keys = {
+        "competition",
+        "submission_week",
+        "query_id_base",
+        "shard_customers",
+        "predictions_per_customer",
+        "rehearsal",
+        "disk",
+    }
+    check_keys(raw, keys, where)
+    week = get_mapping(raw, "submission_week", where)
+    check_keys(week, {"name", "anchor", "label_end"}, f"{where}.submission_week")
+    disk = get_mapping(raw, "disk", where)
+    check_keys(disk, {"rehearsal_gb", "submission_gb", "safety_factor"}, f"{where}.disk")
+    config = KaggleConfig(
+        competition=get_str(raw, "competition", where),
+        week_name=get_str(week, "name", f"{where}.submission_week"),
+        week_anchor=get_date(week, "anchor", f"{where}.submission_week"),
+        week_label_end=get_date(week, "label_end", f"{where}.submission_week"),
+        query_id_base=get_int(raw, "query_id_base", where),
+        shard_customers=get_int(raw, "shard_customers", where),
+        predictions_per_customer=get_int(raw, "predictions_per_customer", where),
+        rehearsal=_parse_kaggle_rehearsal(
+            get_mapping(raw, "rehearsal", where), f"{where}.rehearsal"
+        ),
+        rehearsal_disk_gb=get_float(disk, "rehearsal_gb", f"{where}.disk"),
+        submission_disk_gb=get_float(disk, "submission_gb", f"{where}.disk"),
+        disk_safety_factor=get_float(disk, "safety_factor", f"{where}.disk"),
+    )
+    for name in ("shard_customers", "predictions_per_customer"):
+        require_positive(getattr(config, name), f"{where}.{name}")
+    for name in ("rehearsal_disk_gb", "submission_disk_gb"):
+        require_positive(getattr(config, name), f"{where}.disk.{name}")
+    if config.disk_safety_factor < 1:
+        raise ValueError(
+            f"{where}.disk.safety_factor must be >= 1, got {config.disk_safety_factor}"
+        )
+    if config.week_label_end < config.week_anchor:
+        raise ValueError(
+            f"{where}.submission_week: label_end {config.week_label_end} is before the "
+            f"anchor {config.week_anchor}"
+        )
+    if not 0 <= config.query_id_base <= INT32_MAX:
+        raise ValueError(f"{where}.query_id_base must be in 0..{INT32_MAX}")
+    return config
+
+
+def load_kaggle_config(path: Path) -> KaggleConfig:
+    """Read and validate configs/kaggle_submission.yaml."""
+    return parse_kaggle_config(load_yaml(path))

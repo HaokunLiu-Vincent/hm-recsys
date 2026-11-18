@@ -622,6 +622,128 @@ class ProjectPaths:
         """results/t_diag_bootstrap.csv: bootstrap confidence intervals of the pooled MAP@12."""
         return self.results_root / "t_diag_bootstrap.csv"
 
+    # ------------------------------------------------------------ Kaggle late submission
+
+    @property
+    def kaggle_config_file(self) -> Path:
+        """configs/kaggle_submission.yaml: the submission week, shards and rehearsal settings."""
+        return self.configs_dir / "kaggle_submission.yaml"
+
+    @property
+    def kaggle_dir(self) -> Path:
+        """artifacts/kaggle/: every file of the Kaggle late submission."""
+        return self.artifacts_root / "kaggle"
+
+    def kaggle_run_dir(self, run: str) -> Path:
+        """artifacts/kaggle/{run}/, with run = "rehearsal" or "submission"."""
+        return self.kaggle_dir / run
+
+    def kaggle_log_file(self, run: str, label: str) -> Path:
+        """The log of one process of a run: artifacts/kaggle/{run}/logs/{label}.log."""
+        return self.kaggle_run_dir(run) / "logs" / f"{label}.log"
+
+    def kaggle_queries_file(self, run: str) -> Path:
+        """The run's query list: one row per customer (query_id, fold, customer_idx, anchor)."""
+        return self.kaggle_run_dir(run) / "queries.parquet"
+
+    def kaggle_shard_dir(self, run: str, shard: int) -> Path:
+        """artifacts/kaggle/{run}/shards/{shard:03d}/: everything of one shard of customers."""
+        return self.kaggle_run_dir(run) / "shards" / f"{shard:03d}"
+
+    def kaggle_candidates_file(self, run: str, shard: int, channel: str) -> Path:
+        """One channel's candidates of one shard."""
+        return self.kaggle_shard_dir(run, shard) / "candidates" / f"{channel}.parquet"
+
+    def kaggle_r1_bucket_scores_file(self, run: str) -> Path:
+        """R1's S(g, i) table of the run (one table for all shards)."""
+        return self.kaggle_run_dir(run) / "r1_bucket_scores.parquet"
+
+    def kaggle_vectors_dir(self, run: str, shard: int, source: str) -> Path:
+        """The R5 ("wals") or R6 ("twotower") vectors of one shard (format of hmrec.vectors)."""
+        return self.kaggle_shard_dir(run, shard) / "vectors" / source
+
+    def kaggle_twotower_checkpoint_file(self, run: str, fold: str) -> Path:
+        """The R6 model after the run's own fine-tune on `fold`'s week."""
+        return self.kaggle_run_dir(run) / "twotower" / f"{fold}.pt"
+
+    def kaggle_item_table_file(self, run: str) -> Path:
+        """The C-group article table of the run (computed once, used by every shard)."""
+        return self.kaggle_run_dir(run) / "features_shared" / "item_table.parquet"
+
+    def kaggle_type_share_file(self, run: str) -> Path:
+        """The global product-type shares of the run (computed once, used by every shard)."""
+        return self.kaggle_run_dir(run) / "features_shared" / "global_type_share.parquet"
+
+    def kaggle_features_dir(self, run: str, shard: int) -> Path:
+        """The wide table of one shard: part-*.parquet and features.json."""
+        return self.kaggle_shard_dir(run, shard) / "features"
+
+    def kaggle_shard_stats_file(self, run: str, shard: int) -> Path:
+        """Per query of one shard: number of candidates and whether the customer has a history."""
+        return self.kaggle_shard_dir(run, shard) / "query_stats.parquet"
+
+    def kaggle_top_file(self, run: str, shard: int) -> Path:
+        """The Top-K of every query of one shard (query_id, rank, article_idx, score)."""
+        return self.kaggle_shard_dir(run, shard) / "top.parquet"
+
+    def kaggle_sample_file(self, run: str, fold: str, ratio: int) -> Path:
+        """The training sample of a fold that this run draws itself (T4 in the real run)."""
+        return self.kaggle_run_dir(run) / "ranker" / "samples" / fold / f"r{ratio}.parquet"
+
+    def kaggle_dataset_dir(self, run: str) -> Path:
+        """The run's binary LightGBM Dataset (train.bin and dataset.json)."""
+        return self.kaggle_run_dir(run) / "ranker" / "dataset"
+
+    def kaggle_model_file(self, run: str) -> Path:
+        """The run's ranker model (LightGBM text)."""
+        return self.kaggle_run_dir(run) / "ranker" / "model.txt"
+
+    def kaggle_submission_file(self, run: str) -> Path:
+        """The submission file: artifacts/kaggle/submission.csv; a rehearsal writes its own."""
+        if run == "submission":
+            return self.kaggle_dir / "submission.csv"
+        return self.kaggle_run_dir(run) / "submission.csv"
+
+    def kaggle_submission_gzip_file(self, run: str) -> Path:
+        """The gzip copy of the submission file (same name plus .gz)."""
+        file = self.kaggle_submission_file(run)
+        return file.with_name(file.name + ".gz")
+
+    @property
+    def kaggle_runs_file(self) -> Path:
+        """results/kaggle_runs.csv: one row per process (step, time, true memory peak)."""
+        return self.results_root / "kaggle_runs.csv"
+
+    @property
+    def kaggle_label_access_file(self) -> Path:
+        """results/kaggle_label_access.csv: every read of T labels as ranker training labels."""
+        return self.results_root / "kaggle_label_access.csv"
+
+    @property
+    def kaggle_twotower_results_file(self) -> Path:
+        """results/kaggle_twotower.csv: the R6 model fine-tuned for the submission (sha256)."""
+        return self.results_root / "kaggle_twotower.csv"
+
+    @property
+    def kaggle_candidates_results_file(self) -> Path:
+        """results/kaggle_candidates.csv: candidate counts of a run, per channel and after dedup."""
+        return self.results_root / "kaggle_candidates.csv"
+
+    @property
+    def kaggle_rehearsal_file(self) -> Path:
+        """results/kaggle_rehearsal.csv: the checks of the rehearsal against M8."""
+        return self.results_root / "kaggle_rehearsal.csv"
+
+    @property
+    def kaggle_files_file(self) -> Path:
+        """results/kaggle_files.csv: the written submission files (size, sha256, format checks)."""
+        return self.results_root / "kaggle_files.csv"
+
+    @property
+    def kaggle_submission_results_file(self) -> Path:
+        """results/kaggle_submission.csv: the one submission (time, status, the two scores)."""
+        return self.results_root / "kaggle_submission.csv"
+
 
 def build_paths(config: BaseConfig, project_root: Path) -> ProjectPaths:
     """Derive ProjectPaths from a BaseConfig.

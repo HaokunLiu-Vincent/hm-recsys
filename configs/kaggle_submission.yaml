@@ -1,0 +1,37 @@
+# Kaggle late submission (docs/decisions.md 2026-11-19). Read by hmrec.config.load_kaggle_config.
+#
+# The submission week is NOT a fold of configs/fold_manifest.yaml: it has no labels and
+# takes part in no tuning, selection or evaluation. It is defined here so that the
+# manifest and everything that depends on it stay unchanged.
+
+competition: h-and-m-personalized-fashion-recommendations
+
+submission_week:
+  name: S                  # used as the "fold" name of the files under artifacts/kaggle/
+  anchor: 2020-09-23       # the day after the last day of transactions_train.csv
+  label_end: 2020-09-29    # 7 days, like every fold
+
+# query_id = query_id_base + position (position = rank of customer_idx among the run's
+# customers). 160,000,000 = 16 folds x query_id_fold_offset (configs/queries.yaml), so
+# these ids are above every query_id of the 16 folds.
+query_id_base: 160000000
+
+# Customers per shard. A fold of M6 has 69,000-86,000 queries; 70,000 keeps a shard
+# inside the memory profile measured there (features: at most 7.25 GB).
+shard_customers: 70000
+
+predictions_per_customer: 12
+
+rehearsal:
+  target_fold: T4                  # predicted again with the new code path; no label is read
+  extra_customers: 50000           # customers that are not T4 queries, drawn at random
+  extra_customers_seed: 20261119
+  # Share of T4 queries whose Top-12 list must equal the one M8 saved.
+  min_identical_top12_share: 0.999
+
+disk:
+  # Estimated new files under artifacts/kaggle/, in GB. A run starts only if the free
+  # space is at least safety_factor times the estimate.
+  rehearsal_gb: 4.0
+  submission_gb: 40.0
+  safety_factor: 1.5
