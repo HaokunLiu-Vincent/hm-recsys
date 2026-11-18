@@ -260,6 +260,17 @@ POST_LOCK_FILES = (
     "scripts/m6_run_folds.py",
     "scripts/m6_build_features.py",
     "scripts/m7_ranker_hpo.py",
+    "scripts/m7_sample.py",
+    "scripts/m7_build_dataset.py",
+    "scripts/m7_train_eval.py",
+    "scripts/m7_rrf_baseline.py",
+    "scripts/m7_speed_test.py",
+    "scripts/checks/check_ranker_eval.py",
+    "src/hmrec/eval/ranker_eval.py",
+    "src/hmrec/hpo/v_records.py",
+    "src/hmrec/hpo/v_trial.py",
+    "src/hmrec/hpo/v_phase.py",
+    "src/hmrec/hpo/speed_test.py",
     "scripts/m8_final_eval.py",
 )
 POST_LOCK_FOLDERS = ("src/hmrec/fusion", "src/hmrec/features", "src/hmrec/ranker")

@@ -22,10 +22,15 @@ lint:
 	uv run ruff check src tests scripts
 	uv run pyright
 
+# Tests run in TWO processes: torch and LightGBM each load their own OpenMP runtime, and
+# both in one process abort or hang (tests/conftest.py). The second run is the Ranker (M7).
+
 ## test-fast: unit tests only (should finish in < 1 minute)
 test-fast:
 	uv run pytest tests/unit -q
+	uv run pytest tests/unit -q --lightgbm-side
 
 ## test: unit tests + integration tests
 test:
 	uv run pytest tests -q
+	uv run pytest tests -q --lightgbm-side

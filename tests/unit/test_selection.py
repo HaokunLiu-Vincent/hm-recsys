@@ -16,6 +16,7 @@ from hmrec.hpo.selection import (
     SWITCH,
     TrialScores,
     check_candidate,
+    choose_num_trees,
     choose_winner,
     convergence_decision,
     is_clearly_worse,
@@ -158,3 +159,47 @@ def test_slightly_worse_longer_run_is_not_clearly_worse() -> None:
     # -2% pooled but only 2 folds worse -> not "clearly worse".
     longer = _scores("it25", (0.090, 0.090, 0.101, 0.101), 0.098)
     assert not is_clearly_worse(CURRENT, longer, RULE)
+
+
+# ---------------------------------------------------------------- Ranker: number of trees
+#
+# k* = the smallest k with (max P - P(k)) / max P < 1% (configs/hpo/v_phase.yaml).
+
+
+def test_num_trees_takes_the_smallest_k_on_the_plateau() -> None:
+    # Best is 0.0320 at 300. Within 1% means P(k) > 0.03168: 200 (0.0318) and 400 qualify,
+    # 100 (0.0300, 6.25% below) does not. The smallest of them is 200.
+    curve = {100: 0.0300, 200: 0.0318, 300: 0.0320, 400: 0.0319}
+    choice = choose_num_trees(curve, 0.01)
+    assert (choice.num_trees, choice.score) == (200, 0.0318)
+    assert (choice.best_num_trees, choice.best_score) == (300, 0.0320)
+    assert choice.uses_all_trees is False
+
+
+def test_num_trees_exactly_one_percent_below_is_not_about_equal() -> None:
+    # 0.99 is exactly 1% below 1.0: "< 1%" excludes it, so 200 (0.5% below) is chosen.
+    choice = choose_num_trees({100: 0.99, 200: 0.995, 300: 1.0}, 0.01)
+    assert choice.num_trees == 200
+
+
+def test_num_trees_rising_curve_uses_all_trees() -> None:
+    choice = choose_num_trees({100: 0.020, 200: 0.025, 300: 0.030}, 0.01)
+    assert (choice.num_trees, choice.best_num_trees) == (300, 300)
+    assert choice.uses_all_trees is True  # the caller stops and asks for more trees
+
+
+def test_num_trees_early_peak_then_overfitting() -> None:
+    choice = choose_num_trees({100: 0.030, 200: 0.028, 300: 0.020}, 0.01)
+    assert choice.num_trees == 100 and choice.uses_all_trees is False
+
+
+def test_num_trees_ties_at_the_best_score_take_the_smallest_k() -> None:
+    choice = choose_num_trees({300: 0.03, 100: 0.03, 200: 0.03}, 0.01)
+    assert (choice.num_trees, choice.best_num_trees) == (100, 100)
+
+
+def test_num_trees_needs_a_curve_and_a_positive_tolerance() -> None:
+    with pytest.raises(ValueError, match="curve is empty"):
+        choose_num_trees({}, 0.01)
+    with pytest.raises(ValueError, match="tolerance must be > 0"):
+        choose_num_trees({100: 0.03}, 0.0)
