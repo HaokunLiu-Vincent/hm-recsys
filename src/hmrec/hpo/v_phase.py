@@ -75,12 +75,13 @@ from hmrec.hpo.v_records import (
     rows_at,
     scores_at,
 )
-from hmrec.hpo.v_trial import TrialInputs, TrialSpec, model_config, ranker_config_id
+from hmrec.hpo.v_trial import TrialInputs, TrialSpec
 from hmrec.locks import file_sha256, load_features_lock
 from hmrec.logging_utils import get_logger, setup_logging
 from hmrec.paths import ProjectPaths, get_paths
 from hmrec.ranker.ablation import FULL, MINUS_R6, build_experiment, wide_table_columns
 from hmrec.ranker.dataset import dataset_is_built
+from hmrec.ranker.identity import model_config, ranker_config_id
 from hmrec.ranker.predict import checkpoints
 from hmrec.ranker.runtime import read_lightgbm_runtime
 from hmrec.ranker.sampling import SampleJob, record_file

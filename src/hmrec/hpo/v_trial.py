@@ -20,11 +20,9 @@ The rows of the results tables are written by the script afterwards; the trial
 row is written last and marks the trial as done.
 """
 
-import hashlib
-import json
 import time
 from collections.abc import Mapping, Sequence
-from dataclasses import asdict, dataclass, replace
+from dataclasses import dataclass, replace
 from pathlib import Path
 from typing import Any
 
@@ -56,6 +54,7 @@ from hmrec.ranker.dataset import (
     read_dataset_record,
     save_dataset,
 )
+from hmrec.ranker.identity import model_config, ranker_config_id
 from hmrec.ranker.predict import RANK, SCORE, query_chunks, score_rows
 from hmrec.ranker.sampling import LABEL, read_sample_record, record_file, verify_sample_file
 from hmrec.ranker.train import (
@@ -69,7 +68,6 @@ from hmrec.ranker.window import m7_training_window, require_m7_target_fold
 LOGGER = get_logger("hpo.v_trial")
 
 NUM_TREES = "num_trees"
-CONFIG_ID_LENGTH = 12
 
 
 @dataclass(frozen=True)
@@ -118,35 +116,6 @@ class TrialSpec:
     num_trees: int
     histogram_mode: str
     evaluate: bool
-
-
-# ---------------------------------------------------------------- identity
-
-
-def model_config(
-    ranker: RankerConfig, tuned: RankerTunedParams, experiment: str, histogram_mode: str
-) -> dict[str, Any]:
-    """Everything that defines a trained model, apart from its number of trees and its fold.
-
-    The number of trees is left out on purpose: training is deterministic, so
-    the first k trees do not depend on how many trees follow.
-    """
-    return {
-        "experiment": experiment,
-        "tuned": asdict(tuned),
-        "window_weeks": ranker.window_weeks,
-        "seed": ranker.seed,
-        "sampling_seed": ranker.sampling.seed,
-        "histogram_mode": histogram_mode,
-        "dataset_params": dict(ranker.dataset_params),
-        "train_params": dict(ranker.train_params),
-    }
-
-
-def ranker_config_id(config: Mapping[str, Any]) -> str:
-    """12 hex characters identifying a model_config."""
-    text = json.dumps(config, sort_keys=True)
-    return hashlib.sha256(text.encode("utf-8")).hexdigest()[:CONFIG_ID_LENGTH]
 
 
 # ---------------------------------------------------------------- the binary Dataset

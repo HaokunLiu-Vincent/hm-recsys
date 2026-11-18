@@ -114,7 +114,7 @@ class RankerTrialRecord:
         phase: "V".
         experiment: "full" or "minus_r6".
         step: The step the trial ran in, e.g. "leaves_x_min_data".
-        config_id: Hash of everything that defines the model (hpo.v_phase.ranker_config_id).
+        config_id: Hash of everything that defines the model (ranker.identity.ranker_config_id).
         fold: The predicted fold.
         train_folds: The training folds in time order.
         params: The tuned values (num_leaves, min_data_in_leaf, negatives_per_positive).

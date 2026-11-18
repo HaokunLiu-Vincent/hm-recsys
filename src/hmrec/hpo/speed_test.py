@@ -36,8 +36,9 @@ from hmrec.hpo.v_records import (
     read_trial_rows,
     results_files,
 )
-from hmrec.hpo.v_trial import TrialSpec, model_config, ranker_config_id
+from hmrec.hpo.v_trial import TrialSpec
 from hmrec.ranker.ablation import FULL
+from hmrec.ranker.identity import model_config, ranker_config_id
 from hmrec.ranker.sampling import SampleRecord, read_sample_record, record_file
 from hmrec.ranker.train import decide_histogram_mode
 from hmrec.ranker.window import m7_training_window
