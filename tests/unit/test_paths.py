@@ -134,6 +134,7 @@ def test_build_paths_derives_everything_from_roots(tmp_path: Path) -> None:
     assert paths.channels_lock_file == tmp_path / "configs" / "locks" / "channels.lock.yaml"
     assert paths.twotower_lock_file == tmp_path / "configs" / "locks" / "twotower.lock.yaml"
     assert paths.features_lock_file == tmp_path / "configs" / "locks" / "features.lock.yaml"
+    assert paths.ranker_lock_file == tmp_path / "configs" / "locks" / "ranker.lock.yaml"
     # The M5 lock check writes its candidates away from artifacts/candidates/.
     assert paths.lock_check_candidates_file("D1", "r4_itemcf") == Path(
         "/abs/artifacts/m5/lock_check/D1/r4_itemcf.parquet"

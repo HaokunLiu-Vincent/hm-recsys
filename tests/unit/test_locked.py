@@ -271,6 +271,7 @@ POST_LOCK_FILES = (
     "src/hmrec/hpo/v_trial.py",
     "src/hmrec/hpo/v_phase.py",
     "src/hmrec/hpo/speed_test.py",
+    "src/hmrec/hpo/v_lock.py",
     "scripts/m8_final_eval.py",
 )
 POST_LOCK_FOLDERS = ("src/hmrec/fusion", "src/hmrec/features", "src/hmrec/ranker")

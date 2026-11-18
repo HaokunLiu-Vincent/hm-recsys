@@ -1960,7 +1960,7 @@ def _parse_histogram(raw: Mapping[str, Any], where: str) -> HistogramConfig:
     return histogram
 
 
-def _parse_lightgbm_params(
+def parse_lightgbm_params(
     raw: Mapping[str, Any], expected: frozenset[str], where: str
 ) -> dict[str, Any]:
     """A section of LightGBM parameters with exactly the expected keys and plain values."""
@@ -2015,12 +2015,12 @@ def parse_ranker_config(raw: Mapping[str, Any]) -> RankerConfig:
             target_fold=get_str(speed_test, "target_fold", f"{where}.speed_test"),
             num_trees=get_int(speed_test, "num_trees", f"{where}.speed_test"),
         ),
-        dataset_params=_parse_lightgbm_params(
+        dataset_params=parse_lightgbm_params(
             get_mapping(raw, "dataset_params", where),
             RANKER_DATASET_PARAM_KEYS,
             f"{where}.dataset_params",
         ),
-        train_params=_parse_lightgbm_params(
+        train_params=parse_lightgbm_params(
             get_mapping(raw, "train_params", where),
             RANKER_TRAIN_PARAM_KEYS,
             f"{where}.train_params",

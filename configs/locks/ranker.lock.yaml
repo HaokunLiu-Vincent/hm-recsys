@@ -1,0 +1,165 @@
+# LOCKED Ranker configuration (M7, proposal §9.6): LightGBM LambdaMART, final version.
+#
+# DO NOT EDIT OR DELETE (AGENTS.md §3.3): files under configs/locks/ are append-only.
+# Written on 2026-11-18, after the V phase (V1-V4) was finished: step 1
+# (num_leaves x min_data_in_leaf), step 2 (negatives_per_positive), the ablation without
+# R6 and the feature importance (docs/decisions.md). No fold after V4 had been evaluated.
+# From here on the final evaluation (M8) gets the Ranker configuration from this file
+# through hmrec.ranker.locked (the only entry). configs/ranker.yaml (tuned defaults and
+# fixed parameters), configs/hpo/v_phase.yaml and results/v_phase*.csv are no longer read
+# for configuration.
+#
+#   selection          how this configuration was chosen:
+#                        basis                    rule_selection = the §4.2 rule on V1-V4
+#                                                 (configs/hpo/v_phase.yaml)
+#                        config_id                id of the locked configuration
+#                                                 (hmrec.ranker.identity.ranker_config_id: a
+#                                                 hash of the tuned values, window, seeds,
+#                                                 histogram mode and all LightGBM parameters
+#                                                 below; hmrec.ranker.locked recomputes it)
+#                        rule_selected_config_id  the configuration the rule selected
+#                                                 (= config_id when basis is rule_selection)
+#                        default_kept             true: in both steps no candidate passed
+#                                                 the rule, so the defaults (31, 500, 40)
+#                                                 the grid started from were kept
+#                        decision_record          the docs/decisions.md entry
+#                        v_phase_record           FOR THE RECORD ONLY: MAP@12 of this
+#                                                 configuration with num_trees trees on V1-V4
+#                                                 as stored in `source` (pooled = all queries
+#                                                 of the 4 weeks together, proposal §4.1).
+#                                                 V scores are optimistic (the number of trees
+#                                                 and the parameters were chosen on these
+#                                                 weeks) and nothing reads them to make a
+#                                                 choice.
+#   references         the lock files this configuration was tuned on, with their sha256:
+#                      the 71 features (features_lock), the candidates of R1-R5
+#                      (channels_lock) and R6 (twotower_lock: the R6 candidates and the four
+#                      tt_ features depend on it). It is valid only together with exactly
+#                      these files; hmrec.ranker.locked checks the three hashes.
+#   runtime            the LightGBM and libomp versions every V-phase trial ran with, and
+#                      num_threads (configs/base.yaml). libomp is Homebrew's, a system
+#                      library outside uv.lock. Another version or thread count can change
+#                      the trees or the order of floating-point sums.
+#   training_window    a model that predicts a week is trained from scratch on the
+#                      window_weeks weeks right before it (proposal §9.2).
+#   sampling           negative sampling of the training rows (proposal §9.1,
+#                      hmrec.ranker.sampling). method per_query_seeded_shuffle: only queries
+#                      with at least one positive; all positives are kept; per query a
+#                      random generator seeded with (seed, query_id) shuffles the negatives
+#                      (in article_idx order) and the first
+#                      min(number of negatives, negatives_per_positive x number of positives)
+#                      are kept. row_group_rows = rows per Parquet row group of a sample file,
+#                      which is also the block LightGBM reads when the Dataset is built.
+#   model              num_leaves, min_data_in_leaf (tuned); num_trees = k, the number of
+#                      trees of the final model (no early stopping); seed; histogram_mode
+#                      (decided by the speed test rule before the grid); dataset_params
+#                      (define the bins) and train_params: EVERY LightGBM parameter that is
+#                      passed, same keys and values as configs/ranker.yaml when the V phase
+#                      ran. metric / eval_at / verbosity only affect the training log.
+#   scoring            checkpoint_every = trees per segment of the staged scoring
+#                      (hmrec.ranker.predict.staged_raw_scores): the score with k trees is
+#                      the float64 sum of the segments' raw scores, so the segment length is
+#                      part of the definition of a score. top_k = rows kept per query, ordered
+#                      by score DESC, article_idx ASC.
+#
+# Not locked here, on purpose:
+#   - scoring_query_chunk_size and train_metric_every of configs/ranker.yaml, and the
+#     memory limit and chunk sizes of configs/base.yaml: memory and logging only;
+#   - the rule and numbers that decided the histogram mode, and the speed-test settings:
+#     they were used once, before the grid.
+#
+# tests/unit/test_v_lock.py checks this file against a replay of the selection rule on
+# results/v_phase_metrics.csv (hmrec.hpo.v_lock) and that a change of any value is refused.
+
+lock:
+  name: ranker
+  locked_on: 2026-11-18
+  # HEAD when this file was written. The commits that add the lock code and this file come
+  # after it. The selected configuration's 4 trials ran at 5a65308 (step 1); step 2, the
+  # ablation without R6 and the feature importance ran at a445eeb.
+  git_commit: 1de35313f2df8149d74d54ee19b05791f4aa3993
+
+selection:
+  basis: rule_selection
+  config_id: ca1a3cdfce49
+  rule_selected_config_id: ca1a3cdfce49
+  default_kept: true
+  decision_record: "docs/decisions.md 2026-11-18 M7 第 2 步、去掉 R6 和 feature importance 的结果；Ranker 配置锁定"
+  v_phase_record:
+    source: results/v_phase_metrics.csv
+    metric: map@12
+    pooled: 0.032712644875495474
+    folds:
+      V1: 0.030112271332103004
+      V2: 0.031332322343837385
+      V3: 0.03502883086378067
+      V4: 0.034849701577104486
+
+references:
+  features_lock:
+    path: configs/locks/features.lock.yaml
+    sha256: a3960842a9c4fa4ad0e25ade6b4ee76efc6e1cf152627c874b6b48ce80bc5e9f
+  channels_lock:
+    path: configs/locks/channels.lock.yaml
+    sha256: a09126f9a987e213a7f1d92b4f14e80a1a8c8c916e4adaf85c213d4982bb5031
+  twotower_lock:
+    path: configs/locks/twotower.lock.yaml
+    sha256: 7008dc11403b107f6104cbfffdd13921f77f9cd96b478e1674d3b47e4559c5e5
+
+runtime:
+  lightgbm_version: "4.7.0"
+  libomp_version: "22.1.4"
+  num_threads: 6
+
+training_window:
+  window_weeks: 4
+
+sampling:
+  method: per_query_seeded_shuffle
+  seed: 42
+  negatives_per_positive: 40
+  row_group_rows: 100000
+
+model:
+  num_leaves: 31
+  min_data_in_leaf: 500
+  num_trees: 500
+  seed: 42
+  histogram_mode: row_wise
+  dataset_params:
+    max_bin: 255
+    min_data_in_bin: 3
+    bin_construct_sample_cnt: 200000
+    use_missing: true
+    zero_as_missing: false
+    enable_bundle: true
+    feature_pre_filter: false
+  train_params:
+    objective: lambdarank
+    boosting: gbdt
+    learning_rate: 0.05
+    feature_fraction: 0.8
+    bagging_fraction: 0.8
+    bagging_freq: 1
+    bagging_by_query: false
+    feature_fraction_bynode: 1.0
+    max_depth: -1
+    min_sum_hessian_in_leaf: 0.001
+    min_gain_to_split: 0.0
+    lambda_l1: 0.0
+    lambda_l2: 0.0
+    lambdarank_truncation_level: 30
+    lambdarank_norm: true
+    max_cat_threshold: 32
+    cat_l2: 10.0
+    cat_smooth: 10.0
+    max_cat_to_onehot: 4
+    min_data_per_group: 100
+    metric: ndcg
+    eval_at: [12]
+    deterministic: true
+    verbosity: -1
+
+scoring:
+  checkpoint_every: 100
+  top_k: 12

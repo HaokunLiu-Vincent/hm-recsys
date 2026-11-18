@@ -147,6 +147,11 @@ class ProjectPaths:
         """configs/locks/features.lock.yaml: the locked Ranker features (M6, proposal §8.7)."""
         return self.locks_dir / "features.lock.yaml"
 
+    @property
+    def ranker_lock_file(self) -> Path:
+        """configs/locks/ranker.lock.yaml: the final Ranker configuration (M7, proposal §9.6)."""
+        return self.locks_dir / "ranker.lock.yaml"
+
     # ------------------------------------------------------------ raw data
 
     @property

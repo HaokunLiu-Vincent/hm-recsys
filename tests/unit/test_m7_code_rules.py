@@ -22,6 +22,7 @@ M7_MODULES = [
     REPO / "src" / "hmrec" / "hpo" / "v_trial.py",
     REPO / "src" / "hmrec" / "hpo" / "v_phase.py",
     REPO / "src" / "hmrec" / "hpo" / "speed_test.py",
+    REPO / "src" / "hmrec" / "hpo" / "v_lock.py",
 ]
 
 
@@ -94,9 +95,11 @@ def test_m7_processes_never_import_torch() -> None:
     # (or the recall package, which imports it).
     modules = [
         "hmrec.hpo.speed_test",
+        "hmrec.hpo.v_lock",
         "hmrec.hpo.v_phase",
         "hmrec.hpo.v_trial",
         "hmrec.hpo.v_records",
+        "hmrec.ranker.locked",
         "hmrec.eval.ranker_eval",
         "hmrec.pipeline",
         "hmrec.run_records",

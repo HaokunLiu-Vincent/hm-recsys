@@ -23,14 +23,17 @@ from hmrec.locks import (
     check_file_sha256,
     file_sha256,
     load_channels_lock,
+    load_ranker_lock,
     load_twotower_lock,
     parse_channels_lock,
+    parse_ranker_lock,
     parse_twotower_lock,
 )
 
 LOCKS = Path(__file__).resolve().parents[2] / "configs" / "locks"
 CHANNELS_FILE = LOCKS / "channels.lock.yaml"
 TWOTOWER_FILE = LOCKS / "twotower.lock.yaml"
+RANKER_FILE = LOCKS / "ranker.lock.yaml"
 
 
 def _channels_raw() -> dict[str, Any]:
@@ -39,6 +42,10 @@ def _channels_raw() -> dict[str, Any]:
 
 def _twotower_raw() -> dict[str, Any]:
     return copy.deepcopy(load_yaml(TWOTOWER_FILE))
+
+
+def _ranker_raw() -> dict[str, Any]:
+    return copy.deepcopy(load_yaml(RANKER_FILE))
 
 
 # ---------------------------------------------------------------- the real files
@@ -171,6 +178,131 @@ def test_twotower_lock_refuses_a_frozen_config_and_other_alarm_settings() -> Non
     del raw["checkpoints"]["f1_start"]
     with pytest.raises(ValueError, match="missing keys"):
         parse_twotower_lock(raw)
+
+
+# ---------------------------------------------------------------- ranker.lock.yaml
+
+
+def test_ranker_lock_holds_the_final_configuration() -> None:
+    lock = load_ranker_lock(RANKER_FILE)
+    assert lock.stamp.name == "ranker"
+    assert lock.stamp.locked_on == date(2026, 11, 18)
+    assert lock.stamp.git_commit == "1de35313f2df8149d74d54ee19b05791f4aa3993"
+    # The V phase kept the defaults: 31 leaves, min_data_in_leaf 500, 40 negatives per
+    # positive, and chose 500 trees (docs/decisions.md 2026-11-18).
+    assert (lock.model.num_leaves, lock.model.min_data_in_leaf) == (31, 500)
+    assert lock.sampling.negatives_per_positive == 40
+    assert lock.model.num_trees == 500
+    assert lock.model.histogram_mode == "row_wise"
+    assert lock.selection.basis == RULE_SELECTION
+    assert lock.selection.config_id == lock.selection.rule_selected_config_id == "ca1a3cdfce49"
+    assert lock.selection.default_kept is True
+    assert (lock.window_weeks, lock.scoring.checkpoint_every, lock.scoring.top_k) == (4, 100, 12)
+    assert (lock.model.seed, lock.sampling.seed, lock.sampling.row_group_rows) == (42, 42, 100000)
+    assert lock.runtime.lightgbm_version == "4.7.0"  # text, not the number 4.7
+    assert lock.runtime.libomp_version == "22.1.4"
+    assert lock.runtime.num_threads == 6
+    assert tuple(lock.references) == ("features_lock", "channels_lock", "twotower_lock")
+    assert lock.references["features_lock"].path == "configs/locks/features.lock.yaml"
+    assert lock.references["twotower_lock"].path == "configs/locks/twotower.lock.yaml"
+    assert len(lock.model.dataset_params) == 7 and len(lock.model.train_params) == 24
+    assert lock.selection.v_phase_record.metric == "map@12"
+    assert tuple(lock.selection.v_phase_record.folds) == ("V1", "V2", "V3", "V4")
+
+
+def test_the_ranker_lock_points_to_an_entry_of_the_decision_log() -> None:
+    lock = load_ranker_lock(RANKER_FILE)
+    prefix = "docs/decisions.md "
+    assert lock.selection.decision_record.startswith(prefix)
+    heading = "## " + lock.selection.decision_record.removeprefix(prefix)
+    decisions = (LOCKS.parents[1] / "docs" / "decisions.md").read_text(encoding="utf-8")
+    assert sum(line.startswith(heading) for line in decisions.splitlines()) == 1
+
+
+def test_ranker_lock_refuses_missing_and_unknown_keys_in_every_section() -> None:
+    sections = ("selection", "references", "runtime", "training_window", "sampling", "model")
+    for section in (*sections, "scoring"):
+        raw = _ranker_raw()
+        raw[section]["made_up"] = 1
+        with pytest.raises(ValueError, match="unknown keys"):
+            parse_ranker_lock(raw)
+        raw = _ranker_raw()
+        del raw[section]
+        with pytest.raises(ValueError, match="missing keys"):
+            parse_ranker_lock(raw)
+    # Every LightGBM parameter must be written out: none may be dropped or added.
+    raw = _ranker_raw()
+    del raw["model"]["train_params"]["lambdarank_truncation_level"]
+    with pytest.raises(ValueError, match="missing keys"):
+        parse_ranker_lock(raw)
+    raw = _ranker_raw()
+    raw["model"]["dataset_params"]["max_bin_by_feature"] = [255]
+    with pytest.raises(ValueError, match="unknown keys"):
+        parse_ranker_lock(raw)
+    raw = _ranker_raw()
+    for name in ("features_lock", "channels_lock", "twotower_lock"):
+        raw = _ranker_raw()
+        del raw["references"][name]
+        with pytest.raises(ValueError, match="missing keys"):
+            parse_ranker_lock(raw)
+
+
+def test_ranker_lock_refuses_values_a_model_cannot_be_built_with() -> None:
+    cases = [
+        (("model", "histogram_mode"), "undecided", "histogram_mode must be one of"),
+        (("model", "num_trees"), 550, "must be a multiple of"),  # 550 is not 100, 200, ...
+        (("model", "num_trees"), 0, "num_trees must be > 0"),
+        (("model", "num_leaves"), "31", "expected"),  # text instead of a number
+        (("model", "seed"), -1, "seed must be >= 0"),
+        (("sampling", "method"), "uniform", "method must be"),
+        (("sampling", "negatives_per_positive"), 0, "negatives_per_positive must be > 0"),
+        (("sampling", "row_group_rows"), 0, "row_group_rows must be > 0"),
+        (("scoring", "checkpoint_every"), 0, "checkpoint_every must be > 0"),
+        (("scoring", "top_k"), 0, "top_k must be > 0"),
+        (("training_window", "window_weeks"), 0, "window_weeks must be > 0"),
+        (("runtime", "num_threads"), 0, "num_threads must be > 0"),
+        (("runtime", "lightgbm_version"), 4.7, "expected"),  # unquoted in YAML: a number
+        (("runtime", "libomp_version"), " ", "must not be empty"),
+        (("selection", "default_kept"), 1, "expected true or false"),
+        (("selection", "decision_record"), "", "expected a non-empty string"),
+        (("selection", "config_id"), "ca1a3cdf", "expected 12 lowercase hex"),
+        (("references", "features_lock"), {"path": "x", "sha256": "0ABC"}, "expected 64 lowercase"),
+    ]
+    for (section, key), value, message in cases:
+        raw = _ranker_raw()
+        raw[section][key] = value
+        with pytest.raises(ValueError, match=message):
+            parse_ranker_lock(raw)
+
+
+def test_ranker_lock_basis_must_fit_the_configuration_ids() -> None:
+    raw = _ranker_raw()
+    raw["selection"]["basis"] = "guess"
+    with pytest.raises(ValueError, match="basis must be one of"):
+        parse_ranker_lock(raw)
+    # The rule's own configuration cannot be labelled a manual decision ...
+    raw = _ranker_raw()
+    raw["selection"]["basis"] = MANUAL_DECISION
+    with pytest.raises(ValueError, match="does not fit"):
+        parse_ranker_lock(raw)
+    # ... and another configuration cannot be called the rule's selection.
+    raw = _ranker_raw()
+    raw["selection"]["rule_selected_config_id"] = "3f2285d99ba3"
+    with pytest.raises(ValueError, match="does not fit"):
+        parse_ranker_lock(raw)
+    raw["selection"]["basis"] = MANUAL_DECISION
+    assert parse_ranker_lock(raw).selection.basis == MANUAL_DECISION
+
+
+def test_a_ranker_lock_of_another_kind_is_refused() -> None:
+    raw = _ranker_raw()
+    raw["lock"]["name"] = "features"
+    with pytest.raises(ValueError, match="expected 'ranker'"):
+        parse_ranker_lock(raw)
+    raw = _ranker_raw()
+    raw["lock"]["git_commit"] = "1de3531"  # short hash
+    with pytest.raises(ValueError, match="expected 40 lowercase hex"):
+        parse_ranker_lock(raw)
 
 
 # ---------------------------------------------------------------- sha256

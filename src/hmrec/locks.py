@@ -3,10 +3,12 @@
     configs/locks/channels.lock.yaml  -> ChannelsLock   (R1-R5)
     configs/locks/twotower.lock.yaml  -> TwoTowerLock   (R6: config, alarm users, model files)
     configs/locks/features.lock.yaml  -> FeaturesLock   (the 71 Ranker features)
+    configs/locks/ranker.lock.yaml    -> RankerLock     (the final Ranker configuration)
 
 This module belongs to the bottom layer (it needs only hmrec.config and the
-standard library), so recall/ and features/ may both import it. It only READS
-and CHECKS the lock files. Building channels from them is hmrec.recall.locked.
+standard library), so recall/, features/ and ranker/ may all import it. It only
+READS and CHECKS the lock files. Building channels from them is
+hmrec.recall.locked; building the Ranker configuration is hmrec.ranker.locked.
 
 Every loader is strict, like hmrec.config: a missing key, an unknown key or a
 value of the wrong type raises ValueError. A locked channel config must also pass
@@ -26,8 +28,13 @@ from typing import Any
 
 from hmrec.config import (
     FEATURE_DTYPES,
+    HISTOGRAM_COL_WISE,
+    HISTOGRAM_ROW_WISE,
+    RANKER_DATASET_PARAM_KEYS,
+    RANKER_TRAIN_PARAM_KEYS,
     FeaturesConfig,
     check_keys,
+    get_bool,
     get_date,
     get_float,
     get_int,
@@ -36,6 +43,7 @@ from hmrec.config import (
     get_str_list,
     load_yaml,
     parse_itemcf_config,
+    parse_lightgbm_params,
     parse_popularity_config,
     parse_repurchase_config,
     parse_sibling_config,
@@ -83,6 +91,25 @@ LOCKED_FEATURE_NUMBERS = (
     "year_days",
 )
 
+# ranker.lock.yaml. A histogram mode is locked only once it is decided ("undecided" is
+# not a mode a model can be trained with).
+LOCKED_HISTOGRAM_MODES = (HISTOGRAM_COL_WISE, HISTOGRAM_ROW_WISE)
+# The one way training rows are sampled (hmrec.ranker.sampling, proposal §9.1): only
+# queries with at least one positive; all positives; per query a random generator seeded
+# with (seed, query_id) shuffles the negatives (in article_idx order) and the first
+# min(number of negatives, r x number of positives) are kept.
+RANKER_SAMPLING_METHOD = "per_query_seeded_shuffle"
+# The lock files the Ranker lock points to: name in `references` -> what it is.
+FEATURES_LOCK_REFERENCE = "features_lock"
+CHANNELS_LOCK_REFERENCE = "channels_lock"
+TWOTOWER_LOCK_REFERENCE = "twotower_lock"
+RANKER_LOCK_REFERENCES = (
+    FEATURES_LOCK_REFERENCE,
+    CHANNELS_LOCK_REFERENCE,
+    TWOTOWER_LOCK_REFERENCE,
+)
+CONFIG_ID_LENGTH = 12  # hmrec.ranker.identity.ranker_config_id: 12 hex characters
+
 # The parser every locked config must pass. Each raises ValueError on a missing
 # key, an unknown key or a value out of range.
 _CONFIG_PARSERS: dict[str, Callable[[Mapping[str, Any]], Any]] = {
@@ -103,7 +130,7 @@ class LockStamp:
     """When a lock file was written.
 
     Attributes:
-        name: "channels", "twotower" or "features".
+        name: "channels", "twotower", "features" or "ranker".
         locked_on: The day the file was written.
         git_commit: HEAD at that time (full hash). The commit that adds the lock
             file is a child of this commit.
@@ -116,10 +143,11 @@ class LockStamp:
 
 @dataclass(frozen=True)
 class RecordedScore:
-    """The D-phase score of a locked trial, copied from a results file. A record only.
+    """The D-phase (recall) or V-phase (Ranker) score of a locked configuration. A record only.
 
-    Nothing reads these numbers to make a choice. D-phase scores are optimistic,
-    because the configurations were chosen on these weeks (proposal §12).
+    Copied from a results file. Nothing reads these numbers to make a choice.
+    D-phase and V-phase scores are optimistic, because the configurations were
+    chosen on these weeks (proposal §12).
 
     Attributes:
         source: Results file that holds the trial, e.g. "results/d_phase.csv"
@@ -280,6 +308,151 @@ class FeaturesLock:
     year_days: int
 
 
+@dataclass(frozen=True)
+class LockedFileReference:
+    """Another lock file the Ranker lock depends on.
+
+    Attributes:
+        name: "features_lock", "channels_lock" or "twotower_lock"
+            (RANKER_LOCK_REFERENCES).
+        path: Path relative to the repository root, e.g.
+            "configs/locks/features.lock.yaml".
+        sha256: sha256 of that file's bytes when the Ranker lock was written.
+    """
+
+    name: str
+    path: str
+    sha256: str
+
+
+@dataclass(frozen=True)
+class RankerSelection:
+    """How the locked Ranker configuration was chosen.
+
+    Attributes:
+        basis: "rule_selection" (the proposal §4.2 rule on the V phase),
+            "rule_execution" or "manual_decision" (SELECTION_BASES).
+        config_id: Id of the locked configuration (hmrec.ranker.identity).
+        rule_selected_config_id: The configuration the rule selected; equal to
+            config_id exactly when basis is "rule_selection".
+        default_kept: True if the locked tuned values are the defaults the grid
+            started from (no candidate passed the rule in any step).
+        decision_record: The docs/decisions.md entry that explains the choice.
+        v_phase_record: Recorded V-phase score at the locked number of trees
+            (a record only; V-phase scores are optimistic).
+    """
+
+    basis: str
+    config_id: str
+    rule_selected_config_id: str
+    default_kept: bool
+    decision_record: str
+    v_phase_record: RecordedScore
+
+
+@dataclass(frozen=True)
+class LockedRuntime:
+    """The libraries and thread count the locked Ranker results were produced with.
+
+    Attributes:
+        lightgbm_version: e.g. "4.7.0".
+        libomp_version: Version of the OpenMP runtime LightGBM loaded, e.g. "22.1.4"
+            (a system library outside uv.lock).
+        num_threads: CPU threads of training and scoring. Another number changes
+            the order of floating-point sums, so results are no longer bit-identical.
+    """
+
+    lightgbm_version: str
+    libomp_version: str
+    num_threads: int
+
+
+@dataclass(frozen=True)
+class LockedSampling:
+    """How the training rows of the locked Ranker are sampled (proposal §9.1).
+
+    Attributes:
+        method: RANKER_SAMPLING_METHOD (the only method there is).
+        seed: Seed of the negative sampling.
+        negatives_per_positive: r, sampled negatives per positive.
+        row_group_rows: Rows per Parquet row group of a sample file = rows
+            LightGBM reads at a time when the Dataset is built.
+    """
+
+    method: str
+    seed: int
+    negatives_per_positive: int
+    row_group_rows: int
+
+
+@dataclass(frozen=True)
+class LockedModel:
+    """The LightGBM model of the locked Ranker.
+
+    Attributes:
+        num_leaves: Leaves per tree.
+        min_data_in_leaf: Minimum training rows in a leaf.
+        num_trees: k, the number of trees of the final model.
+        seed: LightGBM seed.
+        histogram_mode: "col_wise" or "row_wise".
+        dataset_params: The LightGBM parameters that define the bins
+            (exactly RANKER_DATASET_PARAM_KEYS).
+        train_params: The fixed LightGBM training parameters
+            (exactly RANKER_TRAIN_PARAM_KEYS).
+    """
+
+    num_leaves: int
+    min_data_in_leaf: int
+    num_trees: int
+    seed: int
+    histogram_mode: str
+    dataset_params: dict[str, Any]
+    train_params: dict[str, Any]
+
+
+@dataclass(frozen=True)
+class LockedScoring:
+    """How candidates are scored and ranked with the locked Ranker.
+
+    Attributes:
+        checkpoint_every: Trees per segment of the staged scoring
+            (hmrec.ranker.predict.staged_raw_scores): the score with k trees is
+            the float64 sum of the segments, so the segment length is part of
+            the definition of a score.
+        top_k: Rows kept per query (12).
+    """
+
+    checkpoint_every: int
+    top_k: int
+
+
+@dataclass(frozen=True)
+class RankerLock:
+    """configs/locks/ranker.lock.yaml: the final Ranker configuration (proposal §9.6).
+
+    Attributes:
+        stamp: When the file was written.
+        selection: How the configuration was chosen, its id and recorded score.
+        references: Name -> lock file this lock depends on; exactly
+            RANKER_LOCK_REFERENCES.
+        runtime: LightGBM / OpenMP versions and the thread count.
+        window_weeks: A model that predicts a week is trained from scratch on
+            this many weeks right before it (4).
+        sampling: The negative sampling.
+        model: The LightGBM model and its number of trees.
+        scoring: Segment length of the staged scoring and Top-K.
+    """
+
+    stamp: LockStamp
+    selection: RankerSelection
+    references: dict[str, LockedFileReference]
+    runtime: LockedRuntime
+    window_weeks: int
+    sampling: LockedSampling
+    model: LockedModel
+    scoring: LockedScoring
+
+
 # ---------------------------------------------------------------- field checks
 
 
@@ -308,7 +481,7 @@ def _parse_stamp(raw: Mapping[str, Any], expected_name: str) -> LockStamp:
 
 
 def _parse_recorded_score(raw: Mapping[str, Any], where: str) -> RecordedScore:
-    """Parse a `d_phase_record` section; it needs at least one fold score."""
+    """Parse a `d_phase_record` / `v_phase_record` section; it needs at least one fold score."""
     check_keys(raw, {"source", "metric", "pooled", "folds"}, where)
     raw_folds = get_mapping(raw, "folds", where)
     if not raw_folds:
@@ -655,6 +828,232 @@ def check_features_match_lock(config: FeaturesConfig, lock: FeaturesLock) -> Non
             "configs/features.yaml differs from the locked features "
             "(configs/locks/features.lock.yaml): " + "; ".join(differences)
         )
+
+
+# ---------------------------------------------------------------- ranker.lock.yaml
+
+
+def _require_positive_ints(values: Mapping[str, int], where: str) -> None:
+    """Fail unless every named value is > 0."""
+    for name, value in values.items():
+        if value <= 0:
+            raise ValueError(f"{where}.{name} must be > 0, got {value}")
+
+
+def _get_text(raw: Mapping[str, Any], key: str, where: str) -> str:
+    """Return raw[key] as text that is not empty."""
+    value = get_str(raw, key, where)
+    if value.strip() == "":
+        raise ValueError(f"{where}.{key} must not be empty")
+    return value
+
+
+def _parse_ranker_selection(raw: Mapping[str, Any], where: str) -> RankerSelection:
+    """Parse `selection`; the basis must fit the two configuration ids."""
+    keys = {
+        "basis",
+        "config_id",
+        "rule_selected_config_id",
+        "default_kept",
+        "decision_record",
+        "v_phase_record",
+    }
+    check_keys(raw, keys, where)
+    selection = RankerSelection(
+        basis=get_str(raw, "basis", where),
+        config_id=_check_hex(
+            get_str(raw, "config_id", where), CONFIG_ID_LENGTH, f"{where}.config_id"
+        ),
+        rule_selected_config_id=_check_hex(
+            get_str(raw, "rule_selected_config_id", where),
+            CONFIG_ID_LENGTH,
+            f"{where}.rule_selected_config_id",
+        ),
+        default_kept=get_bool(raw, "default_kept", where),
+        decision_record=_get_text(raw, "decision_record", where),
+        v_phase_record=_parse_recorded_score(
+            get_mapping(raw, "v_phase_record", where), f"{where}.v_phase_record"
+        ),
+    )
+    if selection.basis not in SELECTION_BASES:
+        raise ValueError(f"{where}.basis must be one of {SELECTION_BASES}, got {selection.basis!r}")
+    is_rule_config = selection.config_id == selection.rule_selected_config_id
+    if is_rule_config != (selection.basis == RULE_SELECTION):
+        raise ValueError(
+            f"{where}: basis {selection.basis!r} does not fit config_id {selection.config_id} "
+            f"and rule_selected_config_id {selection.rule_selected_config_id}; they are equal "
+            f"exactly when the basis is {RULE_SELECTION!r}"
+        )
+    return selection
+
+
+def _parse_ranker_references(raw: Mapping[str, Any], where: str) -> dict[str, LockedFileReference]:
+    """Parse `references`: exactly RANKER_LOCK_REFERENCES, each with path and sha256."""
+    check_keys(raw, set(RANKER_LOCK_REFERENCES), where)
+    references = {}
+    for name in RANKER_LOCK_REFERENCES:
+        entry = get_mapping(raw, name, where)
+        check_keys(entry, {"path", "sha256"}, f"{where}.{name}")
+        references[name] = LockedFileReference(
+            name=name,
+            path=_get_text(entry, "path", f"{where}.{name}"),
+            sha256=_check_hex(
+                get_str(entry, "sha256", f"{where}.{name}"), SHA256_LENGTH, f"{where}.{name}.sha256"
+            ),
+        )
+    return references
+
+
+def _parse_locked_runtime(raw: Mapping[str, Any], where: str) -> LockedRuntime:
+    """Parse `runtime`: the two versions as text and the thread count."""
+    check_keys(raw, {"lightgbm_version", "libomp_version", "num_threads"}, where)
+    runtime = LockedRuntime(
+        lightgbm_version=_get_text(raw, "lightgbm_version", where),
+        libomp_version=_get_text(raw, "libomp_version", where),
+        num_threads=get_int(raw, "num_threads", where),
+    )
+    _require_positive_ints({"num_threads": runtime.num_threads}, where)
+    return runtime
+
+
+def _parse_locked_sampling(raw: Mapping[str, Any], where: str) -> LockedSampling:
+    """Parse `sampling`; the method must be the one hmrec.ranker.sampling implements."""
+    check_keys(raw, {"method", "seed", "negatives_per_positive", "row_group_rows"}, where)
+    sampling = LockedSampling(
+        method=get_str(raw, "method", where),
+        seed=get_int(raw, "seed", where),
+        negatives_per_positive=get_int(raw, "negatives_per_positive", where),
+        row_group_rows=get_int(raw, "row_group_rows", where),
+    )
+    if sampling.method != RANKER_SAMPLING_METHOD:
+        raise ValueError(
+            f"{where}.method must be {RANKER_SAMPLING_METHOD!r}, got {sampling.method!r}"
+        )
+    if sampling.seed < 0:
+        raise ValueError(f"{where}.seed must be >= 0, got {sampling.seed}")
+    _require_positive_ints(
+        {
+            "negatives_per_positive": sampling.negatives_per_positive,
+            "row_group_rows": sampling.row_group_rows,
+        },
+        where,
+    )
+    return sampling
+
+
+def _parse_locked_model(raw: Mapping[str, Any], where: str) -> LockedModel:
+    """Parse `model`: tuned values, number of trees, seed, mode and all LightGBM parameters."""
+    keys = {
+        "num_leaves",
+        "min_data_in_leaf",
+        "num_trees",
+        "seed",
+        "histogram_mode",
+        "dataset_params",
+        "train_params",
+    }
+    check_keys(raw, keys, where)
+    model = LockedModel(
+        num_leaves=get_int(raw, "num_leaves", where),
+        min_data_in_leaf=get_int(raw, "min_data_in_leaf", where),
+        num_trees=get_int(raw, "num_trees", where),
+        seed=get_int(raw, "seed", where),
+        histogram_mode=get_str(raw, "histogram_mode", where),
+        dataset_params=parse_lightgbm_params(
+            get_mapping(raw, "dataset_params", where),
+            RANKER_DATASET_PARAM_KEYS,
+            f"{where}.dataset_params",
+        ),
+        train_params=parse_lightgbm_params(
+            get_mapping(raw, "train_params", where),
+            RANKER_TRAIN_PARAM_KEYS,
+            f"{where}.train_params",
+        ),
+    )
+    if model.histogram_mode not in LOCKED_HISTOGRAM_MODES:
+        raise ValueError(
+            f"{where}.histogram_mode must be one of {LOCKED_HISTOGRAM_MODES}, "
+            f"got {model.histogram_mode!r}"
+        )
+    if model.seed < 0:
+        raise ValueError(f"{where}.seed must be >= 0, got {model.seed}")
+    positive = {
+        "num_leaves": model.num_leaves,
+        "min_data_in_leaf": model.min_data_in_leaf,
+        "num_trees": model.num_trees,
+    }
+    _require_positive_ints(positive, where)
+    return model
+
+
+def _parse_locked_scoring(raw: Mapping[str, Any], num_trees: int, where: str) -> LockedScoring:
+    """Parse `scoring`; the locked number of trees must be a whole number of segments."""
+    check_keys(raw, {"checkpoint_every", "top_k"}, where)
+    scoring = LockedScoring(
+        checkpoint_every=get_int(raw, "checkpoint_every", where),
+        top_k=get_int(raw, "top_k", where),
+    )
+    _require_positive_ints(
+        {"checkpoint_every": scoring.checkpoint_every, "top_k": scoring.top_k}, where
+    )
+    # The staged scoring adds whole segments, so k trees can only be scored if k
+    # is a multiple of the segment length.
+    if num_trees % scoring.checkpoint_every != 0:
+        raise ValueError(
+            f"model.num_trees ({num_trees}) must be a multiple of {where}.checkpoint_every "
+            f"({scoring.checkpoint_every})"
+        )
+    return scoring
+
+
+def parse_ranker_lock(raw: Mapping[str, Any]) -> RankerLock:
+    """Build a RankerLock from the parsed content of configs/locks/ranker.lock.yaml.
+
+    Raises:
+        ValueError: If the file is not a "ranker" lock, a key is missing or
+            unknown, a value has the wrong type or range, the histogram mode is
+            not decided, the sampling method is unknown, the basis does not fit
+            the configuration ids, or the number of trees is not a multiple of
+            the scoring segment length.
+    """
+    where = "ranker.lock"
+    sections = {
+        "lock",
+        "selection",
+        "references",
+        "runtime",
+        "training_window",
+        "sampling",
+        "model",
+        "scoring",
+    }
+    check_keys(raw, sections, where)
+    window = get_mapping(raw, "training_window", where)
+    check_keys(window, {"window_weeks"}, f"{where}.training_window")
+    window_weeks = get_int(window, "window_weeks", f"{where}.training_window")
+    _require_positive_ints({"window_weeks": window_weeks}, f"{where}.training_window")
+    model = _parse_locked_model(get_mapping(raw, "model", where), f"{where}.model")
+    return RankerLock(
+        stamp=_parse_stamp(get_mapping(raw, "lock", where), "ranker"),
+        selection=_parse_ranker_selection(
+            get_mapping(raw, "selection", where), f"{where}.selection"
+        ),
+        references=_parse_ranker_references(
+            get_mapping(raw, "references", where), f"{where}.references"
+        ),
+        runtime=_parse_locked_runtime(get_mapping(raw, "runtime", where), f"{where}.runtime"),
+        window_weeks=window_weeks,
+        sampling=_parse_locked_sampling(get_mapping(raw, "sampling", where), f"{where}.sampling"),
+        model=model,
+        scoring=_parse_locked_scoring(
+            get_mapping(raw, "scoring", where), model.num_trees, f"{where}.scoring"
+        ),
+    )
+
+
+def load_ranker_lock(path: Path) -> RankerLock:
+    """Read and check configs/locks/ranker.lock.yaml."""
+    return parse_ranker_lock(load_yaml(path))
 
 
 # ---------------------------------------------------------------- sha256 of files
