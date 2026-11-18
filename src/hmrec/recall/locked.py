@@ -25,7 +25,7 @@ so the hash is the only proof that the file is the one that was recorded):
     drives "predict, save, then fine-tune" (hmrec.recall.generate).
 """
 
-from collections.abc import Sequence
+from collections.abc import Callable, Sequence
 from dataclasses import asdict, dataclass
 from pathlib import Path
 from typing import Any
@@ -249,6 +249,7 @@ def load_locked_twotower_chain(
     paths: ProjectPaths,
     preprocess: PreprocessConfig,
     start: ModelFile,
+    checkpoint_file: Callable[[str], Path] | None = None,
 ) -> TwoTowerChainChannel:
     """The weekly training chain with the locked settings, starting from a checked model.
 
@@ -266,6 +267,11 @@ def load_locked_twotower_chain(
         preprocess: Current preprocess config.
         start: The model to start from and its recorded sha256: the locked
             f1_start for F1, else the model saved after the previous fold.
+        checkpoint_file: Fold name -> where the model fine-tuned on that fold's
+            week is saved. None (the 16 folds of the manifest) means
+            artifacts/models/twotower/chain_locked/{fold}.pt. The Kaggle late
+            submission passes its own folder, so that its extra fine-tune never
+            writes into the locked chain's folder (hmrec.kaggle.recall).
 
     Raises:
         FileNotFoundError: If a model file is missing.
@@ -290,7 +296,7 @@ def load_locked_twotower_chain(
         config,
         resources,
         twotower_chunks(base),
-        paths.twotower_locked_chain_checkpoint_file,
+        checkpoint_file or paths.twotower_locked_chain_checkpoint_file,
         load_locked_alarm_users(paths, lock),
         base.memory,
         metadata,

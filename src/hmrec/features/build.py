@@ -151,6 +151,30 @@ def check_unit_norms(vectors: np.ndarray, label: str) -> None:
         )
 
 
+@dataclass(frozen=True)
+class RecallSideFiles:
+    """Where the files are that recall wrote for the B-group features of some queries.
+
+    Attributes:
+        twotower_vectors_dir: The R6 vectors (format of hmrec.vectors).
+        wals_vectors_dir: The R5 vectors.
+        bucket_scores_file: R1's S(g, i) table.
+    """
+
+    twotower_vectors_dir: Path
+    wals_vectors_dir: Path
+    bucket_scores_file: Path
+
+
+def fold_side_files(paths: ProjectPaths, fold: str) -> RecallSideFiles:
+    """The side files of a fold of the manifest, where M6 wrote them."""
+    return RecallSideFiles(
+        twotower_vectors_dir=paths.twotower_vectors_dir(fold),
+        wals_vectors_dir=paths.wals_vectors_dir(fold),
+        bucket_scores_file=paths.r1_bucket_scores_file(fold),
+    )
+
+
 def load_dense_sources(
     paths: ProjectPaths,
     preprocess: PreprocessConfig,
@@ -158,8 +182,22 @@ def load_dense_sources(
     history: HistoryArrays,
     config: FeaturesConfig,
     base: BaseConfig,
+    side_files: RecallSideFiles | None = None,
 ) -> DenseSources:
-    """Read what the B group needs and build the history-mean vectors of the query customers."""
+    """Read what the B group needs and build the history-mean vectors of the query customers.
+
+    Args:
+        paths: Project paths (the embeddings).
+        preprocess: Current preprocess config.
+        data: The fold (or a part of its queries).
+        history: The query customers' last purchases.
+        config: configs/features.yaml.
+        base: configs/base.yaml (chunk sizes).
+        side_files: Where recall wrote the vectors and the bucket table. None
+            means the fold's own files (fold_side_files), as in M6. The Kaggle
+            late submission passes the files of one shard (hmrec.kaggle.features).
+    """
+    files = side_files if side_files is not None else fold_side_files(paths, data.fold)
     check_processed_metadata(paths.processed_metadata_file, preprocess)
     n_articles = data.articles.height
     users_per_chunk = max(1, config.embedding_pair_chunk_size // config.history_length)
@@ -174,14 +212,14 @@ def load_dense_sources(
     )
     text_vectors = similarity_vectors(*arrays, text, text_mask, users_per_chunk)
     del text
-    twotower = load_vectors(paths.twotower_vectors_dir(data.fold), "twotower", data.fold)
+    twotower = load_vectors(files.twotower_vectors_dir, "twotower", data.fold)
     # tt_sim_max_hist / tt_sim_top5_hist read the dot product of two article vectors
     # as a cosine, which is only right if the vectors have length 1.
     check_unit_norms(twotower.item_vectors, f"{data.fold} R6 article vectors")
     return DenseSources(
         twotower=twotower,
-        wals=load_vectors(paths.wals_vectors_dir(data.fold), "wals", data.fold),
-        bucket_scores=pl.read_parquet(paths.r1_bucket_scores_file(data.fold)),
+        wals=load_vectors(files.wals_vectors_dir, "wals", data.fold),
+        bucket_scores=pl.read_parquet(files.bucket_scores_file),
         image=image_vectors,
         text=text_vectors,
         history=history,

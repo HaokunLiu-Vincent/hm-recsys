@@ -11,8 +11,8 @@ Poison (anchor day 10 and later): (0, 5, 10), (1, 3, 12), (2, 0, 10).
 
 import numpy as np
 import pytest
-from conftest import FIXTURE_DAY_ZERO, make_queries, make_recall_inputs, make_transactions
 
+from conftest import FIXTURE_DAY_ZERO, make_queries, make_recall_inputs, make_transactions
 from hmrec.data.day_index import day_index_to_date
 from hmrec.data.histories import (
     build_histories,
@@ -73,3 +73,14 @@ def test_an_article_equal_to_the_padding_index_is_refused() -> None:
     events = daily_purchases(make_transactions([(0, PAD, 3)]))
     with pytest.raises(ValueError, match="article_idx must be in"):
         build_histories(events, CUSTOMERS[:1], np.array([10], dtype=np.int32), 5, PAD)
+
+
+def test_customers_without_any_purchase_get_empty_histories() -> None:
+    # Customers 7 and 8 never bought anything, so there is not a single purchase line
+    # to read: every slot holds the padding index and the mask is False everywhere.
+    never_bought = np.array([7, 8], dtype=np.int32)
+    history, mask = recent_purchase_histories(
+        make_transactions(LINES).lazy(), never_bought, ANCHOR, FIXTURE_DAY_ZERO, 3, PAD
+    )
+    assert history.tolist() == [[PAD, PAD, PAD], [PAD, PAD, PAD]]
+    assert not mask.any() and mask.shape == (2, 3)
