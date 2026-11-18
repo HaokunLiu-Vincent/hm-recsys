@@ -1,7 +1,9 @@
 # hmrec — H&M personalized fashion recommendation
 
-**Full write-up: [`docs/final_report.md`](docs/final_report.md)** (in Chinese). This page is its
-summary.
+**Full report:** [`docs/final_report.md`](docs/final_report.md) (English, the original and the
+authoritative version) and [`docs/final_report.zh-CN.md`](docs/final_report.zh-CN.md) (Chinese
+translation). The numbers in the two are identical; where they differ, the English version
+prevails. This page is the summary (§1 of the report).
 
 ## Summary
 
@@ -52,16 +54,28 @@ read; the verdict was written by code to `results/t_phase_goals.csv`):
 | G2 | union recall of the six channels ≥ 24% on every one of T1–T4 | lowest week (T1) 27.88% | **met** |
 | G3 | LambdaMART MAP@12 strictly above the RRF baseline on at least 3 of the 4 weeks | above on all 4 | **met** |
 
-These numbers come from one run with one seed, offline only, on four weeks of late summer; T is
-19.8% above V. The report explains what is and is not known about that (§5) and lists the
-deviations and limits (§7).
+**Three things to know when reading these numbers:**
+
+1. **T is 19.8% higher than V** (V1–V4 pooled: 0.032713, `results/v_phase_metrics.csv`), contrary
+   to the prior expectation that "V is optimistically biased and T may fall below 0.032". §5 of
+   the report uses four descriptive tables to give an explanation consistent with the numbers; it
+   is a correlation, not a verified cause. Single-week MAP@12 over V1–T4 ranges from 0.030112 to
+   0.042435, and the results carry a seasonal component (§4.4, §7.2 of the report).
+2. **One run, one seed, offline evaluation only.** There is no online A/B test, and no repeated
+   runs to give a range of variation (§7.2 of the report).
+3. **T1–T4 has been used once.** Any later change may only be compared and selected on V1–V4
+   (`AGENTS.md` §3.2).
 
 ## Documents
 
 The only design reference is [`docs/proposal.md`](docs/proposal.md). Design changes are logged in
-[`docs/decisions.md`](docs/decisions.md). Results and their limits are in
-[`docs/final_report.md`](docs/final_report.md). Rules for coding agents are in
-[`AGENTS.md`](AGENTS.md).
+[`docs/decisions.md`](docs/decisions.md); both are still written in Chinese. Results and their
+limitations are in the final report: [`docs/final_report.md`](docs/final_report.md) (English,
+authoritative) and [`docs/final_report.zh-CN.md`](docs/final_report.zh-CN.md) (Chinese
+translation). Rules for coding agents are in [`AGENTS.md`](AGENTS.md).
+
+English is the primary language of this project: new documents are written in English first, and
+a Chinese version, when there is one, is a translation saved as `*.zh-CN.md` (AGENTS.md §11).
 
 ## Install
 

@@ -295,3 +295,14 @@ make test         # uv run pytest tests（单元 + 集成）
 - 锁定配置（M5、M7 等节点）时打 tag，例如 `lock-channels-v1`（由用户打，agent 只给出建议的 tag 名）。
 - 不要提交 `data/`、`artifacts/` 下的文件。
 - 未经用户要求，不要 push。
+
+---
+
+## 11. Documentation language
+
+**English is the primary language of this project (from 2026-11-19).** This section is written in English for that reason.
+
+- **Write in English first.** All new documents, new entries in `docs/decisions.md`, commit messages and code comments (including docstrings) are written in English.
+- **A Chinese version is a translation.** When a Chinese version of a document is needed, save it next to the original as `*.zh-CN.md` (for example `docs/final_report.md` and `docs/final_report.zh-CN.md`). It has the same structure, sections and numbers as the English original, says at the top that it is a translation, and where the two differ the English version prevails. When the English original changes, update the translation in the same task or say in the reply that it is now out of date.
+- **Existing Chinese documents stay as they are for now**: `docs/proposal.md`, the existing entries of `docs/decisions.md`, and this file (sections 1–10). They will be translated in a separate task after tag `v0.1`. Do not translate or rewrite them as part of another task. `docs/decisions.md` stays append-only: new entries are in English, earlier entries are not edited.
+- This rule is about files in the repository. It does not decide the language of replies in a conversation: reply in the language the user writes in, unless the user asks for another.

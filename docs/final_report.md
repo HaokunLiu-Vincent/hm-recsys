@@ -1,291 +1,292 @@
-# H&M 个性化时尚推荐系统 — 最终报告
+# H&M Personalized Fashion Recommendation — Final Report
 
-> 日期：2026-11-19。分支 `m8-final`。
-> 设计依据是 `docs/proposal.md`，过程中的每个决定记在 `docs/decisions.md`。这份报告面向没有参与项目的读者，可以独立阅读；需要细节时按文中给出的章节和文件去查。
-> **数字的来源**：结果数字都来自 `results/` 下的文件或 `docs/decisions.md`，在表下或句末注明。由结果表算出的数（相对变化、按 query 数加权的合并值）注明算法。配置数值（名额、窗口、τ 等）来自 `configs/locks/` 下的四个锁定文件和 `configs/fold_manifest.yaml`。
-> **这份报告不做的事**：不给出任何 Kaggle 名次（原因见 §7.3）；不把相关关系写成因果（§5）。
+> **Language.** This English version is the original; `docs/final_report.zh-CN.md` is its Chinese translation. The numbers are identical; where the two differ, the English version prevails.
+> Date: 2026-11-19. Branch `m8-final`.
+> The design reference is `docs/proposal.md`; every decision made along the way is logged in `docs/decisions.md`. This report is written for readers who did not take part in the project and can be read on its own; for details, follow the sections and files it points to.
+> **Where the numbers come from.** Every result comes from a file under `results/` or from `docs/decisions.md`, cited below the table or at the end of the sentence. Numbers derived from result tables (relative changes, query-weighted pooled values) say how they were computed. Configuration values (quotas, windows, τ and so on) come from the four lock files under `configs/locks/` and from `configs/fold_manifest.yaml`.
+> **What this report does not do.** It gives no Kaggle rank (see §7.3 for why), and it does not present correlation as causation (§5).
 
 ---
 
-## 1. 摘要
+## 1. Summary
 
-**系统**。任务是给每个顾客预测下一周会买的 12 件商品（Kaggle H&M 数据集，交易记录从 2018-09-20 到 2020-09-22），主指标是 MAP@12。系统分两段：六路 recall 各自给出候选，合并去重后每个 `(顾客, 商品)` 一行；再算 71 个特征，用一个 LightGBM LambdaMART 模型排序，取前 12 个。
+**System.** The task is to predict the 12 articles each customer will buy in the following week (Kaggle H&M dataset, transactions from 2018-09-20 to 2020-09-22); the main metric is MAP@12. The system has two stages: six recall channels each produce candidates (this is the candidate generation, or retrieval, stage, with six independent candidate sources), which are merged and deduplicated into one row per `(customer, article)`; then 71 features are computed and a single LightGBM LambdaMART model ranks the candidates and keeps the top 12.
 
-**怎么评估**。数据的最后 16 周，每周一个 fold，分成四个阶段，每个阶段只选它该选的东西：
+**How it is evaluated.** The last 16 weeks of the data form one fold per week, in four phases; each phase selects only what it is meant to select:
 
-| 阶段 | 周 | 做什么 |
+| Phase | Weeks | What happens |
 |---|---|---|
-| D | D1–D4 | 选六路 recall 的配置，然后锁定 |
-| F | F1–F4 | 用锁定的配置生成候选，只作为 Ranker 的训练数据，不选任何东西 |
-| V | V1–V4 | 选 Ranker 的配置，然后锁定 |
-| T | T1–T4 | 全部锁定之后做最终评估，**只运行一次** |
+| D | D1–D4 | Select the configuration of the six recall channels, then lock it |
+| F | F1–F4 | Generate candidates with the locked configuration; used only as ranker training data, nothing is selected |
+| V | V1–V4 | Select the ranker configuration, then lock it |
+| T | T1–T4 | Final evaluation with everything locked, **run once** |
 
-每一周的预测只用这一周第一天（anchor）之前的数据。T 周的 label 在最终评估之前从未被读取，这一点由代码强制（§3.5）。
+Each week is predicted using only data from before its first day (the anchor). The labels of the T weeks were never read before the final evaluation; this is enforced in code (§3.5).
 
-**最终成绩**（T1–T4，2020-08-26 至 09-22，共 297,078 个 query）：
+**Final result** (T1–T4, 2020-08-26 to 09-22, 297,078 queries in total):
 
-| | T1 | T2 | T3 | T4 | 4 周合并 |
+| | T1 | T2 | T3 | T4 | 4 weeks pooled |
 |---|---|---|---|---|---|
 | **LambdaMART MAP@12** | 0.034960 | 0.040270 | 0.039673 | 0.042435 | **0.039194** |
-| RRF baseline MAP@12（不训练模型的对照） | 0.019151 | 0.021471 | 0.021848 | 0.022411 | 0.021154 |
-| 六路 union recall | 27.88% | 29.08% | 29.09% | 30.69% | — |
+| RRF baseline MAP@12 (a control with no trained model) | 0.019151 | 0.021471 | 0.021848 | 0.022411 | 0.021154 |
+| Union recall of the six channels | 27.88% | 29.08% | 29.09% | 30.69% | — |
 
-来源：`results/t_phase_metrics.csv`、`results/t_phase_recall.csv`。"合并"是把 4 周的 query 放在一起平均（按 query 数加权）。合并 MAP@12 的 95% 区间是 0.038672–0.039721（`results/t_diag_bootstrap.csv`；只反映顾客抽样的不确定性，见 §4.5）。
+Sources: `results/t_phase_metrics.csv`, `results/t_phase_recall.csv`. "Pooled" means averaging over the queries of all 4 weeks together (query-weighted). The 95% interval of the pooled MAP@12 is 0.038672–0.039721 (`results/t_diag_bootstrap.csv`; it reflects only the uncertainty from sampling customers, see §4.5).
 
-**三个目标的结论**（判定标准在读取任何 T 周 label 之前写进 `configs/m8_final.yaml`；结论由代码写入 `results/t_phase_goals.csv`）：
+**Verdict on the three goals** (the criteria were written into `configs/m8_final.yaml` before any T label was read; the verdict was written by code to `results/t_phase_goals.csv`):
 
-| 目标 | 标准 | 实际 | 结论 |
+| Goal | Criterion | Actual | Verdict |
 |---|---|---|---|
-| G1 | T1–T4 合并 MAP@12 ≥ 0.032 | 0.039194 | **达标** |
-| G2 | T1–T4 每一周的六路 union recall ≥ 24% | 最低的一周（T1）27.88% | **达标** |
-| G3 | LambdaMART 的 MAP@12 在 4 周中至少 3 周严格高于 RRF baseline | 4 周都更高 | **达标** |
+| G1 | Pooled MAP@12 on T1–T4 ≥ 0.032 | 0.039194 | **Met** |
+| G2 | Union recall of the six channels ≥ 24% in every week of T1–T4 | Lowest week (T1): 27.88% | **Met** |
+| G3 | LambdaMART MAP@12 strictly above the RRF baseline in at least 3 of the 4 weeks | Higher in all 4 weeks | **Met** |
 
-**读这些数字时要知道的三件事**：
+**Three things to know when reading these numbers:**
 
-1. **T 比 V 高 19.8%**（V1–V4 合并 0.032713，`results/v_phase_metrics.csv`），与事先"V 偏乐观、T 可能低于 0.032"的预期相反。§5 用四张描述表给出与数字一致的解释；它是相关，不是经过验证的因果。V1–T4 单周的 MAP@12 从 0.030112 到 0.042435，成绩带有季节因素（§4.4、§7.2）。
-2. **单次运行、单个 seed、只有离线评估**。没有线上 A/B，也没有重复实验给出的波动范围（§7.2）。
-3. **T1–T4 已经用过一次**。之后的任何改动只能在 V1–V4 上比较和选择（`AGENTS.md` §3.2）。
+1. **T is 19.8% higher than V** (V1–V4 pooled: 0.032713, `results/v_phase_metrics.csv`), contrary to the prior expectation that "V is optimistically biased and T may fall below 0.032". §5 uses four descriptive tables to give an explanation consistent with the numbers; it is a correlation, not a verified cause. Single-week MAP@12 over V1–T4 ranges from 0.030112 to 0.042435, and the results carry a seasonal component (§4.4, §7.2).
+2. **One run, one seed, offline evaluation only.** There is no online A/B test, and no repeated runs to give a range of variation (§7.2).
+3. **T1–T4 has been used once.** Any later change may only be compared and selected on V1–V4 (`AGENTS.md` §3.2).
 
 ---
 
-## 2. 系统设计
+## 2. System design
 
-### 2.1 流程
+### 2.1 Pipeline
 
 ```mermaid
 flowchart TD
-    H["只用 anchor 之前的数据<br/>交易、顾客和商品属性、预计算的图像 / 文本向量"]
-    H --> R1["R1 分年龄桶的衰减热度<br/>名额 100"]
-    H --> R2["R2 衰减复购<br/>名额 ≤ 30"]
-    H --> R3["R3 同款不同色<br/>名额 ≤ 50"]
-    H --> R4["R4 ItemCF<br/>名额 100"]
-    H --> R5["R5 WALS<br/>名额 100"]
-    H --> R6["R6 Two-Tower<br/>名额 100"]
+    H["Only data from before the anchor<br/>transactions, customer and article attributes, precomputed image / text embeddings"]
+    H --> R1["R1 age-bucketed decayed popularity<br/>quota 100"]
+    H --> R2["R2 decayed repurchase<br/>quota ≤ 30"]
+    H --> R3["R3 same style, other colour<br/>quota ≤ 50"]
+    H --> R4["R4 ItemCF<br/>quota 100"]
+    H --> R5["R5 WALS<br/>quota 100"]
+    H --> R6["R6 Two-Tower<br/>quota 100"]
     R1 --> U
     R2 --> U
     R3 --> U
     R4 --> U
     R5 --> U
-    R6 --> U["合并去重（union + dedup）<br/>每个 (query, 商品) 一行，最多 480 个"]
-    U --> F["宽表：71 个特征<br/>A 召回来源 / B 稠密分数 / C 商品 / D 顾客 / E 顾客–商品"]
-    F --> L["LightGBM LambdaMART<br/>31 叶，500 棵，最近 4 周训练"]
+    R6 --> U["Union + dedup<br/>one row per (query, article), at most 480"]
+    U --> F["Wide table: 71 features<br/>A recall source / B dense scores / C article / D customer / E customer–article"]
+    F --> L["LightGBM LambdaMART<br/>31 leaves, 500 trees, trained on the latest 4 weeks"]
     L --> T["Top-12"]
-    F -.-> B["RRF baseline（对照）<br/>同样的候选，按 rrf_score 排序"]
+    F -.-> B["RRF baseline (control)<br/>same candidates, ordered by rrf_score"]
 ```
 
-几个贯穿全文的定义（`docs/proposal.md` §2）：
+Definitions used throughout (`docs/proposal.md` §2):
 
-- **Anchor** `a` 是预测周的第一天。输入只用 `t_dat < a` 的数据，label 是 `[a, a + 7 天)` 的购买。
-- **Query** = `(顾客, anchor)`，前提是这个顾客在 label 周至少买了一件商品目录里的商品。所以每周的 query 是"这周买了东西的顾客"，每周 6.9 万–8.6 万个（F1–T4，`results/m6_candidates.csv`）。
-- **Label 集合** = 这个顾客在 label 周买过的商品，去重。
-- **活跃池** `A(a)` = 在 `[a − 28 天, a)` 内至少有 3 条购买记录的商品，是"近期在卖"的近似，不是真实库存。R1、R3、R4、R5、R6 只输出池内的商品；R2（复购）不过滤。
-- **MAP@12**：每个 query 的 AP@12（分母是 `min(12, label 数)`，与 Kaggle H&M 比赛的定义一致），再对 query 平均。没有任何命中的 query 得 0 分，留在分母里。
-- **Union recall**：六路合并去重后的全部候选覆盖 label 的比例，不截断。它是排序阶段能达到的 recall 的上限。
-- **事件年龄** `age_days = anchor − 购买日`，昨天是 1。所有衰减都写成 `exp(−age_days / τ)`，τ 是时间常数。
+- **Anchor** `a` is the first day of the predicted week. Inputs use only data with `t_dat < a`; labels are the purchases in `[a, a + 7 days)`.
+- **Query** = `(customer, anchor)`, provided the customer bought at least one catalog article in the label week. So the queries of a week are "the customers who bought something that week": 69,000–86,000 per week (F1–T4, `results/m6_candidates.csv`).
+- **Label set** = the articles the customer bought in the label week, deduplicated.
+- **Active pool** `A(a)` = articles with at least 3 purchase lines in `[a − 28 days, a)`. It approximates "currently on sale"; it is not real inventory. R1, R3, R4, R5 and R6 output only articles in the pool; R2 (repurchase) is not filtered.
+- **MAP@12**: AP@12 per query (denominator `min(12, number of labels)`, the same definition as the Kaggle H&M competition), averaged over queries. A query with no hit scores 0 and stays in the denominator.
+- **Union recall**: the share of labels covered by all candidates of the six channels after merging and deduplication, with no cut-off. It is the upper bound of the recall the ranking stage can reach.
+- **Event age** `age_days = anchor − purchase date`; yesterday is 1. Every decay is written as `exp(−age_days / τ)`, where τ is a time constant.
 
-### 2.2 六路 recall
+### 2.2 The six recall channels
 
-每一路都在每周用 anchor 之前的数据重新统计或重新拟合，输出 `query_id, article_idx, rank, score`。下面的配置是锁定的最终配置（`configs/locks/channels.lock.yaml`、`configs/locks/twotower.lock.yaml`）；各路在 D 阶段的分数见 §4.1。
+Every channel is recomputed or refitted each week from data before the anchor, and outputs `query_id, article_idx, rank, score`. The configurations below are the locked final ones (`configs/locks/channels.lock.yaml`, `configs/locks/twotower.lock.yaml`); the D-phase scores of the channels are in §4.1.
 
-**R1 — 分年龄桶的时间衰减热度**（名额 100）。取最近 7 天的购买行，按顾客的年龄桶（7 个桶：18–24、25–34、35–44、45–54、55 以上、年龄异常、年龄缺失）分别统计每个商品的 `Σ exp(−age_days / τ)`，τ = 3 天。每个顾客拿自己年龄桶的前 100 个。它是唯一对所有顾客都有输出的统计类通道，没有购买历史的顾客主要靠它。
+**R1 — age-bucketed, time-decayed popularity** (quota 100). Take the purchase lines of the last 7 days and, per customer age bucket (7 buckets: 18–24, 25–34, 35–44, 45–54, 55 and over, invalid age, missing age), compute `Σ exp(−age_days / τ)` for each article, with τ = 3 days. Each customer gets the top 100 of their own age bucket. It is the only statistics-based channel that returns something for every customer; customers without purchase history rely mainly on it.
 
-**R2 — 时间衰减复购**（名额最多 30，不补齐）。只推荐顾客自己在最近 365 天内买过的同一件商品，分数是 `Σ exp(−age_days / 30)`，买得越近、越多次，排得越前。没有历史的顾客输出为空。
+**R2 — time-decayed repurchase** (quota at most 30, not padded). Recommends only articles the customer bought in the last 365 days, scored by `Σ exp(−age_days / 30)`: the more recent and the more frequent the purchases, the higher the rank. Customers without history get an empty output.
 
-**R3 — 同款不同色**（名额最多 50，不补齐）。顾客买过某个款式（`product_code`）的一个颜色，就推荐同款的其他颜色。分数 = 顾客对这个款式的偏好（最近 180 天的购买按 τ = 30 衰减求和）× `(1 + 这个商品最近 7 天的全站销量)^γ`，γ = 1.0。排除顾客已经买过的那一件，只输出活跃池内的商品。
+**R3 — same style, other colour** (quota at most 50, not padded). If a customer bought one colour of a style (`product_code`), recommend the other colours of that style. Score = the customer's preference for the style (purchases of the last 180 days, decayed with τ = 30 and summed) × `(1 + site-wide sales of the article in the last 7 days)^γ`, with γ = 1.0. The article the customer already bought is excluded, and only articles in the active pool are output.
 
-**R4 — ItemCF**（名额 100）。用最近 365 天的"顾客–商品"0/1 矩阵算商品之间的相似度：共现按顾客的活跃度降权（买得多的顾客权重小），再用 `α = 0.7` 的不对称归一化；每个商品保留 100 个活跃池内的邻居。顾客的分数是他最近 365 天买过的每件商品（seed）对候选的相似度之和，seed 按最近一次购买的时间衰减（τ = 30）。
+**R4 — ItemCF** (quota 100). Item-to-item similarity from the 0/1 "customer–article" matrix of the last 365 days: co-occurrences are down-weighted by customer activity (customers who buy a lot weigh less), followed by an asymmetric normalization with `α = 0.7`; each article keeps 100 neighbours inside the active pool. A customer's score for a candidate is the sum of the similarities from every article they bought in the last 365 days (the seeds), with each seed decayed by the time of its most recent purchase (τ = 30).
 
-**R5 — WALS**（名额 100）。隐式反馈的矩阵分解（加权交替最小二乘，`implicit` 库）。交互强度是最近 180 天购买的衰减和（τ = 60），置信度 `1 + 60 × 强度`，128 维，正则 0.1，15 轮。顾客向量点乘商品向量，取活跃池内的前 100 个。窗口内没有购买的顾客输出为空。
+**R5 — WALS** (quota 100). Matrix factorization for implicit feedback (weighted alternating least squares, the `implicit` library). Interaction strength is the decayed sum of the purchases of the last 180 days (τ = 60); confidence is `1 + 60 × strength`; 128 dimensions, regularization 0.1, 15 iterations. The customer vector is dotted with the article vectors and the top 100 inside the active pool are kept. Customers with no purchase in the window get an empty output.
 
-**R6 — Two-Tower**（名额 100）。两个神经网络塔分别把顾客和商品映射成 128 维的单位向量，点积就是分数。
+**R6 — Two-Tower** (quota 100). Two neural towers map customers and articles to 128-dimensional unit vectors; the dot product is the score.
 
-- 商品塔：图像向量（CLIP，512 维）、文本向量（MiniLM，384 维）、商品 ID、款式和 6 个类目字段，各自投影后拼接成 442 维，再经过 `Linear → ReLU → Linear` 和 L2 归一化（`docs/decisions.md` 2026-11-17"Two-Tower 模型结构"）。
-- 顾客塔：顾客在 anchor 之前最近 20 件购买，经过同一个商品塔，按位置加权平均，再拼上年龄桶等三个属性。
-- 训练：batch 内 softmax，带 LogQ 修正（压低热门商品作为负样本的偏差），温度 0.05。
-- **训练链**是 R6 与其他五路最大的不同：先用 2019-12-03 至 2020-06-02 的购买训练一个 base 模型（取第 4 个 epoch），之后每周"先预测这一周，再用这一周的购买 fine-tune 2 个 epoch"，fine-tune 的数据里一半是新的一周、一半是从前 4 周抽的旧样本（replay 50%）。整个项目只有这一条链，从 D1 一直走到 T4。每周的分数都是模型还没见过这一周时得到的。
+- Item tower: image embedding (CLIP, 512 dimensions), text embedding (MiniLM, 384 dimensions), article ID, style and 6 category fields are each projected and concatenated to 442 dimensions, then passed through `Linear → ReLU → Linear` and L2 normalization (`docs/decisions.md` 2026-11-17, "Two-Tower 模型结构").
+- User tower: the customer's 20 most recent purchases before the anchor go through the same item tower and are averaged with position weights, then concatenated with three attributes such as the age bucket.
+- Training: in-batch softmax with a LogQ correction (which reduces the bias of popular articles serving as negatives), temperature 0.05.
+- The **training chain** is the biggest difference between R6 and the other five channels: a base model is first trained on the purchases from 2019-12-03 to 2020-06-02 (epoch 4 is used); after that, every week the model "first predicts the week, then is fine-tuned for 2 epochs on that week's purchases", with half of the fine-tuning data from the new week and half sampled from the previous 4 weeks (replay 50%). The project has exactly one such chain, running from D1 all the way to T4. Every weekly score is obtained before the model has seen that week.
 
-### 2.3 候选合并
+### 2.3 Candidate fusion
 
-六路的输出按 `(query_id, article_idx)` 合并去重：同一个商品被三路召回，只有一行，三路各自的名次和分数是这一行的三组列。不采用"每路一行"（label 会被重复计算，排序的组里出现重复商品），也不采用"先用 RRF 截断"（被截掉的商品 Ranker 永远看不到）。合并后每个 query 平均 304–310 个候选（F1–T4，`results/m6_candidates.csv`）。
+The outputs of the six channels are merged and deduplicated on `(query_id, article_idx)`: an article returned by three channels is one row, and the ranks and scores from the three channels are three groups of columns in that row. "One row per channel" is not used (labels would be counted repeatedly and the ranking groups would contain duplicate articles), nor is "truncate with RRF first" (the ranker would never see the articles cut off). After merging, a query has 304–310 candidates on average (F1–T4, `results/m6_candidates.csv`).
 
-### 2.4 71 个特征
+### 2.4 The 71 features
 
-每一行是一个 `(query, 候选商品)`。所有特征只用 `t_dat < anchor` 的数据；不使用原始 ID；缺失值保留为 NaN。清单、顺序和 dtype 锁定在 `configs/locks/features.lock.yaml`，定义见 `docs/proposal.md` §8。
+Each row is one `(query, candidate article)`. All features use only data with `t_dat < anchor`; raw IDs are not used; missing values stay NaN. The list, order and dtypes are locked in `configs/locks/features.lock.yaml`; the definitions are in `docs/proposal.md` §8.
 
-| 组 | 个数 | 内容 | 例子 |
+| Group | Count | Content | Examples |
 |---|---|---|---|
-| A 召回来源 | 14 | 这个候选在每一路的名次、四路的原始分数、被几路召回、最好的名次、RRF 分数 | `tt_rank`、`rep_score`、`best_rank`、`rrf_score` |
-| B 稠密分数 | 7 | 不管候选来自哪一路，都计算的分数 | `tt_dot`（Two-Tower 点积）、`wals_dot`、候选与顾客最近 20 件购买的图像 / 文本 / Two-Tower 相似度 |
-| C 商品 | 17 | 近期销量、上架和最近售出距今天数、均价、折扣比、线上占比、买家平均年龄、6 个类目 | `item_cnt_1w`、`item_days_since_first_sale`、`item_discount_ratio` |
-| D 顾客 | 12 | 年龄、会员状态等属性，购买次数、距上次购买天数、均价、线上占比 | `user_days_since_last_purchase`、`user_cnt_4w` |
-| E 顾客–商品交叉 | 21 | 顾客是否买过这件 / 这个款式、距今多久；顾客在这个类目上的购买占比和衰减和；价格、年龄、渠道的差距 | `ui_days_since_pcode`、`ui_decay_ptype`、`ui_price_ratio` |
+| A Recall source | 14 | The candidate's rank in each channel, the raw scores of four channels, the number of channels that returned it, its best rank, the RRF score | `tt_rank`, `rep_score`, `best_rank`, `rrf_score` |
+| B Dense scores | 7 | Scores computed for every candidate, whichever channel it came from | `tt_dot` (Two-Tower dot product), `wals_dot`, image / text / Two-Tower similarity between the candidate and the customer's 20 most recent purchases |
+| C Article | 17 | Recent sales, days since first and last sale, mean price, discount ratio, online share, mean buyer age, 6 categories | `item_cnt_1w`, `item_days_since_first_sale`, `item_discount_ratio` |
+| D Customer | 12 | Attributes such as age and membership status; purchase counts, days since last purchase, mean price, online share | `user_days_since_last_purchase`, `user_cnt_4w` |
+| E Customer–article cross | 21 | Whether and how long ago the customer bought this article / this style; the customer's purchase share and decayed sum in this category; gaps in price, age and sales channel | `ui_days_since_pcode`, `ui_decay_ptype`, `ui_price_ratio` |
 
-特征最初是 56 个，在锁定之前、没有任何 Ranker 结果的时候增加到 71 个（主要是 E 组），这是设计修改，不是根据分数做的选择（`docs/decisions.md` 2026-11-17）。
+There were originally 56 features; before the lock, and before any ranker result existed, the list was extended to 71 (mostly in group E). This was a design change, not a selection based on scores (`docs/decisions.md` 2026-11-17).
 
 ### 2.5 Ranker
 
-- **模型**：LightGBM，`objective = lambdarank`，`learning_rate` 0.05，`feature_fraction` 0.8，`bagging_fraction` 0.8，`max_bin` 255，`num_leaves` 31，`min_data_in_leaf` 500，**500 棵树**，seed 42（`configs/locks/ranker.lock.yaml`）。
-- **训练数据**：预测某一周时，用它之前的 4 周从头训练（例如 T1 ← V1–V4，T4 ← V4、T1、T2、T3）。只用至少有一个正样本的 query；保留全部正样本，每个正样本在同一个 query 的候选里随机配 40 个负样本。
-- **预测**：对预测周的全部候选打分，不采样，取每个 query 的前 12 个。
-- **不做 early stopping**：树的棵数和 Two-Tower 的 epoch 数一样，作为超参数在 4 周上一次选定，然后锁住。
-- **RRF baseline**：同样的候选，按 `rrf_score = Σ 1 / (60 + 各路名次)` 排序取前 12 个，不训练任何模型。它回答"Ranker 比简单的名次融合好多少"。
+- **Model**: LightGBM, `objective = lambdarank`, `learning_rate` 0.05, `feature_fraction` 0.8, `bagging_fraction` 0.8, `max_bin` 255, `num_leaves` 31, `min_data_in_leaf` 500, **500 trees**, seed 42 (`configs/locks/ranker.lock.yaml`).
+- **Training data**: to predict a week, the model is trained from scratch on the 4 weeks before it (for example T1 ← V1–V4, T4 ← V4, T1, T2, T3). Only queries with at least one positive are used; all positives are kept, and each positive is paired with 40 negatives drawn at random from the candidates of the same query.
+- **Prediction**: all candidates of the predicted week are scored, with no sampling, and the top 12 of each query are kept.
+- **No early stopping**: like the number of Two-Tower epochs, the number of trees is a hyperparameter selected once over 4 weeks and then locked.
+- **RRF baseline**: the same candidates, ordered by `rrf_score = Σ 1 / (60 + rank in each channel)`, top 12, no trained model. It answers "how much better is the ranker than a simple rank fusion".
 
 ---
 
-## 3. 评估协议
+## 3. Evaluation protocol
 
-### 3.1 16 周的划分
+### 3.1 The 16-week split
 
-| 阶段 | Fold | Label 日期（2020，含首尾） | 在这里被选择的东西 |
+| Phase | Fold | Label dates (2020, inclusive) | What is selected here |
 |---|---|---|---|
-| D | D1–D4 | 06-03 至 06-30 | 六路 recall 的超参数 |
-| F | F1–F4 | 07-01 至 07-28 | 无（只生成 Ranker 的训练数据） |
-| V | V1–V4 | 07-29 至 08-25 | Ranker 的超参数 |
-| T | T1–T4 | 08-26 至 09-22 | 无（最终评估） |
+| D | D1–D4 | 06-03 to 06-30 | Hyperparameters of the six recall channels |
+| F | F1–F4 | 07-01 to 07-28 | Nothing (only generates ranker training data) |
+| V | V1–V4 | 07-29 to 08-25 | Hyperparameters of the ranker |
+| T | T1–T4 | 08-26 to 09-22 | Nothing (final evaluation) |
 
-每周 7 天，相邻、不重叠（`configs/fold_manifest.yaml`，加载时校验）。Two-Tower 的 base 模型用更早的 26 周（2019-12-03 至 2020-06-02）训练，在 D1 之前结束。
+Each week has 7 days; weeks are adjacent and do not overlap (`configs/fold_manifest.yaml`, validated on load). The Two-Tower base model is trained on the 26 weeks before that (2019-12-03 to 2020-06-02), which end before D1.
 
-**D1–D4 不进入 Ranker 的训练**：这几周的候选是用"在这几周上选出来的配置"生成的，带有选择偏差，所以专门留出 F1–F4 作为第一批训练数据。
+**D1–D4 are not used to train the ranker**: their candidates were generated with "the configuration selected on these very weeks" and carry selection bias, so F1–F4 are set aside as the first batch of training data.
 
-### 3.2 三条规则
+### 3.2 Three rules
 
-1. **每一周的预测只用 `t_dat < anchor` 的数据。** 模型权重、统计量、特征都一样。
-2. **每个阶段只选它该选的东西。** D 选 recall，V 选 Ranker，F 和 T 只执行。
-3. **超参数在 4 周上一次选定，然后锁住。** 包括 epoch 数和树的棵数。之后每周只更新模型参数（重新统计、fine-tune 或重新训练），不再重新选。
+1. **Each week is predicted using only data with `t_dat < anchor`.** This holds for model weights, statistics and features alike.
+2. **Each phase selects only what it is meant to select.** D selects recall, V selects the ranker, F and T only execute.
+3. **Hyperparameters are selected once over 4 weeks and then locked.** This includes the number of epochs and the number of trees. Afterwards only model parameters are updated each week (recomputed statistics, fine-tuning or retraining); nothing is selected again.
 
-### 3.3 选择规则
+### 3.3 Selection rule
 
-写在 `configs/selection_rule.yaml`，在看到任何分数之前提交（`docs/proposal.md` §4.2）：
+Written in `configs/selection_rule.yaml` and committed before any score was seen (`docs/proposal.md` §4.2):
 
-- 4 周合成一个分数：把 4 周的 query 放在一起平均。
-- 只有同时满足两条，才把默认值换成候选：4 周合并分数**相对提升 ≥ 1%**，并且 **4 周中至少 3 周严格更好**。否则保留默认值。
-- 一步有多个候选通过时，与最高分相差不到 1% 的视为"差不多"，从中选事先写好的优先顺序里最靠前的（更简单、更便宜的在前）。
-- 一次只动一个参数，上一步的结果是下一步的默认值。网格从不自动扩展。
-- Ranker 的树数：每组参数先定自己的棵数（与最高合并 MAP@12 相差不到 1% 的棵数里取最小的），再比较参数。这条规则在任何 Ranker 结果出现之前写进 `configs/hpo/v_phase.yaml`。
+- The 4 weeks are combined into one score by averaging over the queries of all 4 weeks together.
+- A candidate replaces the default only if both conditions hold: the 4-week pooled score **improves by ≥ 1% relative**, and it is **strictly better in at least 3 of the 4 weeks**. Otherwise the default is kept.
+- When several candidates of a step pass, those within 1% of the best score count as "about the same", and the one that comes first in a priority order written in advance is chosen (simpler and cheaper first).
+- One parameter is changed at a time, and the outcome of a step is the default of the next. Grids are never extended automatically.
+- Number of trees of the ranker: each parameter set first fixes its own number of trees (the smallest number of trees within 1% of its best pooled MAP@12), and only then are the parameter sets compared. This rule was written into `configs/hpo/v_phase.yaml` before any ranker result existed.
 
-规则的效果是偏向保守：小于 1% 的差别不触发任何改动。
+The rule is conservative by design: a difference below 1% triggers no change.
 
-### 3.4 锁定文件
+### 3.4 Lock files
 
-选完之后，配置写进 `configs/locks/`，这个目录只能新增，不能修改：
+Once selected, a configuration is written to `configs/locks/`, a directory where files may only be added, never modified:
 
-| 文件 | 内容 | 锁定日期 | git tag |
+| File | Content | Locked on | git tag |
 |---|---|---|---|
-| `channels.lock.yaml` | R1–R5 的完整配置、对应的 trial、选择依据 | 2026-11-17 | `lock-channels-v1` |
-| `twotower.lock.yaml` | R6 的完整配置；两个模型文件的 sha256 | 2026-11-17 | `lock-channels-v1` |
-| `features.lock.yaml` | 71 个特征的名称、顺序、dtype 和决定取值的设置 | 2026-11-18 | `lock-features-v1` |
-| `ranker.lock.yaml` | Ranker 的全部参数、采样方法、LightGBM 和 libomp 的版本；另外三个锁定文件的 sha256 | 2026-11-18 | `lock-ranker-v1` |
+| `channels.lock.yaml` | Full configuration of R1–R5, the corresponding trials, the basis of each selection | 2026-11-17 | `lock-channels-v1` |
+| `twotower.lock.yaml` | Full configuration of R6; sha256 of two model files | 2026-11-17 | `lock-channels-v1` |
+| `features.lock.yaml` | Names, order and dtypes of the 71 features, and the settings that determine their values | 2026-11-18 | `lock-features-v1` |
+| `ranker.lock.yaml` | All ranker parameters, the sampling method, the LightGBM and libomp versions; sha256 of the other three lock files | 2026-11-18 | `lock-ranker-v1` |
 
-锁定之后，代码只能通过两个入口取配置：`src/hmrec/recall/locked.py`（六路 recall）和 `src/hmrec/ranker/locked.py`（Ranker）。入口在返回配置之前做核对：模型文件的 sha256、引用的锁定文件的 sha256、由设置重新算出的配置 id、本进程的库版本，任何一项不符就报错。测试会扫描后续阶段的代码，出现读默认配置或在结果表上重放选择的写法就失败。锁定文件本身也有核对：测试不读锁定文件，从结果表重放选择规则，推出"锁定文件应当写什么"，再逐项比较。
+After the lock, code can obtain a configuration only through two entry points: `src/hmrec/recall/locked.py` (the six recall channels) and `src/hmrec/ranker/locked.py` (the ranker). Before returning a configuration, the entry point checks the sha256 of the model files, the sha256 of the referenced lock files, the configuration id recomputed from the settings, and the library versions of the running process; any mismatch raises an error. Tests scan the code of later phases and fail if it reads default configurations or replays a selection over the result tables. The lock files themselves are verified too: a test that does not read the lock file replays the selection rule over the result tables, derives "what the lock file should contain", and compares item by item.
 
-### 3.5 M8 的闸门和彩排
+### 3.5 The M8 gate and rehearsal
 
-T1–T4 的最终评估（M8）只运行一次。顺序是：写代码和测试（只用小数据）→ 提交 → 彩排 → 正式运行。
+The final evaluation on T1–T4 (M8) is run once. The order is: write code and tests (on small data only) → commit → rehearsal → formal run.
 
-**彩排**不读任何 T 周的 label：用 M8 的代码路径和锁定配置，把 V4 当作目标周跑一遍，结果必须与 V 阶段的记录**逐位相同**（指标、模型的前 500 棵树、保存的 Top-12、recall 监控）。彩排做了 18 项比较，全部相同（`results/m8_rehearsal_check.csv`）。它证明的是：正式运行要走的那段代码，在一个答案已知的周上能重现已有的记录。
+The **rehearsal** reads no T label: it runs the M8 code path with the locked configuration, treating V4 as the target week, and the result must be **bit-identical** to the V-phase records (metrics, the first 500 trees of the model, the saved Top-12, the recall monitoring). The rehearsal made 18 comparisons and all matched (`results/m8_rehearsal_check.csv`). What it proves: the code the formal run is about to execute reproduces existing records on a week whose answer is already known.
 
-**闸门**（`src/hmrec/final/gate.py`，用代码强制）：
+The **gate** (`src/hmrec/final/gate.py`, enforced in code):
 
-1. 最近一次彩排必须通过、在干净的工作区里运行，并且当前的代码和配置与那次彩排的 commit 相同；否则正式运行拒绝开始，不读任何文件。
-2. 正式运行开始时，在读任何 T 周 label 之前，先记下"T 周 label 首次读取"的时间和 commit（`results/t_phase_label_access.csv`：2026-11-18T22:14:34，commit `18d957f`）。
-3. 这条记录存在之后，代码或配置一变，任何进程都拒绝运行。所以中断的正式运行可以续跑，但不能换了代码再跑。
-4. T 周的 label 只有一个读取入口（`src/hmrec/eval/final_eval.py`），必须带着闸门签发的许可；此前各阶段的入口都拒绝 T fold。
-5. T 周只在锁定的 500 棵处评估，其他棵数的指标不算出来，事后也就没有可供挑选的东西。
+1. The latest rehearsal must have passed and run on a clean working tree, and the current code and configuration must equal the commit of that rehearsal; otherwise the formal run refuses to start and reads no file.
+2. When the formal run starts, before any T label is read, it records the time and commit of the "first read of T labels" (`results/t_phase_label_access.csv`: 2026-11-18T22:14:34, commit `18d957f`).
+3. Once that record exists, every process refuses to run if the code or configuration changes. An interrupted formal run can therefore be resumed, but not with different code.
+4. T labels have a single read entry point (`src/hmrec/eval/final_eval.py`), which requires a permit issued by the gate; the entry points of all earlier phases reject T folds.
+5. T weeks are evaluated only at the locked 500 trees; metrics at other tree counts are never computed, so there is nothing to pick from afterwards.
 
-代码做不到的：不能阻止有人手工删除记录，或绕开入口直接读文件。
+What code cannot do: it cannot stop someone from deleting the record by hand, or from bypassing the entry point and reading the files directly.
 
-正式运行之后还做过一次**描述性诊断**（§5）。它再次读了 T 周的 label，走的是另一个入口（`src/hmrec/eval/diagnostic_labels.py`），条件是 G1–G3 的结论已经写下、M8 的代码和配置没有变，并且先把这次读取记进 `results/t_diag_label_access.csv`（2026-11-19T01:55:42，commit `cd07687`）。诊断只做描述，不用来选择或修改任何东西。
+After the formal run, one round of **descriptive diagnostics** was carried out (§5). It read the T labels again through a separate entry point (`src/hmrec/eval/diagnostic_labels.py`), on the conditions that the verdict on G1–G3 was already written and the M8 code and configuration were unchanged, and after first recording this read in `results/t_diag_label_access.csv` (2026-11-19T01:55:42, commit `cd07687`). The diagnostics only describe; they are not used to select or change anything.
 
-### 3.6 每一步怎样防止数据泄漏
+### 3.6 How each step prevents data leakage
 
-"泄漏"在这里有两种：**时间泄漏**（预测某一周时用到了这一周或之后的数据）和**选择泄漏**（用来报告成绩的数据参与了配置的选择）。
+There are two kinds of "leakage" here: **temporal leakage** (predicting a week with data from that week or later) and **selection leakage** (data used to report results also took part in selecting the configuration).
 
-| 环节 | 风险 | 做法 | 怎么强制或检查 |
+| Step | Risk | What is done | How it is enforced or checked |
 |---|---|---|---|
-| 按日期取交易 | 把 anchor 当天或之后的购买算进历史 | 所有按日期的过滤只通过 `src/hmrec/data/asof.py`；窗口是 `[a − N, a)`，anchor 当天属于 label 周 | 函数返回前检查结果里的最大日期小于 anchor，否则报错；每一路 recall、每个特征都有"投毒"测试：在 anchor 当天及之后加入交易，结果必须完全不变 |
-| Label 的读取 | recall 或特征代码看到答案 | label 只在 `eval/` 和 Ranker 的采样代码里读取；宽表里没有 label 列，训练时才拼接 | 测试扫描代码，其他地方引用读 label 周的函数就失败 |
-| recall 的选择 | 用选配置的周来训练或评估下游 | recall 只在 D1–D4 上选；这 4 周不进入 Ranker 的训练 | 阶段规则；F 阶段不做任何选择 |
-| Two-Tower | 模型见过它要预测的那一周 | base 窗口在 D1 之前结束；训练链每周先预测、后 fine-tune；特征里的 `tt_dot` 用的是这一周 fine-tune 之前的模型 | 每周的模型必须存在、有记录、sha256 一致才能用来预测下一周，所以不能跳过一周，也不能用别的运行留下的模型 |
-| 候选和特征 | 用后来的模型或数据重新生成早先的周 | 每周的候选和特征生成后冻结 | 每个特征文件记录 sha256；Ranker 读取之前必须先核对 |
-| Ranker 的训练窗口 | 训练周晚于或等于预测周 | 每次用预测周之前的 4 周；每个训练周都在预测周开始之前结束。T2–T4 的训练数据里有 T1–T3 的 label，这是滚动重训的设计，不是泄漏 | 窗口函数在每个入口的第一步检查，不合规的 fold 在打开任何文件之前报错 |
-| Ranker 的选择 | 用 T 周挑参数或棵数 | Ranker 只在 V1–V4 上选；做调参的模块里不能出现 T fold | 测试扫描；V 阶段的入口拒绝 T fold |
-| 选择规则本身 | 看了分数再定规则 | 三份规则都先提交：`selection_rule.yaml`（任何分数之前）、`hpo/v_phase.yaml`（任何 Ranker 结果之前）、`m8_final.yaml`（任何 T label 之前） | git 历史 |
-| 最终评估 | 反复看 T 的结果再改 | 彩排 + 闸门 + 只运行一次（§3.5） | `final/gate.py`；首次读取的记录 |
-| 结果的可追溯 | 分不清结果出自哪份代码 | 新写或修改代码之后必须先提交，工作区干净才能在全量数据上运行 | 每一行结果记录 `git_commit` 和 `git_dirty`；本报告引用的各阶段结果行都是 `git_dirty = False` |
-| 独立核对 | 被检查的代码和检查用的是同一个 bug | `scripts/checks/` 下的核对脚本不使用被检查的模块，用最朴素的循环重算特征和指标 | 12 周的特征各抽 1,000 行 × 25 个特征全部一致；V、T 最终配置的 8 个 trial 的三个指标与记录一致（`docs/decisions.md` 2026-11-18） |
+| Reading transactions by date | Counting purchases on or after the anchor day as history | All date filtering goes through `src/hmrec/data/asof.py` only; the window is `[a − N, a)`, and the anchor day belongs to the label week | Before returning, the function checks that the latest date in the result is before the anchor, and raises otherwise; every recall channel and every feature has a "poison" test: transactions added on or after the anchor day must leave the result exactly unchanged |
+| Reading labels | Recall or feature code sees the answers | Labels are read only in `eval/` and in the ranker's sampling code; the wide table has no label column, and labels are joined only at training time | Tests scan the code and fail if anything else references the function that reads the label week |
+| Selecting recall | Using the weeks that selected a configuration to train or evaluate downstream | Recall is selected on D1–D4 only; these 4 weeks are not used to train the ranker | Phase rules; nothing is selected in the F phase |
+| Two-Tower | The model has seen the week it predicts | The base window ends before D1; the training chain predicts each week first and fine-tunes afterwards; the `tt_dot` feature uses the model from before that week's fine-tuning | A week's model must exist, be recorded and match its sha256 before it can predict the next week, so a week cannot be skipped and a model left by another run cannot be used |
+| Candidates and features | Regenerating earlier weeks with later models or data | Each week's candidates and features are frozen once generated | Every feature file has its sha256 recorded; the ranker must verify it before reading |
+| Ranker training window | A training week later than or equal to the predicted week | Always the 4 weeks before the predicted week; every training week ends before the predicted week begins. The training data of T2–T4 contain the labels of T1–T3; this is rolling retraining by design, not leakage | The window function checks this as the first step of every entry point; a non-compliant fold raises before any file is opened |
+| Selecting the ranker | Using T weeks to pick parameters or the number of trees | The ranker is selected on V1–V4 only; no T fold may appear in the tuning modules | Test scans; the V-phase entry points reject T folds |
+| The selection rules themselves | Setting the rule after seeing the scores | All three rule files were committed first: `selection_rule.yaml` (before any score), `hpo/v_phase.yaml` (before any ranker result), `m8_final.yaml` (before any T label) | git history |
+| Final evaluation | Looking at T results repeatedly and then changing things | Rehearsal + gate + a single run (§3.5) | `final/gate.py`; the first-read record |
+| Traceability of results | Not knowing which code produced a result | New or modified code must be committed first; full-data runs happen only on a clean working tree | Every result row records `git_commit` and `git_dirty`; all result rows of the phases cited in this report have `git_dirty = False` |
+| Independent verification | The checked code and the check share the same bug | The scripts under `scripts/checks/` do not use the modules they check, and recompute features and metrics with the plainest loops | For the features of the 12 weeks, 1,000 sampled rows × 25 features per week all match; for the 8 trials of the final configuration on V and T, the three metrics match the records (`docs/decisions.md` 2026-11-18) |
 
-还剩下的、协议本身消除不了的偏差：**D 周和 V 周的分数偏乐观**（配置就是在这些周上选的），所以系统表现以 T 为准；过程中有几处在看到结果之后才做的决定，如实列在 §7.1。
+Biases that remain and that the protocol itself cannot remove: **the scores on the D weeks and the V weeks are optimistically biased** (the configurations were selected on those weeks), so system performance is judged on T; and a few decisions along the way were made after seeing results, listed candidly in §7.1.
 
 ---
 
-## 4. 结果
+## 4. Results
 
-### 4.1 D 阶段：各路 recall 和 union
+### 4.1 D phase: per-channel recall and union
 
-各路在 D1–D4 上的选择指标（Recall@名额，%），锁定的配置：
+Selection metric of each channel on D1–D4 (Recall@quota, %), locked configuration:
 
-| 通道 | 指标 | D1 | D2 | D3 | D4 | 4 周合并 | 相对默认配置 |
+| Channel | Metric | D1 | D2 | D3 | D4 | 4 weeks pooled | Relative to the default configuration |
 |---|---|---|---|---|---|---|---|
-| R1 Popularity | Recall@100 | 7.497 | 8.333 | 7.029 | 7.058 | **7.388** | 0（没有候选通过规则，保留默认） |
+| R1 Popularity | Recall@100 | 7.497 | 8.333 | 7.029 | 7.058 | **7.388** | 0 (no candidate passed the rule; default kept) |
 | R2 Repurchase | Recall@30 | 5.336 | 4.770 | 3.491 | 4.011 | **4.266** | +7.51% |
-| R3 Sibling | Recall@50 | 3.526 | 3.574 | 2.890 | 3.188 | **3.240** | 见下 |
+| R3 Sibling | Recall@50 | 3.526 | 3.574 | 2.890 | 3.188 | **3.240** | see below |
 | R4 ItemCF | Recall@100 | 10.544 | 10.135 | 8.336 | 9.012 | **9.332** | +14.52% |
 | R5 WALS | Recall@100 | 12.295 | 11.760 | 9.576 | 10.444 | **10.807** | +8.05% |
-| R6 Two-Tower | Recall@100 | 14.478 | 15.912 | 13.970 | 14.575 | **14.634** | +23.57%（相对不更新的 base） |
+| R6 Two-Tower | Recall@100 | 14.478 | 15.912 | 13.970 | 14.575 | **14.634** | +23.57% (relative to the base without updates) |
 
-来源：`results/d_phase.csv`（R3 为 `results/m4_trials.csv`）；"相对默认配置"取自 `docs/decisions.md` 2026-11-17"D 阶段 R1–R5 最终选择"，R6 取自 `results/d_phase_steps/r6_twotower.csv`。D 阶段共 54 个 trial（R1–R6 分别 8、5、7、9、11、14 个）。
+Sources: `results/d_phase.csv` (R3: `results/m4_trials.csv`); "relative to the default configuration" is taken from `docs/decisions.md` 2026-11-17, "D 阶段 R1–R5 最终选择", and for R6 from `results/d_phase_steps/r6_twotower.csv`. The D phase has 54 trials in total (8, 5, 7, 9, 11 and 14 for R1–R6 respectively).
 
-- R3：D 阶段规则选中的配置是 3.257%（相对默认 +2.34%）；之后按预先登记的规则改为只输出活跃池内的商品，分数变为 3.240%（§7.1）。
-- R6：不更新的 base（第 4 个 epoch）合并 11.843%；每周 fine-tune 之后 14.634%。规则选中的是不加 replay 的配置（14.576%），最终采用的是加 50% replay 的配置，这是人工决定（§7.1）。
-- D3、D4 两周的分数普遍低于 D1、D2，这两周的 query 数也明显更多（D1–D4：78,193 / 77,306 / 120,190 / 115,992），疑似促销周，在合并分数里占 60.3% 的权重（§7.2）。
+- R3: the configuration selected by the D-phase rule scored 3.257% (+2.34% relative to the default); it was then switched, under a pre-registered rule, to output only articles in the active pool, which changed the score to 3.240% (§7.1).
+- R6: the base without updates (epoch 4) scores 11.843% pooled; with weekly fine-tuning, 14.634%. The rule selected the configuration without replay (14.576%); the one finally adopted uses 50% replay, which was a manual decision (§7.1).
+- Scores in D3 and D4 are generally lower than in D1 and D2, and these two weeks also have clearly more queries (D1–D4: 78,193 / 77,306 / 120,190 / 115,992). They look like promotion weeks and carry 60.3% of the weight in the pooled score (§7.2).
 
-**六路合并**（`results/m4_union_check_r3_active_pool.csv`，锁定的配置）：
+**Union of the six channels** (`results/m4_union_check_r3_active_pool.csv`, locked configuration):
 
-| | D1 | D2 | D3 | D4 | 4 周合并 |
+| | D1 | D2 | D3 | D4 | 4 weeks pooled |
 |---|---|---|---|---|---|
 | Union recall | 26.51% | 27.15% | 23.46% | 24.97% | **25.24%** |
 
-- 每个 query 去重后平均 307.1 个候选（P50 320，P90 364；上限 480）。
-- **50.5% 的 query 没有任何一路命中任何 label**。这些 query 的 AP 必然是 0，是后面所有 MAP 数字的上限来源之一。
-- 去掉一路之后 union recall 的下降（百分点，4 周合并）：R6 4.96、R1 3.03、R5 1.41、R4 1.15、R2 0.50、R3 0.48。R6 带来的"别的路没有的候选"最多。
+- After deduplication a query has 307.1 candidates on average (P50 320, P90 364; at most 480).
+- **For 50.5% of the queries, no channel hits any label.** The AP of these queries is necessarily 0, which is one source of the ceiling on every MAP number that follows.
+- Drop in union recall when one channel is removed (percentage points, 4 weeks pooled): R6 4.96, R1 3.03, R5 1.41, R4 1.15, R2 0.50, R3 0.48. R6 contributes the most "candidates no other channel has".
 
-**这些分数偏乐观**：配置就是在这 4 周上选的，R6 的 base 模型也紧接在这 4 周之前训练。它们只用来比较配置，不代表之后各周的表现；F、V、T 各周的实测见 §4.4。
+**These scores are optimistically biased**: the configurations were selected on these 4 weeks, and the R6 base model was trained right before these 4 weeks. They serve only to compare configurations and do not represent the performance of later weeks; the measured values for the F, V and T weeks are in §4.4.
 
-### 4.2 V 阶段：Ranker 的 HPO 和 feature importance
+### 4.2 V phase: Ranker HPO and feature importance
 
-**HPO**。两步，共 8 组配置，每组在 V1–V4 上各训练一个 1000 棵的模型，每 100 棵评估一次：
+**HPO.** Two steps, 8 configurations in total; each trains one 1000-tree model per week on V1–V4, evaluated every 100 trees:
 
-| 步骤 | `num_leaves`，`min_data_in_leaf`，负采样比例 | 选中的棵数 | V1–V4 合并 MAP@12 | 相对默认 | 更好的周数 | 最高分（所在棵数） |
+| Step | `num_leaves`, `min_data_in_leaf`, negative sampling ratio | Selected number of trees | V1–V4 pooled MAP@12 | Relative to default | Weeks better | Best score (at number of trees) |
 |---|---|---|---|---|---|---|
-| 默认 | **31，500，40** | **500** | **0.032713** | — | — | 0.032865（1000） |
-| 1 | 31，100，40 | 500 | 0.032619 | −0.29% | 1 | 0.032849（1000） |
-| 1 | 63，500，40 | 300 | 0.032645 | −0.21% | 1 | 0.032804（600） |
-| 1 | 63，100，40 | 300 | 0.032555 | −0.48% | 0 | 0.032755（600） |
-| 1 | 127，500，40 | 200 | 0.032536 | −0.54% | 1 | 0.032766（500） |
-| 1 | 127，100，40 | 200 | 0.032528 | −0.56% | 1 | 0.032653（400） |
-| 2 | 31，500，60 | 400 | 0.032664 | −0.15% | 2 | 0.032917（900） |
-| 2 | 31，500，80 | 400 | 0.032698 | −0.04% | 2 | 0.032952（800） |
+| Default | **31, 500, 40** | **500** | **0.032713** | — | — | 0.032865 (1000) |
+| 1 | 31, 100, 40 | 500 | 0.032619 | −0.29% | 1 | 0.032849 (1000) |
+| 1 | 63, 500, 40 | 300 | 0.032645 | −0.21% | 1 | 0.032804 (600) |
+| 1 | 63, 100, 40 | 300 | 0.032555 | −0.48% | 0 | 0.032755 (600) |
+| 1 | 127, 500, 40 | 200 | 0.032536 | −0.54% | 1 | 0.032766 (500) |
+| 1 | 127, 100, 40 | 200 | 0.032528 | −0.56% | 1 | 0.032653 (400) |
+| 2 | 31, 500, 60 | 400 | 0.032664 | −0.15% | 2 | 0.032917 (900) |
+| 2 | 31, 500, 80 | 400 | 0.032698 | −0.04% | 2 | 0.032952 (800) |
 
-来源：`results/v_phase_steps.csv`。
+Source: `results/v_phase_steps.csv`.
 
-- 两步都没有候选通过规则，**保留默认配置**，棵数 500。
-- **Ranker 的这几个参数已经在平台期**：8 组配置在各自棵数上的合并 MAP@12 都在 0.0325–0.0330 之间，最多相差 0.56%。提升空间在候选和特征，不在这几个参数。
-- 默认配置的曲线到后面几乎走平：合并 MAP@12 在 100、300、500、1000 棵时是 0.031210、0.032363、0.032713、0.032865（由 `results/v_phase_metrics.csv` 按 query 数加权算出）。
-- 负采样比例越大，最高分略高，规则给它们选了更小的棵数，所以表里的差距是负的。在相同的 500 棵上，比例 80 是 0.032821，比默认高 0.33%，远低于 1% 的门槛（`docs/decisions.md` 2026-11-18）。
+- No candidate passed the rule in either step; **the default configuration is kept**, with 500 trees.
+- **These ranker parameters are on a plateau**: at their own number of trees, the 8 configurations all have a pooled MAP@12 between 0.0325 and 0.0330, at most 0.56% apart. The headroom is in candidates and features, not in these parameters.
+- The curve of the default configuration is almost flat towards the end: pooled MAP@12 at 100, 300, 500 and 1000 trees is 0.031210, 0.032363, 0.032713 and 0.032865 (query-weighted, computed from `results/v_phase_metrics.csv`).
+- A larger negative sampling ratio gives a slightly higher best score, and the rule assigns it a smaller number of trees, which is why the differences in the table are negative. At the same 500 trees, ratio 80 scores 0.032821, 0.33% above the default and far below the 1% threshold (`docs/decisions.md` 2026-11-18).
 
-**V 上的成绩**（最终配置；`results/v_phase_metrics.csv`）：
+**Results on V** (final configuration; `results/v_phase_metrics.csv`):
 
-| MAP@12 | V1 | V2 | V3 | V4 | 合并 |
+| MAP@12 | V1 | V2 | V3 | V4 | Pooled |
 |---|---|---|---|---|---|
 | RRF baseline | 0.018511 | 0.019064 | 0.020604 | 0.019662 | 0.019419 |
 | LambdaMART | 0.030112 | 0.031332 | 0.035029 | 0.034850 | **0.032713** |
-| 去掉 R6 | 0.028727 | 0.029881 | 0.033603 | 0.033013 | 0.031193 |
+| Without R6 | 0.028727 | 0.029881 | 0.033603 | 0.033013 | 0.031193 |
 
-G1（≥ 0.032）和 G3 在 V 上达标，但 G1 的余量只有 2.2%，而且 V 上的分数偏乐观（棵数和参数就是在这四周上选的）。所以当时的记录写的是"T 上有可能低于 0.032，以 M8 为准"。
+G1 (≥ 0.032) and G3 are met on V, but the margin on G1 is only 2.2%, and the scores on V are optimistically biased (the number of trees and the parameters were selected on these very four weeks). The record at the time therefore read "T may fall below 0.032; M8 decides".
 
-**Feature importance**（最终配置的 4 个模型，前 500 棵，按 gain 的占比，四周平均；`results/v_phase_feature_importance.csv`；只用于分析，不用来增删特征）。前 10 个：
+**Feature importance** (the 4 models of the final configuration, first 500 trees, share of gain, averaged over the four weeks; `results/v_phase_feature_importance.csv`; for analysis only, not used to add or drop features). Top 10:
 
-| 名次 | 特征 | 组 | 占比 | 名次 | 特征 | 组 | 占比 |
+| Rank | Feature | Group | Share | Rank | Feature | Group | Share |
 |---|---|---|---|---|---|---|---|
 | 1 | `best_rank` | A | 12.01% | 6 | `product_type_no` | C | 5.39% |
 | 2 | `rrf_score` | A | 10.80% | 7 | `ui_days_since_item` | E | 4.15% |
@@ -293,73 +294,73 @@ G1（≥ 0.032）和 G3 在 V 上达标，但 G1 的余量只有 2.2%，而且 V
 | 4 | `ui_days_since_pcode` | E | 9.28% | 9 | `colour_group_code` | C | 3.07% |
 | 5 | `tt_rank` | A | 7.57% | 10 | `user_days_since_last_purchase` | D | 2.97% |
 
-| 组 | 特征数 | 占比（四周平均） | 四周的范围 |
+| Group | Features | Share (four-week mean) | Range over the four weeks |
 |---|---|---|---|
-| A 召回来源 | 14 | 33.85% | 33.09–35.14% |
-| B 稠密分数 | 7 | 15.02% | 14.27–15.98% |
-| C 商品 | 17 | 24.22% | 23.82–24.68% |
-| D 顾客 | 12 | 5.27% | 4.93–5.82% |
-| E 顾客–商品交叉 | 21 | 21.64% | 21.23–22.68% |
+| A Recall source | 14 | 33.85% | 33.09–35.14% |
+| B Dense scores | 7 | 15.02% | 14.27–15.98% |
+| C Article | 17 | 24.22% | 23.82–24.68% |
+| D Customer | 12 | 5.27% | 4.93–5.82% |
+| E Customer–article cross | 21 | 21.64% | 21.23–22.68% |
 
-- 前 5 个特征合计 49.0%，前 20 个合计 85.1%。
-- 4 个来自 R6 的特征（`tt_dot`、`tt_rank`、`tt_sim_max_hist`、`tt_sim_top5_hist`）合计约 19.0%。
-- 贡献最小的几个：`fn`（0.0008%）、`active`（0.0013%）、`fashion_news_frequency`（0.0017%）、`pop_is_fallback`（0.0028%）、`index_group_no`（0.0040%）。
+- The top 5 features account for 49.0% and the top 20 for 85.1%.
+- The 4 features that come from R6 (`tt_dot`, `tt_rank`, `tt_sim_max_hist`, `tt_sim_top5_hist`) account for about 19.0%.
+- The smallest contributors: `fn` (0.0008%), `active` (0.0013%), `fashion_news_frequency` (0.0017%), `pop_is_fallback` (0.0028%), `index_group_no` (0.0040%).
 
-### 4.3 T 阶段：主表、RRF baseline、去掉 R6
+### 4.3 T phase: main table, RRF baseline, without R6
 
-正式运行在 2026-11-18 22:14:34 开始、22:49:38 结束，commit `18d957f`，工作区干净（`results/t_phase.csv`、`results/t_phase_label_access.csv`）。训练周：T1 ← V1–V4，T2 ← V2 V3 V4 T1，T3 ← V3 V4 T1 T2，T4 ← V4 T1 T2 T3。
+The formal run started at 2026-11-18 22:14:34 and ended at 22:49:38, commit `18d957f`, clean working tree (`results/t_phase.csv`, `results/t_phase_label_access.csv`). Training weeks: T1 ← V1–V4, T2 ← V2 V3 V4 T1, T3 ← V3 V4 T1 T2, T4 ← V4 T1 T2 T3.
 
-| | T1 | T2 | T3 | T4 | 合并 | 四周等权平均 |
+| | T1 | T2 | T3 | T4 | Pooled | Equal-weight mean of the four weeks |
 |---|---|---|---|---|---|---|
-| query 数 | 80,253 | 75,822 | 72,019 | 68,984 | 297,078 | — |
+| Queries | 80,253 | 75,822 | 72,019 | 68,984 | 297,078 | — |
 | **LambdaMART MAP@12** | 0.034960 | 0.040270 | 0.039673 | 0.042435 | **0.039194** | 0.039335 |
 | LambdaMART Recall@12 | 0.080965 | 0.088694 | 0.086791 | 0.092959 | 0.087135 | 0.087352 |
 | LambdaMART NDCG@12 | 0.054734 | 0.061135 | 0.060277 | 0.063951 | 0.059852 | 0.060024 |
 | RRF baseline MAP@12 | 0.019151 | 0.021471 | 0.021848 | 0.022411 | 0.021154 | 0.021220 |
 | RRF baseline Recall@12 | 0.049777 | 0.055978 | 0.057542 | 0.059756 | 0.055559 | 0.055763 |
 | RRF baseline NDCG@12 | 0.031942 | 0.035476 | 0.036235 | 0.037149 | 0.035094 | 0.035200 |
-| LambdaMART 相对 baseline（MAP@12） | +82.6% | +87.6% | +81.6% | +89.4% | +85.3% | — |
+| LambdaMART relative to baseline (MAP@12) | +82.6% | +87.6% | +81.6% | +89.4% | +85.3% | — |
 
-来源：`results/t_phase_metrics.csv`；合并和等权平均由表中的行算出，与 `docs/decisions.md` 2026-11-18 的记录一致。
+Source: `results/t_phase_metrics.csv`; the pooled values and the equal-weight means are computed from the rows of that table and agree with the record in `docs/decisions.md` 2026-11-18.
 
-**去掉 R6**（预先登记的次要分析，只报告，不影响任何结论的判定）。做法：删掉只由 R6 召回的候选和 4 个 R6 特征，用其余五路重新计算聚合特征，重新采样、重新训练：
+**Without R6** (a pre-registered secondary analysis; reported only, with no effect on any verdict). Method: drop the candidates returned only by R6 and the 4 R6 features, recompute the aggregate features from the other five channels, resample and retrain:
 
-| | T1 | T2 | T3 | T4 | 合并 |
+| | T1 | T2 | T3 | T4 | Pooled |
 |---|---|---|---|---|---|
-| 去掉 R6 的 MAP@12 | 0.033202 | 0.037679 | 0.037330 | 0.039141 | 0.036724 |
-| 相对完整系统 | −5.03% | −6.43% | −5.91% | −7.76% | **−6.30%** |
+| MAP@12 without R6 | 0.033202 | 0.037679 | 0.037330 | 0.039141 | 0.036724 |
+| Relative to the full system | −5.03% | −6.43% | −5.91% | −7.76% | **−6.30%** |
 
-合并 Recall@12 下降 8.37%（0.087135 → 0.079841），NDCG@12 下降 7.45%（0.059852 → 0.055392）。
+Pooled Recall@12 drops by 8.37% (0.087135 → 0.079841) and NDCG@12 by 7.45% (0.059852 → 0.055392).
 
-**只报告 @12**：锁定的 Ranker 每个 query 只保留前 12 个，算不出 @20 的指标（§7.1）。
+**Only @12 is reported**: the locked ranker keeps only the top 12 of each query, so @20 metrics cannot be computed (§7.1).
 
-### 4.4 V1–T4 每周的成绩
+### 4.4 Weekly results for V1–T4
 
-合并值会掩盖周与周之间的差别，所以把 8 周放在同一张表里：
+Pooled values hide the differences between weeks, so the 8 weeks are shown in one table:
 
-| 周 | Label 日期（2020，含首尾） | query 数 | union recall | LambdaMART MAP@12 | RRF baseline MAP@12 | 去掉 R6 MAP@12 | LambdaMART 相对 baseline |
+| Week | Label dates (2020, inclusive) | Queries | Union recall | LambdaMART MAP@12 | RRF baseline MAP@12 | MAP@12 without R6 | LambdaMART relative to baseline |
 |---|---|---|---|---|---|---|---|
-| V1 | 07-29 至 08-04 | 82,802 | 25.44% | 0.030112 | 0.018511 | 0.028727 | +62.7% |
-| V2 | 08-05 至 08-11 | 74,833 | 27.54% | 0.031332 | 0.019064 | 0.029881 | +64.4% |
-| V3 | 08-12 至 08-18 | 71,094 | 26.38% | 0.035029 | 0.020604 | 0.033603 | +70.0% |
-| V4 | 08-19 至 08-25 | 72,035 | 27.62% | 0.034850 | 0.019662 | 0.033013 | +77.2% |
-| T1 | 08-26 至 09-01 | 80,253 | 27.88% | 0.034960 | 0.019151 | 0.033202 | +82.6% |
-| T2 | 09-02 至 09-08 | 75,822 | 29.08% | 0.040270 | 0.021471 | 0.037679 | +87.6% |
-| T3 | 09-09 至 09-15 | 72,019 | 29.09% | 0.039673 | 0.021848 | 0.037330 | +81.6% |
-| T4 | 09-16 至 09-22 | 68,984 | 30.69% | 0.042435 | 0.022411 | 0.039141 | +89.4% |
-| V 合并 | 07-29 至 08-25 | 300,764 | — | 0.032713 | 0.019419 | 0.031193 | +68.5% |
-| T 合并 | 08-26 至 09-22 | 297,078 | — | 0.039194 | 0.021154 | 0.036724 | +85.3% |
+| V1 | 07-29 to 08-04 | 82,802 | 25.44% | 0.030112 | 0.018511 | 0.028727 | +62.7% |
+| V2 | 08-05 to 08-11 | 74,833 | 27.54% | 0.031332 | 0.019064 | 0.029881 | +64.4% |
+| V3 | 08-12 to 08-18 | 71,094 | 26.38% | 0.035029 | 0.020604 | 0.033603 | +70.0% |
+| V4 | 08-19 to 08-25 | 72,035 | 27.62% | 0.034850 | 0.019662 | 0.033013 | +77.2% |
+| T1 | 08-26 to 09-01 | 80,253 | 27.88% | 0.034960 | 0.019151 | 0.033202 | +82.6% |
+| T2 | 09-02 to 09-08 | 75,822 | 29.08% | 0.040270 | 0.021471 | 0.037679 | +87.6% |
+| T3 | 09-09 to 09-15 | 72,019 | 29.09% | 0.039673 | 0.021848 | 0.037330 | +81.6% |
+| T4 | 09-16 to 09-22 | 68,984 | 30.69% | 0.042435 | 0.022411 | 0.039141 | +89.4% |
+| V pooled | 07-29 to 08-25 | 300,764 | — | 0.032713 | 0.019419 | 0.031193 | +68.5% |
+| T pooled | 08-26 to 09-22 | 297,078 | — | 0.039194 | 0.021154 | 0.036724 | +85.3% |
 
-来源：`results/v_phase_metrics.csv`、`results/t_phase_metrics.csv`、`results/m6_candidates.csv`（V 周的 union recall）、`results/t_phase_recall.csv`（T 周的 union recall）。最后一列由前两列算出。
+Sources: `results/v_phase_metrics.csv`, `results/t_phase_metrics.csv`, `results/m6_candidates.csv` (union recall of the V weeks), `results/t_phase_recall.csv` (union recall of the T weeks). The last column is computed from the two columns before it.
 
-- 8 周里 LambdaMART 的 MAP@12 从 0.030112（V1）到 0.042435（T4），**最高的一周比最低的一周高 41%**。单看一周的成绩说明不了系统的水平。
-- V 阶段内部就有差别：V1、V2（约 0.030–0.031）明显低于 V3、V4（约 0.035）。
-- T1（0.034960）与 V3、V4 在同一水平；T2–T4 更高。
-- V 上的成绩是**选过配置之后**在同样四周上报告的，T 上的成绩是锁定之后第一次也是唯一一次评估。两者性质不同，T 才是系统表现的依据。
+- Over the 8 weeks, LambdaMART MAP@12 goes from 0.030112 (V1) to 0.042435 (T4): **the best week is 41% above the worst**. A single week's score does not tell you the level of the system.
+- There are differences inside the V phase already: V1 and V2 (about 0.030–0.031) are clearly lower than V3 and V4 (about 0.035).
+- T1 (0.034960) is at the level of V3 and V4; T2–T4 are higher.
+- The results on V are reported on the same four weeks **after the configuration was selected on them**; the results on T are the first and only evaluation after the lock. The two are different in nature, and T is the basis for judging system performance.
 
-**各路 recall 在锁定之后 12 周的实测**（Recall@名额，%；只是监控，没有用来选择任何东西）：
+**Measured recall of each channel over the 12 weeks after the lock** (Recall@quota, %; monitoring only, not used to select anything):
 
-| 周 | R1 | R2 | R3 | R4 | R5 | R6 | union | 无命中的 query |
+| Week | R1 | R2 | R3 | R4 | R5 | R6 | union | Zero-hit queries |
 |---|---|---|---|---|---|---|---|---|
 | F1 | 6.55 | 4.90 | 3.49 | 9.90 | 11.52 | 14.52 | 25.61 | 51.64 |
 | F2 | 7.33 | 4.49 | 3.48 | 9.56 | 10.96 | 14.77 | 25.89 | 51.74 |
@@ -374,11 +375,11 @@ G1（≥ 0.032）和 G3 在 V 上达标，但 G1 的余量只有 2.2%，而且 V
 | T3 | 11.22 | 4.39 | 3.16 | 8.71 | 9.48 | 18.90 | 29.09 | 49.21 |
 | T4 | 12.79 | 4.48 | 3.06 | 8.91 | 9.78 | 20.46 | 30.69 | 48.14 |
 
-来源：`results/m6_candidates.csv`（F、V）、`results/t_phase_recall.csv`（T）。G2 的标准（union recall ≥ 24%）在这 12 周每周都满足。
+Sources: `results/m6_candidates.csv` (F, V), `results/t_phase_recall.csv` (T). The G2 criterion (union recall ≥ 24%) holds in every one of these 12 weeks.
 
-### 4.5 95% 区间
+### 4.5 95% intervals
 
-| 阶段 | 顾客数 | query 数 | 量 | 合并 MAP@12 | 95% 区间 |
+| Phase | Customers | Queries | Quantity | Pooled MAP@12 | 95% interval |
 |---|---|---|---|---|---|
 | T | 233,174 | 297,078 | LambdaMART | 0.039194 | 0.038672 – 0.039721 |
 | T | | | RRF baseline | 0.021154 | 0.020796 – 0.021510 |
@@ -387,29 +388,29 @@ G1（≥ 0.032）和 G3 在 V 上达标，但 G1 的余量只有 2.2%，而且 V
 | V | | | RRF baseline | 0.019419 | 0.019090 – 0.019752 |
 | V | | | LambdaMART − baseline | 0.013294 | 0.012912 – 0.013665 |
 
-来源：`results/t_diag_bootstrap.csv`。
+Source: `results/t_diag_bootstrap.csv`.
 
-**怎么算的**：按顾客的 cluster bootstrap。把一个阶段的 4 周合在一起，以顾客为单位有放回地抽；被抽中的顾客带上他在这 4 周里的全部 query（同一个顾客在几周里的 query 不是独立的，按 query 抽会把区间算窄）。重复 1000 次，seed 42，取 2.5% 和 97.5% 分位。"LambdaMART − baseline"用同一批抽样，是配对比较。
+**How it is computed**: a cluster bootstrap over customers. The 4 weeks of a phase are pooled and customers are drawn with replacement; a drawn customer brings all of their queries in these 4 weeks (the queries of one customer across weeks are not independent, and drawing by query would make the interval too narrow). This is repeated 1000 times, seed 42, taking the 2.5% and 97.5% quantiles. "LambdaMART − baseline" uses the same draws, i.e. it is a paired comparison.
 
-**这个区间只反映顾客抽样的不确定性。** 它回答的是"换一批顾客，这 4 周的合并分数会差多少"。它**不反映**：
+**This interval reflects only the uncertainty from sampling customers.** It answers "how much would the pooled score of these 4 weeks differ with another set of customers". It does **not** reflect:
 
-- 周与周之间的差别（每一次重抽里都是同样的 4 周，而 §4.4 显示单周之间可以相差 41%）；
-- 训练的随机性（每个模型只训练了一次、一个 seed）；
-- 换一个时期、换一批商品之后的表现。
+- differences between weeks (every resample contains the same 4 weeks, while §4.4 shows single weeks can differ by 41%);
+- the randomness of training (every model was trained once, with one seed);
+- performance in another period or with another set of articles.
 
-所以区间很窄不等于"成绩稳定在 0.039 上下"；它只说明在这 4 周、这一次训练的条件下，顾客样本的大小足以把合并值定到小数点后第三位。
+So a narrow interval does not mean "the result is stable around 0.039"; it only says that, given these 4 weeks and this one training run, the customer sample is large enough to pin the pooled value down to the third decimal place.
 
 ---
 
-## 5. T 为什么高于 V
+## 5. Why T is higher than V
 
-T1–T4 合并的 MAP@12 比 V1–V4 高 19.8%（0.032713 → 0.039194）。这与事先的预期相反：V 上的配置是在 V 上选的，本应偏乐观。正式运行之后做了四张描述表（`results/t_diag_*.csv`），下面按表说明。**这些表只描述已经记录的结果，没有做任何实验；它们没有、也不能用来选择或修改任何东西。**
+Pooled MAP@12 on T1–T4 is 19.8% higher than on V1–V4 (0.032713 → 0.039194). This is contrary to the prior expectation: the configuration was selected on V, so V should have been the optimistic one. After the formal run, four descriptive tables were produced (`results/t_diag_*.csv`); the subsections below go through them. **These tables only describe results that were already recorded; no experiment was run. They were not, and may not be, used to select or change anything.**
 
-### 5.1 涨幅的分解：一半来自 union recall，一半来自排序
+### 5.1 Decomposing the increase: half from union recall, half from ranking
 
-Recall@12 可以拆成两个因子的乘积：`Recall@12 = union recall × (Recall@12 ÷ union recall)`。第一个因子是候选里有多少 label（recall 层的事），第二个因子是候选里的 label 有多少被排进了前 12（排序层的事）。
+Recall@12 can be written as the product of two factors: `Recall@12 = union recall × (Recall@12 ÷ union recall)`. The first factor is how many labels are among the candidates (the recall stage); the second is how many of the labels among the candidates were ranked into the top 12 (the ranking stage).
 
-| | union recall | LambdaMART Recall@12 | LambdaMART 比值 | RRF baseline Recall@12 | RRF baseline 比值 |
+| | union recall | LambdaMART Recall@12 | LambdaMART ratio | RRF baseline Recall@12 | RRF baseline ratio |
 |---|---|---|---|---|---|
 | V1 | 0.254379 | 0.067410 | 0.2650 | 0.048789 | 0.1918 |
 | V2 | 0.275415 | 0.071690 | 0.2603 | 0.050742 | 0.1842 |
@@ -419,22 +420,22 @@ Recall@12 可以拆成两个因子的乘积：`Recall@12 = union recall × (Reca
 | T2 | 0.290767 | 0.088694 | 0.3050 | 0.055978 | 0.1925 |
 | T3 | 0.290926 | 0.086791 | 0.2983 | 0.057542 | 0.1978 |
 | T4 | 0.306944 | 0.092959 | 0.3029 | 0.059756 | 0.1947 |
-| V 合并 | 0.267067 | 0.072987 | 0.2733 | 0.051018 | 0.1910 |
-| T 合并 | 0.291322 | 0.087135 | 0.2991 | 0.055559 | 0.1907 |
-| T 相对 V | **+9.1%** | +19.4% | **+9.4%** | +8.9% | **−0.2%** |
+| V pooled | 0.267067 | 0.072987 | 0.2733 | 0.051018 | 0.1910 |
+| T pooled | 0.291322 | 0.087135 | 0.2991 | 0.055559 | 0.1907 |
+| T relative to V | **+9.1%** | +19.4% | **+9.4%** | +8.9% | **−0.2%** |
 
-来源：`results/t_diag_decomposition.csv`（"比值"= Recall@12 ÷ union recall）。合并两行是把表中 4 周的值按 query 数加权算出的，合并的比值是两个合并值之比。
+Source: `results/t_diag_decomposition.csv` ("ratio" = Recall@12 ÷ union recall). The two pooled rows are query-weighted averages of the 4 weekly values in the table; the pooled ratio is the ratio of the two pooled values.
 
-- LambdaMART 的 Recall@12 涨了 19.4%，MAP@12 涨了 19.8%，两者几乎相同，所以用 Recall@12 的分解来说明。
-- 这 19.4% 里，**union recall 升高 9.1%，LambdaMART 把候选中的命中排进前 12 的比例升高 9.4%**。按对数分摊，两个因子各占约一半（49% 和 51%）。
-- **RRF baseline 的比值没有变化**（0.1910 → 0.1907）。baseline 的 Recall@12 涨了 8.9%，全部来自 union recall。
-- 也就是说：候选变好了，对两个系统都有利；在此之外，LambdaMART 从同样的候选里排出命中的能力也提高了，而不训练模型的 baseline 没有。LambdaMART 相对 baseline 的优势因此从 V 上的 +68.5% 扩大到 T 上的 +85.3%（§4.4）。
+- LambdaMART Recall@12 rose by 19.4% and MAP@12 by 19.8%; the two are nearly the same, so the decomposition of Recall@12 is used for the explanation.
+- Of this 19.4%, **union recall rose by 9.1%, and the share of the hits among the candidates that LambdaMART ranks into the top 12 rose by 9.4%**. Split on a log scale, the two factors account for about half each (49% and 51%).
+- **The ratio of the RRF baseline did not change** (0.1910 → 0.1907). The baseline's Recall@12 rose by 8.9%, all of it from union recall.
+- In other words: the candidates got better, which benefits both systems; beyond that, LambdaMART also got better at ranking the hits out of the same candidates, while the baseline, which trains no model, did not. The advantage of LambdaMART over the baseline therefore grew from +68.5% on V to +85.3% on T (§4.4).
 
-### 5.2 同一时期：购买更集中，新商品占比更高
+### 5.2 Over the same period: purchases more concentrated, more new articles
 
-这张表描述的是 label 周本身，与模型无关。"购买"是去重后的（顾客, 商品）对；"新商品"指首次销售在 anchor 之前 28 天以内的商品；"当周才开卖"指 anchor 之前没有任何销售的商品。
+This table describes the label weeks themselves and has nothing to do with the models. A "purchase" is a deduplicated (customer, article) pair; a "new article" is one whose first sale is within 28 days before the anchor; "first sold in the label week" means the article has no sale before the anchor.
 
-| 周 | 购买对数 | 销量前 100 的商品占购买的比例 | 前 1000 的比例 | 新商品占购买的比例 | 当周才开卖的商品占购买的比例 |
+| Week | Purchase pairs | Share of purchases on the 100 best-selling articles | Share on the top 1000 | Share of purchases on new articles | Share of purchases on articles first sold in the label week |
 |---|---|---|---|---|---|
 | D1 | 280,367 | 8.96% | 39.32% | 13.60% | 1.42% |
 | D2 | 270,270 | 9.33% | 39.53% | 11.45% | 1.33% |
@@ -453,17 +454,17 @@ Recall@12 可以拆成两个因子的乘积：`Recall@12 = union recall × (Reca
 | T3 | 227,910 | 13.25% | 48.95% | 32.16% | 5.00% |
 | T4 | 213,728 | 12.94% | 49.25% | 32.40% | 3.90% |
 
-来源：`results/t_diag_concentration.csv`。
+Source: `results/t_diag_concentration.csv`.
 
-- **购买更集中**：销量前 100 的商品占购买的比例，在 D1–V2 的 10 周里是 8.37%–9.71%，V3 是 10.16%，V4 是 12.18%，T1–T4 是 12.54%–13.25%。前 1000 的比例在 T1–T4 是 48.45%–49.25%，此前 12 周是 37.75%–43.77%。
-- **新商品占比更高**：在 D1–V2 的 10 周里是 7.80%–15.88%，V3 是 21.18%，V4 是 25.88%，T1–T4 是 30.45%–32.40%。
-- **趋势从 V3 开始**，不是在 V 和 T 的交界处突然出现：这两项在 V3 都第一次超出此前 10 周的范围。§4.4 里 V3、V4 的成绩高于 V1、V2，是同一个时间点。
+- **Purchases are more concentrated**: the share of purchases on the 100 best-selling articles is 8.37%–9.71% in the 10 weeks D1–V2, 10.16% in V3, 12.18% in V4 and 12.54%–13.25% in T1–T4. The share on the top 1000 is 48.45%–49.25% in T1–T4, against 37.75%–43.77% in the 12 weeks before.
+- **More new articles**: their share is 7.80%–15.88% in the 10 weeks D1–V2, 21.18% in V3, 25.88% in V4 and 30.45%–32.40% in T1–T4.
+- **The trend starts at V3**; it does not appear abruptly at the boundary between V and T: in V3 both measures move outside the range of the previous 10 weeks for the first time. This is the same point in time at which V3 and V4 score above V1 and V2 in §4.4.
 
-### 5.3 query 的构成基本没变
+### 5.3 The query mix is essentially unchanged
 
-按 anchor 之前的历史把 query 分成三组，各组占当周 query 的比例：
+Queries are split into three groups by the customer's history before the anchor; the table gives each group's share of the week's queries:
 
-| 周 | 无历史 | 最近 30 天内买过 | 其他 |
+| Week | No history | Bought in the last 30 days | Other |
 |---|---|---|---|
 | V1 | 6.75% | 48.14% | 45.11% |
 | V2 | 7.05% | 47.91% | 45.04% |
@@ -474,29 +475,29 @@ Recall@12 可以拆成两个因子的乘积：`Recall@12 = union recall × (Reca
 | T3 | 7.49% | 46.53% | 45.98% |
 | T4 | 8.08% | 46.51% | 45.41% |
 
-来源：`results/t_diag_query_groups.csv`。
+Source: `results/t_diag_query_groups.csv`.
 
-三组的占比在 8 周里的变化都在 4 个百分点以内（无历史 6.25%–8.08%，最近 30 天内买过 45.50%–49.19%，其他 44.56%–47.10%）。成绩最高的一组是"最近 30 天内买过"（§6.1 的表），它在 T 上的占比略低于 V；按构成来看，T 并没有更多容易预测的顾客。
+Over the 8 weeks the shares of all three groups vary by less than 4 percentage points (no history 6.25%–8.08%, bought in the last 30 days 45.50%–49.19%, other 44.56%–47.10%). The best-scoring group is "bought in the last 30 days" (table in §6.1), and its share is slightly lower on T than on V; in terms of mix, T does not have more easy-to-predict customers.
 
-### 5.4 区间不重叠
+### 5.4 The intervals do not overlap
 
-T 合并 MAP@12 的 95% 区间是 0.038672–0.039721，V 是 0.032267–0.033155（§4.5），两者不重叠。所以 T 与 V 的差别不能用"顾客样本恰好不同"来解释。但这个区间不包含周与周之间的差别（§4.5），它说明不了"换另外 4 周会不会还是这样"。
+The 95% interval of the pooled MAP@12 is 0.038672–0.039721 on T and 0.032267–0.033155 on V (§4.5); they do not overlap. So the difference between T and V cannot be explained by "the customer samples happened to differ". But the interval does not include differences between weeks (§4.5), so it cannot say "whether another 4 weeks would look the same".
 
-### 5.5 这个解释的性质
+### 5.5 The nature of this explanation
 
-把上面四点放在一起，与数字一致的解释是：从 V3 起，购买集中到更少的商品上，新商品的占比升高；同一时期，候选覆盖 label 的比例升高，LambdaMART 把候选中的命中排进前 12 的比例也升高，而 RRF baseline 的这一比例没有变；query 的构成基本没变；T 与 V 的差别超出了顾客抽样的不确定性。
+Putting the four points together, the explanation consistent with the numbers is: from V3 on, purchases concentrate on fewer articles and the share of new articles rises; over the same period, the share of labels covered by the candidates rises, and so does the share of the hits among the candidates that LambdaMART ranks into the top 12, while this share does not change for the RRF baseline; the query mix is essentially unchanged; and the difference between T and V exceeds the uncertainty from sampling customers.
 
-**这是相关，不是因果。** 没有做任何实验来验证其中任何一步：没有固定候选只换 Ranker，没有固定 Ranker 只换候选，也没有在别的时期重复。"购买更集中、新商品更多"与"成绩更高"同时出现，不等于前者造成了后者；可能还有这四张表没有描述到的因素。这个解释也不说明系统在其他时期能达到 0.039。
+**This is correlation, not causation.** No experiment was run to verify any of these steps: the candidates were not held fixed while only the ranker was swapped, the ranker was not held fixed while only the candidates were swapped, and nothing was repeated in another period. That "purchases are more concentrated and there are more new articles" and "the scores are higher" occur together does not mean the former caused the latter; there may be factors these four tables do not describe. Nor does this explanation show that the system can reach 0.039 in other periods.
 
 ---
 
-## 6. 其他发现
+## 6. Other findings
 
-### 6.1 没有历史的顾客：LambdaMART 与 RRF baseline 接近
+### 6.1 Customers without history: LambdaMART is close to the RRF baseline
 
-三组 query 各自的成绩（8 周；`results/t_diag_query_groups.csv`）：
+Results of the three query groups (8 weeks; `results/t_diag_query_groups.csv`):
 
-| 周 | 无历史：union recall | LambdaMART | RRF | 最近 30 天内买过：union recall | LambdaMART | RRF | 其他：union recall | LambdaMART | RRF |
+| Week | No history: union recall | LambdaMART | RRF | Bought in the last 30 days: union recall | LambdaMART | RRF | Other: union recall | LambdaMART | RRF |
 |---|---|---|---|---|---|---|---|---|---|
 | V1 | 0.1260 | 0.007816 | 0.006480 | 0.2967 | 0.042697 | 0.025361 | 0.2285 | 0.020020 | 0.013002 |
 | V2 | 0.1501 | 0.006490 | 0.006463 | 0.3221 | 0.047013 | 0.027163 | 0.2454 | 0.018542 | 0.012422 |
@@ -507,254 +508,254 @@ T 合并 MAP@12 的 95% 区间是 0.038672–0.039721，V 是 0.032267–0.03315
 | T3 | 0.1676 | 0.010298 | 0.009620 | 0.3428 | 0.059885 | 0.032798 | 0.2585 | 0.024004 | 0.012758 |
 | T4 | 0.1741 | 0.010451 | 0.009129 | 0.3628 | 0.063659 | 0.034271 | 0.2734 | 0.026386 | 0.012625 |
 
-（LambdaMART 和 RRF 两列是各组的 MAP@12。）
+(The LambdaMART and RRF columns are the MAP@12 of each group.)
 
-- **无历史的顾客**（anchor 之前没有任何购买，占 query 的 6.25%–8.08%）：LambdaMART 与 RRF baseline 的 MAP@12 很接近，8 周里有 3 周（V3、T1、T2）LambdaMART 更低。把 4 周按 query 数加权合并：V 上是 0.008088 对 0.007003，T 上是 0.010426 对 0.010366。
-- 另外两组，LambdaMART 每一周都明显高于 baseline；合并后 V 上高 74%（最近 30 天内买过）和 59%（其他），T 上高 86% 和 95%（由表中的值按 query 数加权算出）。
-- 这一组的 union recall 也最低（0.126–0.180）：对没有历史的顾客，R2、R3、R4、R5 都没有输出，候选只来自 R1 和只用顾客属性的 R6。
-- 也就是说，Ranker 的增益几乎全部来自有购买历史的顾客。71 个特征里，E 组的交叉特征几乎都依赖购买历史，B 组的 `wals_dot` 和四个"与最近 20 件购买的相似度"也是；对没有历史的顾客，它们是缺失值或 0，不带信息。
+- **Customers without history** (no purchase at all before the anchor; 6.25%–8.08% of the queries): the MAP@12 of LambdaMART and of the RRF baseline are very close, and in 3 of the 8 weeks (V3, T1, T2) LambdaMART is lower. Pooling the 4 weeks with query weights gives 0.008088 versus 0.007003 on V and 0.010426 versus 0.010366 on T.
+- In the other two groups LambdaMART is clearly above the baseline in every week; pooled, it is 74% higher (bought in the last 30 days) and 59% higher (other) on V, and 86% and 95% higher on T (query-weighted, computed from the values in the table).
+- This group also has the lowest union recall (0.126–0.180): for customers without history, R2, R3, R4 and R5 return nothing, and candidates come only from R1 and from R6 using customer attributes alone.
+- In other words, almost all of the ranker's gain comes from customers with purchase history. Of the 71 features, nearly all cross features in group E depend on purchase history, as do `wals_dot` and the four "similarity to the 20 most recent purchases" features in group B; for customers without history these are missing or 0 and carry no information.
 
-### 6.2 R6 的贡献随时间增大
+### 6.2 The contribution of R6 grows over time
 
-| 证据 | 数字 | 来源 |
+| Evidence | Numbers | Source |
 |---|---|---|
-| R6 的 Recall@100 | F1 14.52% → V4 16.01% → T4 20.46% | `results/m6_candidates.csv`、`results/t_phase_recall.csv` |
-| 同期 R4、R5 | R4：F1 9.90% → T4 8.91%；R5：F1 11.52% → T4 9.78% | 同上 |
-| R6 与 R5 的 Recall@100 之比 | F1 1.26 → V4 1.69 → T1–T4 1.99–2.10 | 由上面两个文件算出 |
-| 去掉 R6 后 MAP@12 的下降 | V1–V4：4.60%、4.63%、4.07%、5.27%（合并 4.64%）；T1–T4：5.03%、6.43%、5.91%、7.76%（合并 6.30%） | `results/v_phase_metrics.csv`、`results/t_phase_metrics.csv` |
-| D 阶段去掉 R6 后 union recall 的下降 | 4.96 个百分点，六路中最大 | `results/m4_union_check_r3_active_pool.csv` |
-| R6 的 4 个特征在 gain 中的占比 | 约 19.0% | `results/v_phase_feature_importance.csv` |
+| Recall@100 of R6 | F1 14.52% → V4 16.01% → T4 20.46% | `results/m6_candidates.csv`, `results/t_phase_recall.csv` |
+| R4 and R5 over the same period | R4: F1 9.90% → T4 8.91%; R5: F1 11.52% → T4 9.78% | same as above |
+| Ratio of the Recall@100 of R6 to that of R5 | F1 1.26 → V4 1.69 → T1–T4 1.99–2.10 | computed from the two files above |
+| Drop in MAP@12 without R6 | V1–V4: 4.60%, 4.63%, 4.07%, 5.27% (pooled 4.64%); T1–T4: 5.03%, 6.43%, 5.91%, 7.76% (pooled 6.30%) | `results/v_phase_metrics.csv`, `results/t_phase_metrics.csv` |
+| Drop in union recall without R6 in the D phase | 4.96 percentage points, the largest of the six channels | `results/m4_union_check_r3_active_pool.csv` |
+| Share of gain of the 4 R6 features | about 19.0% | `results/v_phase_feature_importance.csv` |
 
-R6 是六路中唯一每周 fine-tune 的模型，也是成本最高的一路。从 F1 到 T4 的 12 周里，它的 recall 逐步上升，而基于共现统计的 R4、R5 逐步下降；去掉它的代价在 T 上比在 V 上大。锁定之后的训练链没有出现退化的迹象：F1–T3 共 11 次 fine-tune 的训练 loss 在 5.503–5.575 之间（`results/m6_twotower_chain.csv`）。
+R6 is the only one of the six channels whose model is fine-tuned every week, and it is also the most expensive. Over the 12 weeks from F1 to T4 its recall rises steadily while that of R4 and R5, which are based on co-occurrence statistics, declines; the cost of removing it is larger on T than on V. The training chain shows no sign of degradation after the lock: the training loss of the 11 fine-tuning runs F1–T3 stays between 5.503 and 5.575 (`results/m6_twotower_chain.csv`).
 
-去掉 R6 之后，T 上的合并 MAP@12 是 0.036724，仍然高于 G1 的 0.032；V 上是 0.031193，低于 0.032。
+Without R6, pooled MAP@12 on T is 0.036724, still above the 0.032 of G1; on V it is 0.031193, below 0.032.
 
-### 6.3 T1 上 R3、R4、R5 被标出
+### 6.3 R3, R4 and R5 were flagged in T1
 
-监控规则是：某一路某一周的 recall 比它前 4 周的平均低 10% 以上，就在报告里标出，**但不改任何配置**。锁定之后的 12 周里共标出 5 次（`results/m6_candidates.csv`、`results/t_phase_recall.csv`）：
+The monitoring rule is: if the recall of a channel in a week is more than 10% below its mean over the previous 4 weeks, it is flagged in the report, **but no configuration is changed**. In the 12 weeks after the lock there were 5 flags (`results/m6_candidates.csv`, `results/t_phase_recall.csv`):
 
-| 周 | 通道 | 相对前 4 周的平均 |
+| Week | Channel | Relative to the mean of the previous 4 weeks |
 |---|---|---|
-| F1 | R1 | −12.4%（前 4 周是 D1–D4） |
+| F1 | R1 | −12.4% (the previous 4 weeks are D1–D4) |
 | V1 | R2 | −13.6% |
 | T1 | R3 | −12.5% |
 | T1 | R4 | −11.2% |
 | T1 | R5 | −16.7% |
 
-T1 这一周，三路基于顾客历史的通道同时被标出，而 R1 比前 4 周的平均高 35.3%，R6 高 7.5%；六路的 union recall（27.88%）没有下降。T2–T4 没有再被标出的。T1 也是 T 阶段里 MAP@12 最低的一周（0.034960）。
+In T1, the three channels that rely on customer history were flagged together, while R1 was 35.3% above its mean of the previous 4 weeks and R6 was 7.5% above; the union recall of the six channels (27.88%) did not drop. Nothing was flagged in T2–T4. T1 is also the week with the lowest MAP@12 in the T phase (0.034960).
 
-同一周新商品占购买的比例是 31.87%（§5.2）。三路同时被标出的原因没有查。按规则，没有因此改动任何配置。
+In the same week the share of purchases on new articles was 31.87% (§5.2). Why the three channels were flagged together was not investigated. Under the rule, no configuration was changed as a result.
 
 ---
 
-## 7. 偏离和局限
+## 7. Deviations and limitations
 
-### 7.1 偏离事先的计划或规则的地方
+### 7.1 Deviations from the original plan or rules
 
-| # | 事项 | 发生了什么 | 影响 |
+| # | Item | What happened | Impact |
 |---|---|---|---|
-| 1 | **R6 的更新方式是人工决定** | 规则在训练链的 4 个候选里选中的是（fine-tune 2 个 epoch，不加 replay），合并 Recall@100 14.576%；人工采用的是（2 个 epoch，replay 50%），14.634%。这是在看到全部结果（包括额外的 seed）之后做的。理由：链要连续跑 16 周，而规则只看 4 周；不加 replay 时 D4 低于 D3，有遗忘的迹象；3 个 seed 的波动更小。规则和它的结论没有改，照原样留在结果表里 | 选择偏差限于 D1–D4。base 的 epoch 数（4）和 fine-tune 的 epoch 数（2）是规则的结果，偏离规则的只有 replay 这一项 |
-| 2 | **R3 改为只输出活跃池内的商品** | 这是按预先登记的规则执行的："去掉 R3 在活跃池外的候选后，4 周合并 union recall 下降小于 0.1 个百分点就改"。实测下降 0.045 个百分点，于是切换；切换后 union recall 实际只降了 0.025 个百分点（25.27% → 25.24%）。γ、τ 没有重新调 | 这条判定标准本身是在看过 D1 的 R3 结果之后制定的（`docs/decisions.md` 2026-11-16） |
-| 3 | **D 阶段看到结果之后扩展的网格** | R2 增加 365 天的历史窗口（后来被选中）；R3 的 γ 增加 1.5、2.0；R5 的 `α_conf` 增加 60、80（60 被选中）；R4 的 seed 窗口选中了网格的最大值 365 天，决定不再往外扩 | 这些新增的值只在已经看过的 D1–D4 上评估，有选择偏差；配置锁定后不再改动，所以不影响 F、V、T |
-| 4 | **树的上限从 2000 改为 1000** | 这是在看到 V1 的测速结果（默认配置 100、200、300 棵的 MAP@12）之后做的、计算预算上的决定，不是事先登记的。依据是增量逐次缩小到约六成，推算 900 → 1000 棵只增加约 0.03%；实测也是 0.03% | 选中的棵数是 500，不在上限上；"赢家的棵数等于上限就停下"的规则保留，没有触发 |
-| 5 | **只报告 @12** | 最初的方案要求报告 @12 和 @20 两组指标。锁定的 Ranker 每个 query 只保留前 12 个，@20 算不出来。这一点在读取任何 T label 之前确定 | 没有 Recall@20、NDCG@20 |
-| 6 | **两处时间戳不准** | `results/t_phase_goals.csv` 的 `decided_at` 写的是 22:14:34，实际判定的时间是 22:49:38；`results/m8_rehearsal_check.csv` 的 `checked_at` 写的是 22:05:40，实际是 22:14:04。原因是驱动在启动时取了一次时间，传给了后面写记录的函数。按"正式运行之后不改结果和 M8 的代码"的规则，只记录、不修改 | 只有这两个时间列不准，它们不参与任何数值和判定 |
-| 7 | **特征从 56 个增加到 71 个** | 在特征锁定之前、没有任何 Ranker 结果时做的设计修改 | 不是根据分数做的选择 |
-| 8 | **内存上限改过四次** | 约 6 GB → 7 GB → 8 GB → 12 GB。上限只是警戒线，不参与任何计算 | 不影响结果；分块设置没有随之放宽 |
-| 9 | **描述性诊断不是预先登记的** | §5 的四张表是看到 T 的结果之后才设计的；区间的抽样单位在运行之前从"按 query"改成了"按顾客" | 诊断只做描述；它再次读取 T label 的时间和 commit 有记录（§3.5） |
-| 10 | **计划了但没有做的诊断** | 方案里的"超参数漂移 regret"（用当周 label 重新挑 R6 的更新方式，看最多能多拿多少 recall）没有做；R6 的两个可选实验（只用 ID 不用图文向量；base 窗口改为 52 周）也没有做 | "6 月选出的超参数在 7–9 月仍然适用"这个假设没有被直接检验过 |
+| 1 | **The R6 update scheme was a manual decision** | Among the 4 candidates of the training chain, the rule selected (fine-tune for 2 epochs, no replay), with pooled Recall@100 14.576%; (2 epochs, replay 50%), at 14.634%, was adopted by hand. This was done after seeing all results (including the extra seeds). Reasons: the chain has to run for 16 consecutive weeks while the rule looks at only 4; without replay D4 is below D3, a sign of forgetting; the variation across 3 seeds is smaller. The rule and its outcome were not changed and remain as they were in the result tables | Selection bias is confined to D1–D4. The number of base epochs (4) and of fine-tuning epochs (2) are outcomes of the rule; replay is the only item that deviates from it |
+| 2 | **R3 switched to output only articles in the active pool** | This followed a pre-registered rule: "if removing R3's candidates outside the active pool lowers the 4-week pooled union recall by less than 0.1 percentage points, switch". The measured drop was 0.045 percentage points, so the switch was made; after the switch union recall actually fell by only 0.025 percentage points (25.27% → 25.24%). γ and τ were not re-tuned | The criterion itself was set after seeing R3's results on D1 (`docs/decisions.md` 2026-11-16) |
+| 3 | **Grids extended in the D phase after seeing results** | R2 gained a 365-day history window (later selected); the γ of R3 gained 1.5 and 2.0; the `α_conf` of R5 gained 60 and 80 (60 was selected); the seed window of R4 landed on the grid maximum of 365 days and it was decided not to extend further | The added values were evaluated only on D1–D4, which had already been seen, so they carry selection bias; the configurations do not change after the lock, so F, V and T are not affected |
+| 4 | **Cap on the number of trees lowered from 2000 to 1000** | This was a compute-budget decision made after seeing the speed test on V1 (MAP@12 of the default configuration at 100, 200 and 300 trees); it was not pre-registered. The basis was that each increment shrinks to about six tenths of the previous one, which extrapolates to a gain of only about 0.03% from 900 → 1000 trees; the measured gain was also 0.03% | The selected number of trees is 500, not at the cap; the rule "stop if the winner's number of trees equals the cap" was kept and was not triggered |
+| 5 | **Only @12 is reported** | The original plan called for both @12 and @20 metrics. The locked ranker keeps only the top 12 of each query, so @20 cannot be computed. This was settled before any T label was read | No Recall@20 or NDCG@20 |
+| 6 | **Two inaccurate timestamps** | `decided_at` in `results/t_phase_goals.csv` says 22:14:34, but the verdict was actually computed at 22:49:38; `checked_at` in `results/m8_rehearsal_check.csv` says 22:05:40, but the actual time was 22:14:04. The cause: the driver took the time once at start-up and passed it to the functions that wrote the records later. Under the rule "after the formal run, neither the results nor the M8 code are changed", this is only recorded, not fixed | Only these two time columns are inaccurate; they take part in no number and no verdict |
+| 7 | **Features extended from 56 to 71** | A design change made before the feature lock and before any ranker result existed | Not a selection based on scores |
+| 8 | **The memory limit was changed four times** | About 6 GB → 7 GB → 8 GB → 12 GB. The limit is only an alert threshold and takes part in no computation | No effect on results; the chunk sizes were not relaxed with it |
+| 9 | **The descriptive diagnostics were not pre-registered** | The four tables of §5 were designed after the T results had been seen; before running, the resampling unit of the interval was changed from "by query" to "by customer" | The diagnostics only describe; the time and commit of their re-read of the T labels are recorded (§3.5) |
+| 10 | **Planned diagnostics that were not done** | The "hyperparameter drift regret" in the plan (re-picking R6's update scheme with the labels of the current week to see how much more recall could at most be gained) was not done; neither were the two optional R6 experiments (IDs only, without image and text embeddings; a 52-week base window) | The assumption "hyperparameters selected in June still apply in July–September" was never tested directly |
 
-### 7.2 局限
+### 7.2 Limitations
 
-**评估的范围**
+**Scope of the evaluation**
 
-1. **单次运行、单个 seed。** 每个 Ranker 模型只训练了一次（seed 42）；R6 的训练链在 F–T 阶段也只有一条（seed 42；只在 D 阶段用 3 个 seed 看过波动）。没有重复训练给出的波动范围。§4.5 的区间只覆盖顾客抽样。
-2. **只有离线评估，没有线上 A/B。** MAP@12 衡量的是"推荐的商品是否出现在顾客实际购买的记录里"。它不衡量推荐是否改变了顾客的行为，也不衡量多样性、新颖性或收入。离线提升不保证线上有效。
-3. **只评估"这周买了东西的顾客"。** Query 的定义是 label 周至少买了一件商品的顾客。系统没有被要求判断谁会来买，也没有在不购买的顾客上评估。
-4. **成绩带有季节因素。** T1–T4 是 8 月底到 9 月下旬，购买集中度和新商品占比都处在 16 周里的最高水平（§5.2），而成绩与这两者同步升高。0.039 是这 4 周的成绩，不是系统在全年的水平；V1、V2 两周只有约 0.030–0.031（§4.4）。
-5. **T1–T4 已经用过一次。** 它不再是没见过的数据。之后的任何改动只能在 V1–V4 上比较和选择；T 的结果不能再用来挑选任何东西。
-6. **T 阶段不是完全没见过的数据。** 这个项目重新开始之前的旧项目曾经看过 T3、T4 附近的周（`docs/proposal.md` §12）。新项目没有沿用旧的代码、配置或结论，但方案的设计者见过那段时间的数据。T 的结果应当按 retrospective test 来读。
-7. **D 周和 V 周的分数偏乐观。** 它们参与了配置的选择，只能用来比较配置。D3、D4 疑似促销周（未核实），query 数比 16 周的平均多 46.9% 和 41.8%（`docs/decisions.md` 2026-11-16），在 D 阶段的合并分数里占 60.3% 的权重，所以选出的 recall 配置可能偏向这两周的购买模式。
+1. **One run, one seed.** Every ranker model was trained once (seed 42); the R6 training chain also has only one instance in the F–T phases (seed 42; variation was looked at with 3 seeds in the D phase only). There is no range of variation from repeated training. The interval in §4.5 covers customer sampling only.
+2. **Offline evaluation only, no online A/B test.** MAP@12 measures "whether the recommended articles appear among what the customer actually bought". It does not measure whether recommendations change customer behaviour, nor diversity, novelty or revenue. An offline gain does not guarantee an online effect.
+3. **Only "customers who bought something that week" are evaluated.** A query is defined as a customer who bought at least one article in the label week. The system was not asked to judge who will come and buy, and was not evaluated on customers who did not purchase.
+4. **The results carry a seasonal component.** T1–T4 run from late August to late September, when purchase concentration and the share of new articles are both at their highest level of the 16 weeks (§5.2), and the scores rise in step with them. 0.039 is the result for these 4 weeks, not the level of the system over a full year; V1 and V2 score only about 0.030–0.031 (§4.4).
+5. **T1–T4 has been used once.** It is no longer unseen data. Any later change may only be compared and selected on V1–V4; T results may no longer be used to pick anything.
+6. **The T phase is not completely unseen data.** The earlier project, before this one was restarted, had looked at weeks around T3 and T4 (`docs/proposal.md` §12). The new project reused none of the old code, configurations or conclusions, but the designer of the plan had seen data from that period. T results should be read as a retrospective test.
+7. **The scores on the D weeks and the V weeks are optimistically biased.** They took part in selecting configurations and can only be used to compare configurations. D3 and D4 look like promotion weeks (not verified): their query counts are 46.9% and 41.8% above the 16-week mean (`docs/decisions.md` 2026-11-16) and they carry 60.3% of the weight in the D-phase pooled score, so the selected recall configurations may lean towards the purchase patterns of these two weeks.
 
-**数据**
+**Data**
 
-8. **`customers.csv` 是一份快照，顾客属性无法按 anchor 回溯。** 年龄、会员状态（`club_member_status`）、订阅频率（`fashion_news_frequency`）、`FN`、`Active` 在数据里各只有一个值，没有时间戳，大概是数据导出时的状态；`articles.csv`（款式、类目、颜色、描述）同样是没有时间戳的快照。系统在每个 anchor 都直接使用这些值：R1 的年龄桶、R6 顾客塔的三个属性、D 组的 5 个属性特征，以及由年龄得到的 `ui_age_gap` 和 `item_buyer_age_mean_4w`。如果这些属性在 anchor 之后变过（例如顾客在 9 月才成为会员），就把之后的信息带进了之前的预测。年龄的影响很小（最多差一两岁）；会员状态和订阅字段可能含有未来的信息。交易表有日期，不受影响。从 feature importance 看，受影响最直接的几个特征贡献很小（`club_member_status` 0.0045%、`fashion_news_frequency` 0.0017%、`active` 0.0013%、`fn` 0.0008%），但 R1 的分桶和 R6 的顾客属性的影响没有单独测过。**这一条此前没有写进 `docs/proposal.md` 或 `docs/decisions.md`。**
-9. **活跃池不是真实库存。** 它只是"最近 28 天至少卖出 3 次"的近似。已经下架的商品可能被推荐，刚上架的商品要等卖出 3 次才能进入五路的候选。
-10. **图像向量不全。** 105,542 个商品里有 442 个没有图像向量（`docs/decisions.md` 2026-11-15），R6 对它们只用文本、ID 和类目。
+8. **`customers.csv` is a snapshot; customer attributes cannot be reconstructed as of an anchor.** Age, membership status (`club_member_status`), newsletter frequency (`fashion_news_frequency`), `FN` and `Active` each have a single value in the data, with no timestamp, presumably the state at the time of export; `articles.csv` (style, categories, colour, description) is likewise a snapshot without timestamps. The system uses these values directly at every anchor: the age bucket of R1, the three attributes of the R6 user tower, the 5 attribute features of group D, and the age-derived `ui_age_gap` and `item_buyer_age_mean_4w`. If an attribute changed after the anchor (for example, a customer became a member only in September), later information is carried into an earlier prediction. The effect of age is small (off by a year or two at most); membership status and the newsletter fields may contain future information. The transaction table has dates and is not affected. Judging by feature importance, the most directly affected features contribute very little (`club_member_status` 0.0045%, `fashion_news_frequency` 0.0017%, `active` 0.0013%, `fn` 0.0008%), but the effect on R1's bucketing and on R6's customer attributes was not measured separately. **This item was not previously recorded in `docs/proposal.md` or `docs/decisions.md`.**
+9. **The active pool is not real inventory.** It is only the approximation "sold at least 3 times in the last 28 days". Articles already withdrawn may be recommended, and a newly listed article enters the candidates of five channels only after it has sold 3 times.
+10. **Image embeddings are incomplete.** 442 of the 105,542 articles have no image embedding (`docs/decisions.md` 2026-11-15); for them R6 uses only text, ID and categories.
 
-**系统**
+**System**
 
-11. **约一半的 query 没有任何候选命中。** 每周 48%–52% 的 query，六路都没有召回它的任何一个 label（§4.4），这些 query 的 AP 是 0。排序做得再好也改变不了这一半。
-12. **没有历史的顾客几乎得不到 Ranker 的好处**（§6.1）。
-13. **没有单独评估过新商品。** T 阶段约三成的购买落在上市不到 28 天的商品上（§5.2），但没有分别统计过新商品和老商品上的 recall 和 MAP@12。R3、R4、R5 依赖历史上的共现，它们在 T1 同时被标出（§6.3）；这与新商品有没有关系，没有查。另外，anchor 之前没有任何销售的商品（T 各周购买的 2.48%–5.41%，§5.2）按设计进不了任何一路的候选：五路只输出活跃池内的商品，R2 只输出顾客自己买过的商品。
-14. **Ranker 的训练窗口只有 4 周**，受 F 阶段长度和当时的内存预算限制。
-15. **特征分布随时间漂移**，没有处理。几个分数类特征的均值从 F 到 T 单向变化（例如 `tt_dot` 从 0.441 降到 0.379，`docs/decisions.md` 2026-11-18）；Ranker 在前面的周训练、在后面的周使用。
-16. **没有逐路去掉的系统级实验。** 只做了去掉 R6；R1–R5 各自对 MAP@12 的贡献没有测，只有 D 阶段的 union recall。也没有使用 hard negative。
-17. **逐位复现依赖运行环境。** LightGBM 用的 OpenMP 运行库（libomp 22.1.4）是 `uv.lock` 之外的系统依赖；线程数固定为 6。换了其中任何一个，重新生成的模型不保证与记录逐位相同，锁定入口会报错。
+11. **About half of the queries have no candidate hit.** In each week, for 48%–52% of the queries none of the six channels recalls any of their labels (§4.4), and the AP of these queries is 0. However good the ranking, it cannot change this half.
+12. **Customers without history get almost no benefit from the ranker** (§6.1).
+13. **New articles were not evaluated separately.** In the T phase roughly three in ten purchases fall on articles listed for less than 28 days (§5.2), but recall and MAP@12 were never computed separately for new and old articles. R3, R4 and R5 rely on historical co-occurrence and were flagged together in T1 (§6.3); whether this is related to new articles was not investigated. In addition, articles with no sale before the anchor (2.48%–5.41% of the purchases of the T weeks, §5.2) cannot, by design, enter the candidates of any channel: five channels output only articles in the active pool, and R2 outputs only articles the customer has already bought.
+14. **The ranker's training window is only 4 weeks**, limited by the length of the F phase and by the memory budget at the time.
+15. **Feature distributions drift over time**, and this is not handled. The means of several score-type features move in one direction from F to T (for example `tt_dot` falls from 0.441 to 0.379, `docs/decisions.md` 2026-11-18); the ranker is trained on earlier weeks and applied to later ones.
+16. **No system-level experiment removing channels one at a time.** Only the removal of R6 was done; the contribution of each of R1–R5 to MAP@12 was not measured, only their D-phase union recall. Hard negatives were not used either.
+17. **Bit-level reproducibility depends on the runtime environment.** The OpenMP runtime used by LightGBM (libomp 22.1.4) is a system dependency outside `uv.lock`; the number of threads is fixed at 6. If either changes, a regenerated model is not guaranteed to be bit-identical to the record, and the locked entry point raises an error.
 
-### 7.3 与 Kaggle leaderboard 不能直接比较
+### 7.3 Not directly comparable with the Kaggle leaderboard
 
-- **不是同一周。** 比赛的评分周是训练数据结束之后的那一周；这个项目的数据到 2020-09-22 为止，T1–T4 是数据内部的最后 4 周（08-26 至 09-22），比赛评分周的 label 不在数据里。§4.4 显示相邻的周之间 MAP@12 可以相差很多，所以不同周的分数不能放在一起比。
-- **训练数据的截止点不同。** 这里预测 T4 时只用到 09-15 为止的数据；比赛的提交可以用到 09-22。
-- 指标的定义（AP@12 的分母是 `min(12, label 数)`）与比赛一致，评估的也都是那一周有购买的顾客。但只凭这两点不足以把两个数放在同一张表里。
+- **Not the same week.** The competition is scored on the week after the training data ends; the data of this project end on 2020-09-22, T1–T4 are the last 4 weeks inside the data (08-26 to 09-22), and the labels of the competition's scoring week are not in the data. §4.4 shows that MAP@12 can differ a lot between adjacent weeks, so scores from different weeks cannot be put side by side.
+- **A different training cut-off.** Here T4 is predicted with data up to 09-15 only; a competition submission can use data up to 09-22.
+- The metric definition (AP@12 with denominator `min(12, number of labels)`) is the same as the competition's, and in both cases the customers evaluated are those with purchases in that week. But these two points alone are not enough to put the two numbers in one table.
 
-所以这份报告**不写任何名次**，也不把 0.039194 与 leaderboard 上的任何分数比较。要得到可比的数字，需要按 §9 做一次赛后提交。
+This report therefore **states no rank**, and does not compare 0.039194 with any score on the leaderboard. Getting a comparable number requires a late submission as described in §9.
 
 ---
 
-## 8. 复现
+## 8. Reproduction
 
-### 8.1 环境
+### 8.1 Environment
 
-| 项目 | 值 |
+| Item | Value |
 |---|---|
-| 机器 | MacBook Pro，Apple M1 Max，物理内存 32 GB（`docs/decisions.md` 2026-11-18）；项目用 6 个线程；全部在 CPU 上运行（R6 也是：真实模型的 200 步测速里 CPU 每步 30.4 ms，MPS 45.2 ms，`docs/decisions.md` 2026-11-17） |
-| Python | 3.12，由 uv 管理；依赖的精确版本在 `uv.lock` |
-| LightGBM / libomp | 4.7.0 / 22.1.4（每一行 Ranker 结果都有记录；`results/v_phase.csv`、`results/t_phase.csv`）。libomp 用 `brew install libomp` 安装，不由 `uv.lock` 锁定 |
-| 内存 | 项目预算 12 GB（单个进程真实峰值的警戒线）；实测最高 7.25 GB（§8.4） |
-| 数据 | `data/raw/` 下的三个 CSV，以及预计算的图像（CLIP ViT-B/32）和文本（all-MiniLM-L6-v2）向量；`data/` 和 `artifacts/` 不进 git |
+| Machine | MacBook Pro, Apple M1 Max, 32 GB of physical memory (`docs/decisions.md` 2026-11-18); the project uses 6 threads; everything runs on CPU (R6 included: in the 200-step speed test of the real model, CPU took 30.4 ms per step and MPS 45.2 ms, `docs/decisions.md` 2026-11-17) |
+| Python | 3.12, managed by uv; exact dependency versions are in `uv.lock` |
+| LightGBM / libomp | 4.7.0 / 22.1.4 (recorded in every ranker result row; `results/v_phase.csv`, `results/t_phase.csv`). libomp is installed with `brew install libomp` and is not pinned by `uv.lock` |
+| Memory | Project budget 12 GB (an alert threshold on the true peak of a single process); the highest measured value is 7.25 GB (§8.4) |
+| Data | The three CSV files under `data/raw/`, plus precomputed image (CLIP ViT-B/32) and text (all-MiniLM-L6-v2) embeddings; `data/` and `artifacts/` are not in git |
 
-torch 和 LightGBM 各自带一份 OpenMP 运行库，不能在同一个进程里加载；Ranker 的代码不 import torch，测试也分两个进程跑。
+torch and LightGBM each ship their own OpenMP runtime and cannot be loaded in the same process; the ranker code does not import torch, and the tests also run in two processes.
 
-### 8.2 Tag 和锁定文件
+### 8.2 Tags and lock files
 
-| Tag | 含义 |
+| Tag | Meaning |
 |---|---|
-| `lock-channels-v1` | 六路 recall 的配置锁定（`channels.lock.yaml`、`twotower.lock.yaml`） |
-| `lock-features-v1` | 71 个特征锁定（`features.lock.yaml`） |
-| `lock-ranker-v1` | Ranker 锁定（`ranker.lock.yaml`） |
-| `m8-run-v1` | 彩排和正式运行所用的代码（commit `18d957f`） |
+| `lock-channels-v1` | Configuration of the six recall channels locked (`channels.lock.yaml`, `twotower.lock.yaml`) |
+| `lock-features-v1` | The 71 features locked (`features.lock.yaml`) |
+| `lock-ranker-v1` | Ranker locked (`ranker.lock.yaml`) |
+| `m8-run-v1` | The code used for the rehearsal and the formal run (commit `18d957f`) |
 
-`artifacts/` 不进 git，所以关键文件用 sha256 确认：R6 的两个起点模型的 sha256 在 `twotower.lock.yaml`；之后每周的模型在 `results/m6_twotower_chain.csv`；每个特征文件在各 fold 的 `features.json`。
+`artifacts/` is not in git, so key files are confirmed by sha256: the sha256 of the two starting models of R6 are in `twotower.lock.yaml`; the models of the following weeks are in `results/m6_twotower_chain.csv`; every feature file is in the `features.json` of its fold.
 
-### 8.3 运行命令
+### 8.3 Commands
 
-按顺序，每一步都在干净的工作区里运行。长任务前面加 `caffeinate -i`。
+In order; every step runs on a clean working tree. Prefix long jobs with `caffeinate -i`.
 
 ```bash
-make setup && brew install libomp          # 环境
-make lint && make test                     # 检查
+make setup && brew install libomp          # environment
+make lint && make test                     # checks
 
-# M0：预处理，query 和 label
+# M0: preprocessing, queries and labels
 uv run python scripts/m0_preprocess.py
 uv run python scripts/m0_build_queries.py
 
-# M2–M3：D 阶段。R1–R5 的 HPO；R6 的 base、选 epoch、训练链
+# M2–M3: D phase. HPO of R1–R5; R6 base, epoch selection, training chain
 uv run python scripts/m2_recall_hpo.py --channels r1_popularity r2_repurchase r3_sibling r4_itemcf r5_wals
 uv run python scripts/m3_build_twotower_data.py
 caffeinate -i uv run python scripts/m3_twotower_base.py
 caffeinate -i uv run python scripts/m2_recall_hpo.py --channels r6_twotower
 
-# M4–M5：union 检查；核对锁定文件能重现记录（每路一次）
+# M4–M5: union check; verify that the lock files reproduce the records (once per channel)
 caffeinate -i uv run python scripts/m4_union_check.py --variant r3_active_pool
-caffeinate -i uv run python scripts/m5_verify_locks.py --channel r1_popularity   # 其余五路同样
+caffeinate -i uv run python scripts/m5_verify_locks.py --channel r1_popularity   # same for the other five channels
 
-# M6：F1–T4 的候选（R6 沿训练链逐周推进），然后是每周的特征
+# M6: candidates for F1–T4 (R6 advances along the training chain week by week), then the features of each week
 caffeinate -i uv run python scripts/m6_run_folds.py --first-fold F1 --last-fold T4
-caffeinate -i uv run python scripts/m6_build_features.py --fold F1               # F1 … T4 各一次
-uv run python scripts/checks/check_features.py --fold F1                         # 独立核对
+caffeinate -i uv run python scripts/m6_build_features.py --fold F1               # once for each of F1 … T4
+uv run python scripts/checks/check_features.py --fold F1                         # independent check
 
-# M7：Ranker 在 V1–V4 上的测速、baseline、网格、去掉 R6、feature importance
+# M7: Ranker on V1–V4: speed test, baseline, grid, without R6, feature importance
 caffeinate -i uv run python scripts/m7_speed_test.py
 caffeinate -i uv run python scripts/m7_ranker_hpo.py --stage baseline
 caffeinate -i uv run python scripts/m7_ranker_hpo.py --stage grid
 caffeinate -i uv run python scripts/m7_ranker_hpo.py --stage minus_r6
 caffeinate -i uv run python scripts/m7_ranker_hpo.py --stage importance
 
-# M8：彩排，然后是正式运行（只做一次）
+# M8: rehearsal, then the formal run (done once)
 caffeinate -i uv run python scripts/m8_final_eval.py --stage rehearsal
 caffeinate -i uv run python scripts/m8_final_eval.py --stage formal
 uv run python scripts/m8_final_eval.py --stage report
 
-# M8 之后的描述性诊断
+# Descriptive diagnostics after M8
 caffeinate -i uv run python scripts/m8_diagnostics.py
 ```
 
-三点说明：
+Three notes:
 
-- **在这个仓库里，M8 的正式运行不会再跑第二次。** 首次读取 T label 的记录已经存在，而当前 HEAD 的代码与那次运行的 commit 不同，闸门会拒绝。这是设计（§3.5）。要独立复现，需要从 tag `m8-run-v1` 的代码、空的 `results/` 和 `artifacts/` 开始。
-- 独立核对脚本 `scripts/checks/check_ranker_eval.py --area t_phase` 读 T label 也要过同一道闸门，所以要先切回 tag `m8-run-v1` 才能运行。
-- 重复运行的保护：候选、特征、采样文件、模型一旦存在就不覆盖；结果表只追加。
+- **In this repository the M8 formal run will not run a second time.** The record of the first read of T labels already exists, and the code at the current HEAD differs from the commit of that run, so the gate refuses. This is by design (§3.5). An independent reproduction has to start from the code at tag `m8-run-v1` with empty `results/` and `artifacts/`.
+- The independent check `scripts/checks/check_ranker_eval.py --area t_phase` also has to pass the same gate to read T labels, so it can only be run after checking out tag `m8-run-v1`.
+- Protection against re-runs: candidates, features, sample files and models are never overwritten once they exist; result tables are append-only.
 
-### 8.4 各阶段的耗时和真实内存峰值
+### 8.4 Run time and true peak memory of each stage
 
-"真实峰值"是操作系统记录的进程最大常驻内存（`ru_maxrss`），每个进程一个数。D 阶段的结果表只有采样峰值（定时采样，是下限），单独标出。
+The "true peak" is the maximum resident set size of a process as recorded by the operating system (`ru_maxrss`), one number per process. The D-phase result table has only sampled peaks (sampled at intervals, hence a lower bound), which are marked as such.
 
-| 阶段 | 内容 | 耗时 | 内存峰值 | 来源 |
+| Stage | Content | Run time | Peak memory | Source |
 |---|---|---|---|---|
-| D（M2–M3） | R1–R5 的 40 个 trial，每个 trial 跑 4 周 | 每个 trial：R1 10–13 秒，R2 2.5–3.5 秒，R3 5–6 秒，R4 70–115 秒，R5 262–1,059 秒 | 采样峰值最高 4.76 GB（R4） | `results/d_phase.csv` |
-| D（M3） | R6 的 14 个 trial（选 epoch、训练链、额外的 seed） | 每个 trial 79–437 秒 | 采样峰值最高 6.28 GB | `results/d_phase.csv` |
-| D 合计 | 54 个 trial | 约 2.3 小时（各 trial 耗时之和 8,265 秒；不含 R6 base 模型的训练） | — | 同上 |
-| M5 | 六路在 D1 上各重新生成一次候选 | 生成一步：R1 0.5 秒，R2 0.3 秒，R3 0.4 秒，R4 25.8 秒，R5 169.6 秒，R6 13.6 秒 | 真实峰值 0.99–4.20 GB（最高是 R4） | `results/m5_lock_check.csv` |
-| M6 候选 | F1–T4 共 12 周，每个（周，通道）一个进程 | 每周每路：R1、R2、R3 不到 2 秒，R4 23–27 秒，R5 170–180 秒，R6 18–95 秒（含每周 fine-tune 52–71 秒）；全部进程合计 3,371 秒，约 56 分钟 | 真实峰值最高 4.70 GB（F2 的 R6） | `results/m6_runs.csv`、`results/m6_twotower_chain.csv` |
-| M6 特征 | 12 周的宽表，共 281,750,956 行，磁盘 17.8 GB | 每周 48–61 秒，合计 659 秒，约 11 分钟 | 真实峰值 6.10–7.25 GB（最高是 V2，**全项目最高**） | `results/m6_runs.csv`、`docs/decisions.md` 2026-11-18 |
-| M7 | 采样；构建训练集 | 采样每周 20–24 秒（去掉 R6 的那一组 6–8 秒）；训练集每个 5–12 秒 | 真实峰值：采样 3.42–4.13 GB，训练集 1.55–2.92 GB | `results/m7_runs.csv` |
-| M7 | 32 个 1000 棵的 trial（8 组配置 × 4 周） | 每个 433–706 秒（训练 0.27–0.53 秒/棵，打分加评估 148–286 秒） | 真实峰值 2.63–3.67 GB | `results/v_phase.csv` |
-| M7 | 去掉 R6 的 4 个 500 棵的 trial | 每个 210–221 秒 | 真实峰值 3.45–3.84 GB | `results/v_phase.csv` |
-| M7 合计 | 36 个 trial | 18,265 秒，约 5.1 小时 | 最高 3.84 GB | `results/v_phase.csv` |
-| M8 彩排 | V4 上完整系统和去掉 R6 各一个 trial，加监控、baseline、训练集 | 约 8.5 分钟 | 真实峰值最高 3.75 GB | `results/m8_rehearsal.csv`、`docs/decisions.md` 2026-11-18 |
-| M8 正式运行 | 完整系统 4 个 trial | 每个 267–279 秒（训练 154–161 秒，0.305–0.319 秒/棵） | 真实峰值 2.94–3.14 GB | `results/t_phase.csv` |
-| M8 正式运行 | 去掉 R6 的 4 个 trial | 每个 199–230 秒 | 真实峰值 3.33–3.57 GB | `results/t_phase.csv` |
-| M8 正式运行 | 采样、训练集、监控、baseline | 每个进程 1.5–8.2 秒 | 真实峰值 0.47–3.74 GB | `results/m8_runs.csv` |
-| M8 正式运行合计 | — | 22:14:34 至 22:49:38，约 35 分钟 | 最高 3.74 GB | `results/t_phase.csv`、`results/m8_runs.csv` |
+| D (M2–M3) | 40 trials of R1–R5, each trial covering 4 weeks | Per trial: R1 10–13 s, R2 2.5–3.5 s, R3 5–6 s, R4 70–115 s, R5 262–1,059 s | Highest sampled peak 4.76 GB (R4) | `results/d_phase.csv` |
+| D (M3) | 14 trials of R6 (epoch selection, training chain, extra seeds) | 79–437 s per trial | Highest sampled peak 6.28 GB | `results/d_phase.csv` |
+| D total | 54 trials | About 2.3 hours (sum of trial run times: 8,265 s; excludes training the R6 base model) | — | same as above |
+| M5 | Candidates regenerated once per channel on D1 | Generation step: R1 0.5 s, R2 0.3 s, R3 0.4 s, R4 25.8 s, R5 169.6 s, R6 13.6 s | True peak 0.99–4.20 GB (highest: R4) | `results/m5_lock_check.csv` |
+| M6 candidates | The 12 weeks F1–T4, one process per (week, channel) | Per week and channel: R1, R2, R3 under 2 s, R4 23–27 s, R5 170–180 s, R6 18–95 s (including the weekly fine-tuning of 52–71 s); all processes together 3,371 s, about 56 minutes | Highest true peak 4.70 GB (R6 in F2) | `results/m6_runs.csv`, `results/m6_twotower_chain.csv` |
+| M6 features | Wide tables of the 12 weeks, 281,750,956 rows in total, 17.8 GB on disk | 48–61 s per week, 659 s in total, about 11 minutes | True peak 6.10–7.25 GB (highest: V2, **the highest of the whole project**) | `results/m6_runs.csv`, `docs/decisions.md` 2026-11-18 |
+| M7 | Sampling; building the training sets | Sampling 20–24 s per week (6–8 s for the set without R6); 5–12 s per training set | True peak: sampling 3.42–4.13 GB, training sets 1.55–2.92 GB | `results/m7_runs.csv` |
+| M7 | 32 trials of 1000 trees (8 configurations × 4 weeks) | 433–706 s each (training 0.27–0.53 s per tree, scoring plus evaluation 148–286 s) | True peak 2.63–3.67 GB | `results/v_phase.csv` |
+| M7 | 4 trials of 500 trees without R6 | 210–221 s each | True peak 3.45–3.84 GB | `results/v_phase.csv` |
+| M7 total | 36 trials | 18,265 s, about 5.1 hours | Highest 3.84 GB | `results/v_phase.csv` |
+| M8 rehearsal | One trial each for the full system and without R6 on V4, plus monitoring, baseline and training sets | About 8.5 minutes | Highest true peak 3.75 GB | `results/m8_rehearsal.csv`, `docs/decisions.md` 2026-11-18 |
+| M8 formal run | 4 trials of the full system | 267–279 s each (training 154–161 s, 0.305–0.319 s per tree) | True peak 2.94–3.14 GB | `results/t_phase.csv` |
+| M8 formal run | 4 trials without R6 | 199–230 s each | True peak 3.33–3.57 GB | `results/t_phase.csv` |
+| M8 formal run | Sampling, training sets, monitoring, baseline | 1.5–8.2 s per process | True peak 0.47–3.74 GB | `results/m8_runs.csv` |
+| M8 formal run total | — | 22:14:34 to 22:49:38, about 35 minutes | Highest 3.74 GB | `results/t_phase.csv`, `results/m8_runs.csv` |
 
-没有写进 `results/` 或 `docs/decisions.md` 的两项：R6 base 模型（6 个 epoch）训练的实际耗时（只有事先的推算：约 36–37 分钟，`docs/decisions.md` 2026-11-17）；描述性诊断的耗时和峰值（在运行日志 `artifacts/runs/m8_diagnostics/run.log` 里）。
+Two items are not recorded in `results/` or `docs/decisions.md`: the actual training time of the R6 base model (6 epochs) (there is only the prior estimate: about 36–37 minutes, `docs/decisions.md` 2026-11-17); and the run time and peak of the descriptive diagnostics (in the run log `artifacts/runs/m8_diagnostics/run.log`).
 
-把上表各项加起来（R6 base 的训练按推算值计），从 D 阶段到最终评估的计算合计约 10 小时，一台笔记本电脑可以完成；有真实峰值记录的进程里，最高是 7.25 GB。
+Adding up the rows of the table (with the R6 base training counted at its estimate), the computation from the D phase to the final evaluation totals about 10 hours and fits on one laptop; among the processes with a recorded true peak, the highest is 7.25 GB.
 
 ---
 
-## 9. 下一步
+## 9. Next steps
 
-以下各项都**只能在 V1–V4 上比较和选择**，沿用 §3.3 的规则；T1–T4 不再用于任何选择。
+Everything below **may only be compared and selected on V1–V4**, under the rule of §3.3; T1–T4 is no longer used for any selection.
 
-### 9.1 得到可以与外部比较的数字
+### 9.1 Getting a number that can be compared externally
 
-**Kaggle 赛后提交。** 这是唯一能把这个系统与公开结果放在一起的办法（§7.3）。需要做的：
+**Kaggle late submission.** This is the only way to put this system next to public results (§7.3). What it takes:
 
-- 把训练链和各路统计推进一周（用到 2020-09-22 为止的全部数据），预测数据之后的那一周；Ranker 用最后 4 周（T1–T4）训练。配置全部沿用锁定文件，不调任何东西。
-- **规模**。现在的流程只为"这周买了东西的顾客"生成候选；提交要覆盖提交文件里的全部顾客。`data/raw/sample_submission.csv` 有 1,371,980 个顾客，是平时一周 query 数（F1–T4 平均约 7.6 万，`results/m6_candidates.csv`）的 18 倍左右。按现在每个 query 约 307 个候选估算，候选约 4 亿行（现在一周是 2,100 万–2,640 万行，`results/m6_runs.csv`），所以候选、特征、打分都要分块。R1 对所有顾客都有输出，每个顾客都会有候选。
+- Advance the training chain and the statistics of each channel by one week (using all data up to 2020-09-22) and predict the week after the data end; the ranker is trained on the last 4 weeks (T1–T4). All configurations come from the lock files; nothing is tuned.
+- **Scale.** The current pipeline generates candidates only for "customers who bought something that week"; a submission has to cover every customer in the submission file. `data/raw/sample_submission.csv` has 1,371,980 customers, about 18 times the usual number of queries per week (about 76,000 on average over F1–T4, `results/m6_candidates.csv`). At the current average of about 307 candidates per query, that is about 400 million candidate rows (a week currently has 21.0 million–26.4 million rows, `results/m6_runs.csv`), so candidates, features and scoring all have to be chunked. R1 returns something for every customer, so every customer will have candidates.
 
-提交的规则：
+Rules for the submission:
 
-- 流程事先写好并提交，然后才运行；
-- 只提交一次；
-- 以 Private 分数为准；
-- 分数只用来报告，不用来回头选配置；
-- 这部分代码在单独的分支上完成，**不合并回 main**：它用 T1–T4 的 label 训练，并且多出一个不在 `configs/fold_manifest.yaml` 里的预测周。
+- the procedure is written and committed first, and only then run;
+- submit once;
+- the Private score is the one that counts;
+- the score is only reported, never used to go back and select a configuration;
+- this code lives on a separate branch and is **not merged back into main**: it trains on the labels of T1–T4 and adds a predicted week that is not in `configs/fold_manifest.yaml`.
 
-### 9.2 模型对比
+### 9.2 Model comparison
 
-**DeepFM 对比。** 用同样的候选、同样的 71 个特征、同样的 4 周训练窗口，把 LambdaMART 换成 DeepFM，在 V1–V4 上比较 MAP@12。对比的目的是理解 pointwise 的深度模型与 listwise 的 GBDT 的差别，**不以替换 LambdaMART 为目标**。它回答的问题是：在候选和特征不变的前提下，换一种排序模型有没有 1% 以上的差别。另做两个 ablation：去掉 FM 部分、去掉 deep 部分，看两部分各自贡献多少。§4.2 的平台期结论只覆盖了 LightGBM 的几个参数，不覆盖模型的类型。需要事先定好的：DeepFM 的超参数怎么选（同样的选择规则）、类别特征和缺失值怎么处理、随机性怎么控制（至少多个 seed，因为神经网络的波动比树模型大）。
+**DeepFM comparison.** With the same candidates, the same 71 features and the same 4-week training window, replace LambdaMART with DeepFM and compare MAP@12 on V1–V4. The purpose is to understand the difference between a pointwise deep model and a listwise GBDT; **replacing LambdaMART is not the goal**. The question it answers: with candidates and features held fixed, does a different ranking model make a difference of 1% or more. Two further ablations: remove the FM part, and remove the deep part, to see how much each contributes. The plateau conclusion of §4.2 covers only a few LightGBM parameters, not the type of model. To be fixed in advance: how DeepFM's hyperparameters are selected (the same selection rule), how categorical features and missing values are handled, and how randomness is controlled (several seeds at least, since neural networks vary more than tree models).
 
-### 9.3 `docs/decisions.md` 里已有的备选事项
+### 9.3 Alternatives already listed in `docs/decisions.md`
 
-这些是过程中记下、当时决定不做的：
+These were noted along the way and deliberately not done at the time:
 
-| 事项 | 内容 | 来源 |
+| Item | Content | Source |
 |---|---|---|
-| 备选特征（6 个，作为一个整体评估，不逐个挑选） | 顾客的购买间隔以及"距上次购买天数 ÷ 平均间隔"；商品的典型复购间隔；顾客的折扣偏好；商品买家年龄的分布宽度；商品在类目内的热度排名；ItemCF 对全部候选的分数 | 2026-11-17 |
-| `postal_code` 相关的特征 | 预处理时删掉了这一列，需要重跑预处理 | 2026-11-17 |
-| `lambdarank_truncation_level` | 现在是默认值 30；LightGBM 文档建议略高于评估的 K | 2026-11-18 |
-| 把漂移明显的分数类特征换算成 query 内的名次 | 针对 §7.2 第 15 条；需要先决定它与 `features.lock.yaml` 的关系 | 2026-11-18 |
-| 删掉贡献接近 0 的特征 | §4.2 里贡献最小的几个 | 2026-11-18 |
-| 特征生成只读用到的列 | 只影响内存，不影响结果 | 2026-11-18 |
+| Alternative features (6 of them, evaluated as one package, not picked one by one) | The customer's purchase interval and "days since last purchase ÷ mean interval"; the typical repurchase interval of an article; the customer's discount preference; the spread of the buyer-age distribution of an article; an article's popularity rank within its category; the ItemCF score for all candidates | 2026-11-17 |
+| Features based on `postal_code` | The column was dropped in preprocessing, which would have to be re-run | 2026-11-17 |
+| `lambdarank_truncation_level` | Currently the default of 30; the LightGBM documentation suggests a value slightly above the evaluation K | 2026-11-18 |
+| Converting clearly drifting score-type features into within-query ranks | Addresses §7.2 item 15; its relation to `features.lock.yaml` has to be decided first | 2026-11-18 |
+| Dropping features with a contribution close to 0 | The smallest contributors in §4.2 | 2026-11-18 |
+| Reading only the needed columns in feature generation | Affects memory only, not results | 2026-11-18 |
 
-另外，§7.1 第 10 条里没有做的诊断（超参数漂移 regret、R6 的内容 ablation、52 周的 base 窗口）可以补上；它们只用于报告，不改变选择。
+In addition, the diagnostics that were not done in §7.1 item 10 (hyperparameter drift regret, the R6 content ablation, the 52-week base window) can be added; they are for reporting only and change no selection.
 
-从这次的结果看，值得优先考虑的方向（都需要先在 V 上验证）：
+Directions that look worth prioritizing given these results (all need to be validated on V first):
 
-- **没有历史的顾客**（§6.1）是一个量出来的弱点。**新商品**上的表现没有单独评估过（§7.2 第 13 条），而它在购买里的占比在 T 上是 16 周里最高的；先把它量出来。
-- **约一半的 query 没有任何候选命中**（§7.2 第 11 条）。Ranker 的参数已经在平台期，提升空间在候选和特征。
-- **`customers.csv` 快照的问题**（§7.2 第 8 条）可以用一个实验量化：去掉受影响的属性，在 V 上看 MAP@12 变化多少。
+- **Customers without history** (§6.1) are a measured weakness. Performance on **new articles** was not evaluated separately (§7.2 item 13), while their share of purchases on T is the highest of the 16 weeks; measure it first.
+- **About half of the queries have no candidate hit** (§7.2 item 11). The ranker parameters are on a plateau; the headroom is in candidates and features.
+- **The `customers.csv` snapshot issue** (§7.2 item 8) can be quantified with one experiment: remove the affected attributes and see how much MAP@12 changes on V.
 
 ### 9.4 MLOps
 
-现在的系统是一组按顺序手工启动的脚本，结果的可追溯靠约定和测试。要让它每周自动运行，还缺：
+The system today is a set of scripts started by hand in order, and the traceability of results rests on conventions and tests. To run it automatically every week, the following are still missing:
 
-- **调度**：把"每周的 recall → fine-tune → 特征 → 重训 → 预测"接成一条有依赖关系的流水线，失败时能停在出错的那一步并报警。现在的停止条件（内存超限、sha256 不一致、loss 异常）已经在代码里，可以直接用作流水线的检查。
-- **监控**：§6.3 的 recall 监控和特征的缺失率、均值统计（`results/m6_features.csv`）已经每周产出，但只是写进表里。需要定下哪些变化要有人看，哪些变化要触发重新选配置。
-- **模型和数据的版本管理**：现在用 sha256 写在结果表和锁定文件里。换成模型仓库之后，"每周的模型必须是上一周模型的延续"这条约束要保留。
-- **重新选配置的节奏**：超参数锁定之后没有再选过。季节变化明显（§5.2），需要定一个规则：多久、在哪些周上、按什么标准重新选一次。
-- **环境**：libomp 的版本固定下来（容器或锁定的系统依赖），去掉 §7.2 第 17 条的隐患。
-- **线上评估**：离线指标之外，需要 A/B 实验的设计（§7.2 第 2 条）。
+- **Orchestration**: connect "weekly recall → fine-tune → features → retrain → predict" into a pipeline with dependencies that stops at the failing step and raises an alert. The existing stop conditions (memory over the limit, sha256 mismatch, abnormal loss) are already in the code and can serve directly as pipeline checks.
+- **Monitoring**: the recall monitoring of §6.3 and the per-feature missing rates and means (`results/m6_features.csv`) are already produced every week, but only written to tables. It has to be decided which changes need a human to look and which should trigger re-selecting the configuration.
+- **Versioning of models and data**: currently sha256 values written into result tables and lock files. After moving to a model registry, the constraint "each week's model must continue from the previous week's model" has to be preserved.
+- **Cadence of re-selection**: hyperparameters have not been re-selected since the lock. Seasonal change is evident (§5.2), so a rule is needed: how often, on which weeks and by what criterion to re-select.
+- **Environment**: pin the libomp version (a container or a locked system dependency) to remove the risk in §7.2 item 17.
+- **Online evaluation**: beyond offline metrics, an A/B experiment design is needed (§7.2 item 2).
