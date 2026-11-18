@@ -30,12 +30,31 @@ Target machine: macOS on Apple Silicon (PyTorch MPS; no CUDA).
    make setup
    ```
 
+3. Install the OpenMP runtime that LightGBM needs (the Ranker, M7 and later):
+
+   ```bash
+   brew install libomp
+   ```
+
+   The LightGBM wheel does not contain an OpenMP runtime; on macOS it loads Homebrew's
+   `libomp.dylib` (`/opt/homebrew/opt/libomp/lib`). **This is a system dependency outside
+   `uv.lock`**: `make setup` neither installs nor pins it, and `brew upgrade` can change it
+   without any change in this repository. Version in use when the Ranker was built:
+   **libomp 22.1.4** (`brew list --versions libomp`). Every M7 result row records the
+   LightGBM version and the path and version of the libomp that the process really loaded
+   (columns `lightgbm_version`, `libomp_path`, `libomp_version`). After upgrading libomp,
+   repeat the "two trainings give the same model" check before producing new results
+   (`docs/decisions.md`, 2026-11-18).
+
+   torch brings its own copy of libomp, and two OpenMP runtimes in one process abort, hang
+   or crash. So Ranker code never imports torch, and the tests run in two processes.
+
 Other commands (all run through `uv run`):
 
 ```bash
 make lint         # ruff format --check, ruff check, pyright
-make test-fast    # unit tests
-make test         # unit + integration tests
+make test-fast    # unit tests (two processes: the torch side, then the LightGBM side)
+make test         # unit + integration tests (also two processes)
 make format       # auto-format
 ```
 

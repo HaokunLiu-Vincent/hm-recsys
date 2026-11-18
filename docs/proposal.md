@@ -93,7 +93,7 @@
 | R6 Two-Tower 训练 | ~1.5–2 GB | **训练数组生成（base 窗口，2026-11-17）：峰值 4.70 GB**（取较保守的值：两次运行 MemoryTracker 采样分别为 3.35 GB 和 4.70 GB，任务只有约 4.5 秒，0.5 秒的采样间隔误差大；`/usr/bin/time` 最大 RSS 4.15 GB，含读数据），耗时 4.6 秒；616 万个样本，数组共 670 MB（`history` int32 470 MB、`history_mask` 118 MB）。**200 步 benchmark（占位模型，batch 512）**：MPS 进程最大 RSS 2.00 GB，MPS 张量占用 1.17 GB（驱动共持有 2.02 GB，统一内存，与 RSS 部分重叠）；CPU 进程最大 RSS 2.34 GB。真实模型（训练全程）待测 | 用户历史预先存成 int32 数组 `[N, 20]`；商品特征表（~10.5 万 × 896 维，约 380 MB）整块放进 MPS 显存；batch 直接按下标取，不用 DataLoader |
 | 候选生成（每周） | 合并前最多约 3,940 万行，全部放在内存约 0.73 GB（D3 约 1.07 GB）；单个 channel 最多约 0.15 GB；合并去重后约 **2,520 万行**（每个 query 平均 307 个；计算见表下 ①） | **M4 实测（D1–D4，2026-11-17，M5 锁定的配置，即 R3 只输出 `A(a)`）**：合并前 D1 3,219 万行、D3 4,947 万行（只保留 `query_id`、`article_idx`、`rank` 三列时约 0.36 / 0.55 GB）；去重后每个 query 平均 **307** 个候选（P50 320，P90 364；上限 480），D1 约 2,440 万行、D3 约 3,661 万行。R3 切换之前：平均 313（P50 327，P90 373），合并前 D1 3,268 万行、D3 5,015 万行。**内存**：第一次 M4 union 检查（四周一起处理）整个进程的真实峰值 6.66 GB（`/usr/bin/time`；0.5 秒采样只看到 5.22 GB），超过 6 GB；改为一次只处理一个 fold 后（R3 切换后的重跑）降到 **4.78 GB**（来源：`/usr/bin/time -l` 的终端输出，**没有写入运行日志**；日志里采样到的最大值是 4.72 GB）。**这个 4.78 GB 不包含 R6 现场预测**：那次运行 R1、R2、R4、R5、R6 的候选都从已有文件读回，只有 R3 是现场生成的。**单路的真实峰值**（每路一个进程，含 R6 现场预测）已在 M5 的 D1 核对中测得，见表下"M5 锁定配置在 D1 上的单路实测"：最高是 R4 的 4.20 GB。**M6 实测（F1–T4 共 12 周，2026-11-17，`results/m6_runs.csv`）**：每个 (fold, channel) 一个进程，所以不存在"六路在一个进程里"的峰值；12 周中任何进程的真实峰值最高 **4.70 GB**（F2 的 R6，含预测、全部商品向量和这一周的 fine-tune），各路范围：R1 1.9–2.1、R2 0.9–1.1、R3 1.0–1.1、R4 3.8–4.3、R5 3.6–4.2、R6 4.3–4.7 GB。监控进程（读回六路候选、统计去重后的候选数；F、V 周另算 recall）最高 2.12 GB。每周去重后的候选数平均 304–310（P50 317–324，P90 359–364），与 D 阶段的 307 一致。合并成宽表（`fusion/union.py`）的峰值留到 M6 后半 | 每个 channel 单独写 Parquet，再按 query 分块合并去重 |
 | 特征宽表（每周，§8） | 一周全放进内存约 **6.9 GB**（2,520 万行 × 292 B），不可行；按 1 万 query 分块后每块约 **0.83 GB**，P90 的块约 0.99 GB（计算见表下 ④）。12 周（F、V、T）的特征 Parquet 未压缩约 **77 GB**，压缩后估计 23–46 GB（计算见表下 ⑤）。以上按 71 个特征计（2026-11-17 从 56 个增加到 71 个） | **F1 实测（2026-11-18，`results/m6_runs.csv`）**：85,648 个 query，26,373,844 行，9 个 part 文件；耗时 61 秒（每 fold 的三类表 3.5 秒，`tt_sim_*` 一步 6.0 秒）。**真实峰值 6.10 GB，超过 6 GB 上限 0.10 GB**（采样 5.76 GB；与 `/usr/bin/time -l` 一致）。每个分块结束时的 RSS 从 3.80 GB 逐块升到 4.95 GB，即块与块之间内存没有完全释放；整周的六路候选和每 fold 的三类表在整个进程中常驻内存，各占多少没有分开测。文件已完整写出并通过全部检查；用户决定代码保持不变（`docs/decisions.md` 2026-11-18）。磁盘 **1.67 GB**（每个 part 约 209 MB），见表下 ⑤。**12 周实测（F1–T4，2026-11-18，`results/m6_runs.csv`）**：共 281,750,956 行（每周 2,098 万–2,637 万），每周 7–9 个 part 文件；每周耗时 48–61 秒，12 周合计约 11 分钟；真实峰值 **6.10–7.25 GB**（最高是 V2 的 7.25 GB），与行数无关（行数最多的 F1 峰值最低），在 8 GB 上限之内；磁盘合计 **17.8 GB**。特征生成的代码自 F1 起没有改动 | **按 query 分块计算**（每块 1 万个 query），每块算完直接写成一个 Parquet row group / part 文件，不在内存中保留整周 |
-| Ranker 训练（4 周） | 负采样 1:40 约 1,100 万行，1:80 约 2,170 万行（上限）；原始 float32 特征约 2.9–5.7 GB，分箱后约 0.7–1.4 GB（计算见表下 ②；71 个特征） | 待测 | **流式加载（stream loading）**：每周特征按 row group 存 Parquet，用 LightGBM 的 `lgb.Sequence` 分批读入构建 `Dataset`，原始特征不必一次性放进内存；构建后的分箱数据（每个值 1 字节）约 0.5–1 GB，存成 LightGBM binary 文件复用 |
+| Ranker 训练（4 周） | 负采样 1:40 约 1,100 万行，1:80 约 2,170 万行（上限）；原始 float32 特征约 2.9–5.7 GB，分箱后约 0.7–1.4 GB（计算见表下 ②；71 个特征） | **行数实测（2026-11-18，只读统计，见 §9.1）**：4 周窗口 r = 40 为 1,045 万–1,071 万行，r = 60 为 1,530 万–1,569 万行，r = 80 为 1,976 万–2,028 万行，每个窗口约 15 万个 query。耗时和内存峰值待测速（M7）后填写 | **流式加载（stream loading）**：每周特征按 row group 存 Parquet，用 LightGBM 的 `lgb.Sequence` 分批读入构建 `Dataset`，原始特征不必一次性放进内存；构建后的分箱数据（每个值 1 字节）约 0.5–1 GB，存成 LightGBM binary 文件复用 |
 | Ranker 推理（每周，不采样） | 一次全放进内存约 **6.7 GB**；按 1 万 query 分块后每块约 **0.81 GB**，P90 的块约 0.96 GB（计算见表下 ③；71 个特征） | 待测 | **按 query 分块打分**（每块 1 万个 query） |
 
 **候选生成、Ranker 训练、Ranker 推理、特征宽表几行的估算过程**（2026-11-16 按实测 query 数重算；2026-11-17 按 M4 实测的候选数重算，同日 M5 锁定时再按 R3 切换后的候选数 307 重算；1 GB = 1024³ B）。共同输入：每周平均 **8.2 万** query（D3 最多 12.0 万；F、V、T 周 6.9–8.6 万），每个 query 平均约 **3.4** 个 label（去重后；F、V 周 3.2–3.6）；6 路 quota 合计 100 + 30 + 50 + 100 + 100 + 100 = **480**；合并去重后每个 query 平均 **307** 个候选，P50 320，P90 364（M4 在 D1–D4 上实测，M5 锁定的配置，即 R3 只输出 `A(a)`；R3 切换之前为 313 / 327 / 373，最初假设 250）；特征 **71** 个（最初 56 个，2026-11-17 增加 15 个，见 §8）。F、V、T 共 12 周的 query 数实测为 6.9–8.6 万，合计 **917,354**，平均 7.64 万。
@@ -807,9 +807,16 @@ M4 在 D1–D4 上的实测（2026-11-17，§5.7，M5 锁定的配置）：六�
 |---|---|---|---|
 | 1 | `num_leaves` × `min_data_in_leaf` | {31, 63, 127} × {100, 500} | 6 × 4 = 24 |
 | 2 | 负采样比例 r | {40, 60, 80}（训练数据流式加载，见 §1.3） | +2 × 4 = 8 |
-| 贯穿 | `num_trees` | 每个模型训到 2000 棵，用 `num_iteration = 100, 200, …, 2000` 分别预测，一次训练得到整条曲线 | 不增加 |
+| 贯穿 | `num_trees` | 每个模型训到 2000 棵，在 k = 100, 200, …, 2000 棵处各评估一次，一次训练得到整条曲线。"k 棵树时的分数"由 `ranker/predict.py` 的 `staged_raw_scores` 定义：每 100 棵算一段原始分数再按顺序累加，每棵树只算一次（见 §9.7） | 不增加 |
 
 按 §4 的规则，用 4 周的 MAP@12 选 `(num_leaves, min_data_in_leaf, 负采样比例, num_trees)`。
+
+**先定棵数、再比参数**（2026-11-18，运行之前写进 `configs/hpo/v_phase.yaml`，`docs/decisions.md`）：
+
+1. 每组参数先定自己的棵数。设 `P(k)` 是 4 周合并（query-weighted）的 MAP@12，`k* = min{k : (max P − P(k)) / max P < 1%}`：与最高值相对差距小于 1% 的 k 里取最小的；差距正好 1% 不算。
+2. 再按 §4.2 的多候选规则比较各组参数，每组用自己 `k*` 处的 4 周分数和合并分数。
+3. 第 1 步的优先顺序：(31, 500) [默认] < (31, 100) < (63, 500) < (63, 100) < (127, 500) < (127, 100)。第 2 步：r = 40 [默认，即第 1 步的赢家，不重跑] < 60 < 80，每个 r 各自先定 k。
+4. 一步的赢家如果 `k*` = 2000（最后一个检查点），曲线可能还在上升：这一步之后停下汇报，由人决定是否加树。没被选中的候选 `k*` = 2000 时只在报告里标注。
 
 **不做 per-fit early stopping**：tree 数和 Two-Tower 的 epoch 一样，作为超参数在 4 周上选定后锁住。这样每次训练都能用上最新的一周数据，各周模型的训练程度也一致。
 
@@ -824,9 +831,45 @@ M4 在 D1–D4 上的实测（2026-11-17，§5.7，M5 锁定的配置）：六�
 
 "去掉某一路"的做法：删掉**只由这一路召回**的候选行，删掉这一路的特征列（包括 B 组对应的稠密分数），然后按 §9.2 重新滚动训练。
 
+**−R6 的落实**（`src/hmrec/ranker/ablation.py`，采样和打分共用同一个函数；不重新生成候选和特征）：(1) 删掉其余五路 rank 全为 NaN 的行；(2) 删掉 `tt_rank`、`tt_dot`、`tt_sim_max_hist`、`tt_sim_top5_hist`，剩 67 个特征，顺序不变；(3) 用 `fusion/rrf.py` 的同一组表达式和锁定的 `rrf_k`，由其余五个 rank 列**重新计算** `n_channels`、`best_rank`、`rrf_score`（否则这三列里仍然带着 R6 的排名）；(4) 重新采样（只采选中的 r），用选中的参数训练到选中的 `k*` 棵（训练是确定性的，前 k 棵与训到 2000 棵的前 k 棵相同），在 V1–V4 上评估。结果只汇报，不触发任何选择。
+
 ### 9.6 锁定
 
 V4 结束后、T1 之前，把 Ranker 配置写进 `configs/locks/ranker.lock.yaml`。
+
+### 9.7 落实后的约定（M7，2026-11-18）
+
+配置在 `configs/ranker.yaml`（固定参数、三个调参项的默认值、采样设置、直方图方式的规则、测速设置）和 `configs/hpo/v_phase.yaml`（步骤、优先顺序、选择规则；在任何 Ranker 结果出现之前提交）。
+
+**范围**：M7 只涉及 F1–F4 和 V1–V4。预测目标必须是 V 周，训练周必须是 F 或 V 周（`ranker/window.py`）；每个入口第一步检查，T（或 D）fold 在打开任何文件之前就报错。训练用的 label 只在 `ranker/sampling.py` 读，评估用的只通过 `eval/ranker_eval.py` 的 `load_m7_evaluator` 读。特征只从 `artifacts/features/` 读，读之前调用 `verify_feature_files`，列清单取自 `features.lock.yaml`。
+
+**负采样**（§9.1）：每个 query 用 `(seed, query_id)` 单独建一个随机数发生器，把该 query 的负样本（按 `article_idx` 排序）随机排列，取前 `min(负样本数, r × 正样本数)` 个。所以一个 query 的样本只取决于 seed、query_id 和它的候选，与分块和处理顺序无关；r = 40 的样本是 r = 60 的子集，r = 60 是 r = 80 的子集。每个 (fold, r) 一个文件 `artifacts/ranker/samples/{full|minus_r6}/{fold}/r{r}.parquet`：`query_id`、`article_idx`、`label`（int8）和特征列，按 `(query_id, article_idx)` 排序，每 10 万行一个 row group；旁边的 `.json`（行数、query 数、正样本数、每个 query 的行数分布、sha256、来源 `features.json` 的 sha256）最后写入。写一次，不覆盖。M7 只采 F1–F4、V1–V3（V4 只训练预测 T 周的模型，留给 M8）。
+
+实测的样本规模（2026-11-18，只读统计；每个 fold 有 47.9%–51.0% 的 query 至少有 1 个正样本）：
+
+| fold | 正样本 | 有正样本的 query | r = 40 行数 | r = 60 行数 | r = 80 行数 | 配不满的 query（r = 40 / r = 80） |
+|---|---|---|---|---|---|---|
+| F1 | 72,385 | 41,420 | 2,951,046 | 4,313,058 | 5,559,664 | 282 / 2,908 |
+| F2 | 61,660 | 36,679 | 2,515,389 | 3,686,828 | 4,768,474 | 182 / 2,208 |
+| F3 | 63,370 | 37,628 | 2,585,402 | 3,787,205 | 4,896,656 | 198 / 2,261 |
+| F4 | 65,210 | 39,088 | 2,662,389 | 3,901,694 | 5,052,137 | 185 / 2,281 |
+| V1 | 66,559 | 39,673 | 2,716,842 | 3,982,707 | 5,151,132 | 165 / 2,406 |
+| V2 | 65,586 | 38,166 | 2,676,158 | 3,916,942 | 5,054,204 | 210 / 2,597 |
+| V3 | 58,920 | 34,028 | 2,397,998 | 3,496,447 | 4,502,500 | 250 / 2,271 |
+
+**Dataset**（`ranker/dataset.py`）：每个采样文件一个 `lgb.Sequence`，一次只在内存里放一个 row group；4 个文件按时间顺序传给 `lgb.Dataset`。`query_id` 随 fold 的顺序递增，所以 group 大小就是 `query_id` 的游程长度，顺序与行顺序一致。构建后存成 binary：`artifacts/lgb_datasets/{实验}/{目标周}_r{r}/train.bin`，旁边的 `dataset.json` 记录 4 个采样文件的 sha256 和分箱参数；trial 加载前核对。LightGBM 4.7.0 的三个事实（合成数据上验证）：`Sequence` 的单行访问必须返回 float64；经 `Sequence` 构建两次，binary 文件逐字节相同，但它与"直接传 numpy 数组"的分箱不同，所以所有 Ranker 都走这条路径；`feature_pre_filter` 必须关掉，同一个 binary 才能被不同的 `min_data_in_leaf` 复用。
+
+**参数**（§9.3 之外的全部写在 `configs/ranker.yaml`，标明哪些是 LightGBM 4.7.0 的默认值）：`seed` 42、`deterministic` true；`lambdarank_truncation_level` 30、`lambdarank_norm` true、`bagging_by_query` false（都是默认值，不在第一轮网格里）；8 个类别特征按整数编码传入，编码 0（缺失）是一个普通类别。**直方图方式**（col-wise / row-wise）两者可能给出不同的树，必须在网格之前定死，M8 沿用：规则在测速之前写进 `configs/ranker.yaml`（`histogram`：两种方式各训练 50 棵、不评估；row-wise 每棵树快 15% 以上且真实峰值在 8 GB 以内才选 row-wise，否则 col-wise），`mode` 在测速之后填入；`mode` 为 `undecided` 时网格拒绝运行。
+
+**trial**：一个 trial = 一组参数在一个 V 周上的一次训练加评估，用一个独立进程（`scripts/m7_train_eval.py`），所以进程的 `ru_maxrss` 就是这个 trial 自己的真实峰值。训练从头开始，不做 early stopping；训练集 NDCG@12 每 100 棵记一次（只用于日志）。评估对预测周的全部候选打分（不采样），逐个 part 文件处理。
+
+**k 棵树时的分数**（`ranker/predict.py` 的 `staged_raw_scores`，M7 和 M8 共用）：`predict(start_iteration=s, num_iteration=100, raw_score=True)` 每 100 棵算一段，用 float64 按顺序累加。它与 `predict(num_iteration=k)` 不是逐位相同（浮点加法的顺序不同，合成数据上最大相差 1.4e-14），所以以这个函数为准。每个检查点按 `query_id ASC, score DESC, article_idx ASC` 取 Top-12。
+
+**记录**（都在 `results/`）：`v_phase.csv` 每个 trial 一行（配置、fold、训练周、行数、训练和打分耗时、采样峰值 `sampled_peak_rss_gb`、真实峰值 `process_max_rss_gb`、git commit）；`v_phase_metrics.csv` 每个 (配置, fold, k) 一行（query 数、MAP@12、Recall@12、NDCG@12、训练集 NDCG@12）；`v_phase_steps.csv` 每一步每个配置的 `k*`、分数、是否通过、选中谁和原因。V 阶段用新的记录类（`hpo/v_records.py`），D 阶段的 `TrialRecord` 和 `results/d_phase.csv` 不动。**选择只从 `v_phase_metrics.csv` 计算**：合并分数 = `Σ(n_f × mean_f) / Σ n_f`（`math.fsum`），与"全部 query 一起平均"只差浮点舍入（约 1e-16），好处是选择可以只凭 git 里的文件重放。每个 trial 另外保存每个检查点的 Top-12 和每个 query 的指标（`artifacts/predictions/`），`scripts/checks/check_ranker_eval.py` 用朴素循环从 Top-12 重算指标。
+
+**测速**（`scripts/m7_speed_test.py`，网格之前只做一次）：采样 F1–F4，构建 V1 / r = 40 的 Dataset；两种直方图方式各训练 50 棵（不评估）并按规则选定方式；默认配置训练 300 棵，在 V1 上评估 100、200、300 棵，同时计算 V1 的 RRF baseline；汇报每棵树的训练耗时、打分耗时、真实峰值、训练数据的检查（各 fold 的正样本比例、每个 query 的行数分布、训练集 NDCG@12 是否上升）。**如果 300 棵时 MAP@12 低于 RRF baseline，停下排查，不外推时间。**结果写 `results/m7_speed_test.csv` 和 `results/m7_speed_test_metrics.csv`，不进 `v_phase*.csv`。
+
+**进程里不能同时有 torch 和 LightGBM**：torch 自带一份 libomp，LightGBM 用的是 Homebrew 的 libomp（`/opt/homebrew/Cellar/libomp/22.1.4`，不由 `uv.lock` 锁定），两份在一个进程里会直接退出、卡死或段错误。M7 的代码不 import torch（`git_state` 为此从 `hpo/runner.py` 移到 `src/hmrec/git_state.py`），测试分两个进程运行（`tests/conftest.py`，AGENTS.md §7）。libomp 是 `uv.lock` 之外的系统依赖（`brew install libomp`，见 README）：每个 M7 进程的结果行都记录 `lightgbm_version`、`libomp_path`、`libomp_version`（`ranker/runtime.py`，取自本进程实际加载的库）；升级 libomp 之后要重新做一次"两次训练得到相同模型"的核对。
 
 ---
 
@@ -852,7 +895,7 @@ V4 结束后、T1 之前，把 Ranker 配置写进 `configs/locks/ranker.lock.ya
 | M4 | D 阶段 union 检查（§5.7） | union recall 表 | **G2 达标**，否则回到 M2 / M3 | **完成**（4 周合并 25.24%，G2 达标；R3 按预先登记的规则改为只输出 `A(a)`） |
 | M5 | **冻结全部 recall 配置**（打 git tag） | `channels.lock.yaml`、`twotower.lock.yaml` | 之后不再修改 | **完成**（2026-11-17 写入锁定文件；锁定后在 D1 上重新生成候选、与记录逐位核对的结果，以及 tag，见 `docs/decisions.md`） |
 | M6 | 逐周生成 F1–T4 的候选和宽表特征（Two-Tower 沿训练链逐周推进） | `artifacts/candidates/`、`artifacts/features/` | 每周通过时间截断测试 | 12 周的候选（2026-11-17）和特征（2026-11-18）都已生成并通过检查；特征已锁定（`features.lock.yaml`，tag `lock-features-v1`）。待用户确认 |
-| M7 | Ranker 在 V1–V4 上滚动 HPO + baseline + 系统 ablation | `results/v_phase.csv` | `ranker.lock.yaml`；**G1、G3 在 V 上达标** | |
+| M7 | Ranker 在 V1–V4 上滚动 HPO + baseline + 系统 ablation | `results/v_phase.csv` | `ranker.lock.yaml`；**G1、G3 在 V 上达标** | 代码和测试已写（2026-11-18，§9.7）；选择规则已写进 `configs/hpo/v_phase.yaml`。还没有在全量数据上运行：下一步是测速（`scripts/m7_speed_test.py`），之后由用户决定网格怎么跑 |
 | M8 | T1–T4 最终评估 | 最终报告 | 报告 G1–G3 | |
 
 M2 中计算量小的 R1–R3 可以和 M3 的 Two-Tower 训练同时跑；R4 建图和 R5 拟合不要和 Two-Tower 同时跑。
@@ -921,9 +964,9 @@ hm-recsys/
 │   │   └── r6_twotower.yaml
 │   ├── hpo/                     # D 阶段和 V 阶段的搜索网格
 │   │   ├── d_phase.yaml
-│   │   └── v_phase.yaml
+│   │   └── v_phase.yaml         # M7：Ranker 的步骤、优先顺序、选择规则（看分数之前提交）
 │   ├── features.yaml            # 宽表的 71 个特征、dtype、哪些是类别特征，以及窗口、衰减 τ 等设置（§8）
-│   ├── ranker.yaml              # LightGBM 固定参数（§9.3）
+│   ├── ranker.yaml              # LightGBM 固定参数（§9.3）、调参项的默认值、采样设置、直方图方式的规则、测速设置
 │   └── locks/                   # 锁定后的配置，只能新增，不能修改
 │       ├── channels.lock.yaml   # M5：R1–R5 的完整配置、名额、trial_id、D 阶段分数（只作记录）、选择依据
 │       ├── twotower.lock.yaml   # M5：R6 的完整配置、报警用户设置、两个模型文件的路径和 sha256
@@ -941,6 +984,7 @@ hm-recsys/
 │   ├── locks.py                 # 读取并校验 configs/locks/ 的锁定文件；文件 sha256 核对（底层，recall / features 都可以用）
 │   ├── csv_records.py           # 只追加、表头固定的结果表（results/*.csv）的读写
 │   ├── feature_files.py         # 每个 fold 特征文件的记录（features.json：各 part 的 sha256、行数、列清单）和核对；M7 读特征前调用
+│   ├── git_state.py             # HEAD commit 和工作区是否干净（结果记录里的 git_commit / git_dirty）；不依赖 torch
 │   ├── run_records.py           # results/m6_runs.csv：每个进程一行（耗时、采样峰值、真实峰值）；真实峰值超限时停下
 │   ├── pipeline.py              # M6：一个 fold 的各步各用一个进程依次运行；每个 fold 的一行摘要
 │   │
@@ -992,14 +1036,18 @@ hm-recsys/
 │   │   ├── stats.py             # 每个特征的缺失率、最小值、最大值、均值（results/m6_features.csv）
 │   │   └── build.py             # 一个 fold：读入、按 query 分块合并和计算、自动检查、写 part 文件
 │   │
-│   ├── ranker/
-│   │   ├── sampling.py          # query 内随机负采样
-│   │   ├── dataset.py           # lgb.Sequence 流式读取，构建 LightGBM Dataset
-│   │   ├── train.py             # 4 周滑动窗口训练
-│   │   └── predict.py           # 分块打分，输出 Top-12 / Top-20
+│   ├── ranker/                  # 不 import recall/、features/，不 import torch；可以 import fusion/
+│   │   ├── window.py            # 4 周训练窗口；M7 的 fold 检查（目标 V，训练 F / V，T 直接报错）
+│   │   ├── sampling.py          # query 内随机负采样（读 label 的两处之一）；采样文件和记录
+│   │   ├── ablation.py          # 实验 full / minus_r6：去掉 R6 的行和特征，重算三个聚合特征
+│   │   ├── dataset.py           # lgb.Sequence 流式读取，构建 LightGBM Dataset，存成 binary 并核对
+│   │   ├── train.py             # LightGBM 参数、直方图方式的规则、确定性训练、模型文件
+│   │   ├── runtime.py           # 本进程实际用到的 LightGBM 版本和 libomp 的路径、版本；两份 OpenMP 时报错
+│   │   └── predict.py           # "k 棵树时的分数"（分段累加）、Top-12 和 tie-break
 │   │
 │   ├── eval/
 │   │   ├── metrics.py           # Recall@K、AP@12、NDCG@K、union recall
+│   │   ├── ranker_eval.py       # M7：只给 V 周的 label；Top-12 表的 MAP / Recall / NDCG
 │   │   ├── monitor.py           # M6 监控：候选数（不需要 label）；F、V 周的 recall / union recall；拒绝读 T 周的 label
 │   │   └── report.py            # 汇总每周 / 4 周结果，写 results/*.csv
 │   │
@@ -1012,7 +1060,11 @@ hm-recsys/
 │       ├── robustness.py        # 一步中排名靠前的配置再跑额外的 seed（只汇报，不参与选择）
 │       ├── union_precheck.py    # 重放规则得到各路的选择；R1–R5 的 union 预检查
 │       ├── union_check.py       # M4：六路 union 检查（只用命中的候选计算）、R3 活跃池规则
-│       └── lock_check.py        # M5：只用锁定文件重新生成一个 fold 的候选，分数必须与记录逐位相同
+│       ├── lock_check.py        # M5：只用锁定文件重新生成一个 fold 的候选，分数必须与记录逐位相同
+│       ├── v_records.py         # M7：V 阶段的三张结果表（trial、指标、步骤）；合并分数
+│       ├── v_trial.py           # M7：一个 trial（训练 + 全量打分 + 评估）；Dataset 的计划；RRF baseline
+│       ├── v_phase.py           # M7：读 v_phase.yaml；先定 k 再比参数；逐步启动各进程（可续跑）；−R6、importance
+│       └── speed_test.py        # M7：网格之前的测速；直方图方式的选择；低于 RRF baseline 时停下
 │
 ├── scripts/                     # 命令行入口，只做"读参数 → 调用 src → 写结果"
 │   ├── m0_preprocess.py
@@ -1029,10 +1081,16 @@ hm-recsys/
 │   ├── m6_monitor_candidates.py    # --fold F1：监控一个 fold 的候选（F、V 周读 label，T 周不读）
 │   ├── m6_run_folds.py             # --first-fold F1 --last-fold T4：按时间顺序逐个 fold 运行，每步一个进程
 │   ├── m6_build_features.py        # --fold F1：生成一个 fold 的宽表特征（一个 fold 一个进程，不读 label）
-│   ├── m7_ranker_hpo.py
+│   ├── m7_sample.py                # --fold F1：一个训练周的负采样（r = 40 / 60 / 80 各一个文件）
+│   ├── m7_build_dataset.py         # --target V1 --ratio 40：一个目标周的 binary Dataset
+│   ├── m7_train_eval.py            # 一个 trial：一组参数在一个 V 周上训练加评估（一个 trial 一个进程）
+│   ├── m7_rrf_baseline.py          # --fold V1：RRF baseline
+│   ├── m7_speed_test.py            # 网格之前的测速（V1，默认配置 300 棵）
+│   ├── m7_ranker_hpo.py            # --stage baseline / grid / minus_r6 / importance / report
 │   └── m8_final_eval.py
 │
 ├── tests/
+│   ├── conftest.py              # 测试分两个进程：torch 一侧和 LightGBM 一侧（--lightgbm-side）
 │   ├── fixtures/                # 手工构造的小数据（几十行），能手算结果
 │   ├── unit/                    # 每个模块的单元测试
 │   └── integration/             # 用小数据把一个 fold 从头跑到尾
@@ -1073,12 +1131,14 @@ hm-recsys/
 │   ├── features/{fold}/part-*.parquet             # 宽表：query_id, article_idx + 71 个特征；每块 query 一个文件
 │   ├── features/{fold}/features.json              # 最后写入，表示这个 fold 完成：各 part 的 sha256 和行数、列清单、检查的行数
 │   ├── features/category_codes.json               # 类别特征的编码表，所有 fold 共用
-│   ├── lgb_datasets/{run_id}/   # LightGBM binary dataset
+│   ├── ranker/samples/{experiment}/{fold}/r{r}.parquet   # 负采样后的训练行（+ 同名 .json 记录）；experiment = full / minus_r6
+│   ├── lgb_datasets/{experiment}/{目标周}_r{r}/           # train.bin（LightGBM binary dataset）和 dataset.json
 │   ├── models/wals/{fold}/                        # R5 向量（vectors.py 的格式）：该 fold 的 query 用户，全部有向量的商品
 │   ├── models/twotower/vectors/{fold}/            # R6 向量：该 fold 的 query 用户，商品目录的全部商品；fine-tune 之前的模型
 │   ├── models/twotower/chain_locked/{fold}.pt     # 锁定配置的训练链：在该 fold 上 fine-tune 之后的模型（预测下一个 fold）
 │   ├── models/twotower/{base,chain}/              # base 的各个 epoch；D 阶段各条训练链的模型
-│   ├── models/ranker/{fold}/
+│   ├── models/ranker/{area}/{experiment}/{config_id}/{fold}/model.txt   # area = v_phase / speed_test
+│   ├── predictions/{area}/{experiment}/{config_id}/{fold}.parquet       # 每个检查点的 Top-12；另有 {fold}_per_query.parquet
 │   ├── hpo/D/{channel}/{trial_id}/{fold}.parquet  # R2 / R3 候选 + in_active_pool 标记（M4 的 §5.7 第 4 项用）
 │   ├── m5/lock_check/{fold}/{channel}.parquet     # M5 锁定核对生成的候选；后续步骤不读取这个目录
 │   └── runs/{run_id}/           # 每次运行的 config 快照、日志、指标
@@ -1091,18 +1151,27 @@ hm-recsys/
     ├── m6_candidates.csv             # M6 监控：每个 fold 每一路和六路 union 各一行（T 周没有基于 label 的列）
     ├── m6_twotower_chain.csv         # M6：训练链每个模型的 sha256 和 fine-tune 的行数、loss、耗时
     ├── m6_features.csv               # M6：每个 fold 每个特征的缺失率、最小值、最大值、均值
-    ├── v_phase.csv
+    ├── v_phase.csv                   # M7：每个 trial 一行（耗时、采样峰值、真实峰值、LightGBM 版本、libomp 路径和版本）
+    ├── v_phase_metrics.csv           # M7：每个 (配置, fold, 棵数) 一行；RRF baseline 的行也在这里
+    ├── v_phase_steps.csv             # M7：每一步每个配置的 k、分数、是否通过、选择结果
+    ├── v_phase_feature_importance.csv  # M7：选中配置的 gain（只作分析）
+    ├── m7_runs.csv                   # M7：采样、构建 Dataset、baseline 各进程的耗时、真实峰值、LightGBM 版本、libomp 路径和版本
+    ├── m7_speed_test.csv             # M7 测速的 trial 行（与 v_phase.csv 同列）
+    ├── m7_speed_test_metrics.csv     # M7 测速的指标行
     └── t_phase.csv
 ```
 
 ### 14.1 分层规则
 
 ```
-scripts/  →  src/hmrec/{recall, fusion, features, ranker, hpo, pipeline}  →  src/hmrec/{data, eval, vectors, locks, csv_records, run_records, feature_files}  →  config / paths
+scripts/  →  src/hmrec/{recall, fusion, features, ranker, hpo, pipeline}  →  src/hmrec/{data, eval, vectors, locks, csv_records, run_records, feature_files, git_state}  →  config / paths
 ```
 
 - 上层可以调用下层，**下层不能 import 上层**。例如 `data/` 不能 import `recall/`。
 - `recall/`、`features/`、`ranker/` 之间互不 import，通过 `artifacts/` 里的文件交接。
+- `fusion/` 不在上一条的限制里：`features/` 和 `ranker/` 都可以 import `fusion/`，`fusion/` 不 import 这三者。宽表、−R6 的重算和 RRF baseline 因此用同一组表达式。
+- `git_state.py`（HEAD commit、工作区是否干净）属于底层，只依赖标准库和 `logging_utils.py`。
+- M7 的代码（`ranker/`、`hpo/v_*.py`、`hpo/speed_test.py`、`eval/ranker_eval.py`、`scripts/m7_*.py`）不能 import torch，也不能 import 会加载 torch 的模块（`recall/`、`hpo/runner.py`）：torch 和 LightGBM 的两份 OpenMP 运行库不能在同一个进程里（§9.7）。
 - `locks.py` 属于底层（只依赖 `config.py` 和标准库）：它只读取、校验 `configs/locks/` 的锁定文件。`recall/` 和 `features/` 都可以 import 它（特征需要某一路的锁定参数时从这里取，不经过 `recall/`）。从锁定文件**构建** channel 在 `recall/locked.py`。
 - `csv_records.py`（只追加、表头固定的结果表的读写）和 `run_records.py`（每个进程一行的运行记录：耗时、采样峰值、真实峰值）属于底层，只依赖标准库和 `memory.py`。
 - `feature_files.py`（特征文件的记录和核对）属于底层，只依赖标准库、polars 和 `locks.py`：`features/` 写记录，`ranker/` 核对，两者互不 import。
@@ -1123,7 +1192,9 @@ scripts/  →  src/hmrec/{recall, fusion, features, ranker, hpo, pipeline}  → 
 | `recall/generate.py`（R6 训练链） | `artifacts/models/twotower/chain_locked/{fold}.pt`，sha256 记在 `results/m6_twotower_chain.csv` | 在该 fold 上 fine-tune 之后的模型；T4 没有 | 下一个 fold 的 R6（加载前核对 sha256） |
 | `fusion/union.py` + `features/build.py` | `artifacts/features/{fold}/part-*.parquet`、`features.json` | `query_id, article_idx`（int32）和 §8 的 71 个特征（float32；8 个类别特征为 int16 编码），**没有 label 列**；按 `(query_id, article_idx)` 排序，同一个 query 不跨文件；`features.json` 记录各 part 的 sha256、行数和列清单 | `ranker/`（先用 `feature_files.verify_feature_files` 核对，再读取；label 在 `ranker/sampling.py` 中拼接） |
 | `features/categories.py` | `artifacts/features/category_codes.json` | 每个类别字段的取值列表（位置 + 1 = 编码，0 = 缺失），所有 fold 共用 | `ranker/`（解释类别编码时） |
-| `ranker/predict.py` | `artifacts/predictions/{run_id}/{fold}.parquet` | `query_id, article_idx, score, rank` | `eval/` |
+| `ranker/sampling.py` | `artifacts/ranker/samples/{experiment}/{fold}/r{r}.parquet`（+ `.json`） | `query_id, article_idx, label`（int8）和该实验的特征列（71 个，或 −R6 的 67 个）；只含至少有 1 个正样本的 query；按 `(query_id, article_idx)` 排序 | `ranker/dataset.py`（先核对 sha256） |
+| `ranker/dataset.py` | `artifacts/lgb_datasets/{experiment}/{目标周}_r{r}/train.bin`、`dataset.json` | 4 个训练周的分箱数据、label、group；`dataset.json` 记录 4 个采样文件的 sha256 和分箱参数 | `hpo/v_trial.py`（先核对，再训练） |
+| `hpo/v_trial.py`（用 `ranker/predict.py`） | `artifacts/predictions/{area}/{experiment}/{config_id}/{fold}.parquet`、`{fold}_per_query.parquet` | Top-12：`num_trees, query_id, rank, article_idx, score`；每个 query 的指标：`query_id, fold, map@12, recall@12, ndcg@12, num_trees` | `scripts/checks/check_ranker_eval.py`、分析 |
 
 Label 只在 `eval/` 和 `ranker/sampling.py` 中读取，**recall 和特征代码永远不读 label**。
 

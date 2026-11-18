@@ -608,3 +608,43 @@
 
   第 3、4 点的含义：Ranker 在 F1–F4 上训练、在 V 和 T 上使用时，这些特征的取值分布与训练时不同。这里只记录事实，是否处理留到 M7 按 §4 的规则决定。
 - **proposal 已同步**：§1.3（特征宽表一行和 ⑤ 的 12 周实测）、§11（M6 的状态）。
+
+## 2026-11-18 M7（Ranker）：方案和 12 项选择（用户已确认）；选择规则在看到任何结果之前写入配置
+
+- **时间点**：这条记录和 `configs/ranker.yaml`、`configs/hpo/v_phase.yaml` 写于任何 Ranker 结果出现之前。此前在全量数据上只做过一次只读统计（数 F1–F4、V1–V3 的正样本和采样后的行数，label 通过 `eval/` 读取，没有计算任何排序指标），结果见 proposal §9.7 的表。
+- **范围和红线**：M7 只涉及 F1–F4 和 V1–V4。预测目标必须是 V 周，训练周必须是 F 或 V 周；`ranker/window.py` 的检查在每个入口的第一步执行，T fold 在打开任何文件之前报错。label 只在 `ranker/sampling.py`（训练）和 `eval/`（评估，`load_m7_evaluator` 只给 V 周）读取。特征只从 `artifacts/features/` 读取，读之前调用 `verify_feature_files`；不新增、不修改任何特征。
+- **用户确认的 12 项选择**：
+  1. 负采样：每个 query 用 `(seed, query_id)` 独立抽，三个 r 的样本互相嵌套（r = 40 ⊂ 60 ⊂ 80）。
+  2. 每个 (fold, r) 一个带全部特征列的采样文件；M7 只采 F1–F4、V1–V3；一个进程读一遍 fold、同时写出三个 r。
+  3. Dataset 存成 LightGBM binary 复用（按 proposal §1.3），旁边记录来源文件的 sha256，加载前核对。
+  4. col-wise / row-wise：规则在测速之前写进 `configs/ranker.yaml` 并提交（用户补充的要求）。测速时两种方式各训练 50 棵、**不评估**（不读 V 周的 label，看不到任何分数）；每棵树的耗时取前 10 棵之后的平均；row-wise 快 15% 以上且真实峰值不超过 8 GB 才选 row-wise，否则 col-wise。选定的方式在测速之后写进配置并提交，M8 沿用；`mode` 为 `undecided` 时网格拒绝运行。
+  5. 不在网格里的参数保持 LightGBM 4.7.0 的默认值并显式写出：`lambdarank_truncation_level` 30、`bagging_by_query` false 等。
+  6. V 阶段用新的记录类和三张结果表（`hpo/v_records.py`），D 阶段的 `TrialRecord` 和 `results/d_phase.csv` 不动。这**改变了** 2026-11-17 记录里"在 M7 之前修改 `TrialRecord`"的做法：那条记录的目的（V 阶段的 trial 记录带真实峰值，字段名与采样峰值分开；每个 trial 一个进程）都已做到，只是没有改 D 阶段的类，原因是 V 阶段一个 trial 的形状不同（单个 fold、20 个 k）。选择只从 `results/v_phase_metrics.csv` 计算，合并分数 = `Σ(n_f × mean_f) / Σ n_f`。
+  7. k 的规则：每组参数先定自己的 k（与最高合并 MAP@12 相对差距小于 1% 的 k 里取最小的），再按 §4.2 的多候选规则比较；第 2 步每个 r 各自定 k；每一步选出赢家后检查，赢家的 k 是 2000 就停下汇报；没被选中的候选 k 是 2000 时只标注。第 1 步通过后自动进入第 2 步。
+  8. 去掉 R6：删掉只由 R6 召回的行和 4 个 R6 特征，由其余五路的 rank 重算 `n_channels`、`best_rank`、`rrf_score`，重新采样，只训练到选中的 k 棵；结果只汇报，不触发任何选择。
+  9. 测速的结果单独记在 `results/m7_speed_test*.csv`，不进 `v_phase*.csv`；网格里的默认配置照常从头训到 2000 棵。
+  10. 每个 trial 保存每个检查点的 Top-12；`scripts/checks/check_ranker_eval.py` 用朴素循环从 Top-12 和 label 重算一个 trial 的三个指标（这两项是 agent 建议加的，用户已同意）。核对脚本自己不读 label 文件，label 表通过 `eval/ranker_eval.py` 取得。
+  11. 分层：`ranker/` 和 `features/` 可以 import `fusion/`，已写进 AGENTS.md §5 和 proposal §14.1。
+  12. 训练集 NDCG@12 每 100 棵记一次，不是每棵都算。
+- **测速增加的两项**（用户要求）：同时计算 V1 的 RRF baseline，与默认配置在 100、200、300 棵时的 MAP@12、Recall@12、NDCG@12 一起汇报，**300 棵时 MAP@12 低于 RRF baseline 就停下排查、不外推时间**；汇报训练数据的检查（F1–F4 每个 fold 的正样本比例、每个 query 的行数的平均 / P50 / P90、训练集 NDCG@12 在 100、200、300 棵时是否上升）。
+- **备选清单**（现在不做；等基线结果出来之后，按 §4 的规则在 V1–V4 上评估）：
+  1. `lambdarank_truncation_level`：现在是默认值 30。LightGBM 文档建议略高于评估的 k（例如 k + 3 = 15）；proposal 没有规定。
+  2. 把漂移明显的分数类特征换算成 query 内的名次。依据是 M6 记录的特征漂移（上一条记录）：`tt_dot`、`rep_score`、`icf_score`、`sib_score`、`pop_score` 等的均值从 F 到 T 单向变化或逐周波动大，Ranker 在 F、V 周训练、在后面的周使用时，这些特征的取值分布与训练时不同；query 内的名次不受整体水平变化的影响。（agent 的说明：特征已经锁定，这一条如果要评估，需要先决定它与 `features.lock.yaml` 的关系，到时候再定。）
+- **LightGBM 4.7.0 的行为**（合成数据上验证，写进了 `ranker/dataset.py` 和 `ranker/predict.py` 的说明）：`lgb.Sequence` 的单行访问必须返回 float64（否则报错），批量访问可以是 float32；经 `Sequence` 构建两次，binary 文件逐字节相同，但它与"直接传 numpy 数组"的分箱不同；分段累加的分数与 `predict(num_iteration=k)` 不逐位相同（300 棵时最大相差 1.4e-14），所以"k 棵树时的分数"以 `staged_raw_scores` 为准，M7 和 M8 都用它；`feature_pre_filter` 默认是开的，关掉之后同一个 binary 才能换 `min_data_in_leaf` 复用。
+- **耗时的估计**（合成数据 400 万行按行数线性外推，真实数据可能慢到 1.5 倍；以测速为准）：r = 40 单次训练 2000 棵约 18–38 分钟，单个 fold 打分约 6–10 分钟，完整网格加 ablation 约 18–28 小时（row-wise 约 14–21 小时）。
+- **proposal 已同步**：§1.3（训练行数的实测）、§9.4（分段累加；先定 k 再比参数）、§9.5（−R6 的落实）、§9.7（新增：M7 落实后的约定）、§11（M7 的状态）、§14（目录、分层、交接的数据）。
+
+## 2026-11-18 M7 实现中发现的两件事：torch 和 LightGBM 不能在同一个进程；计时用的训练不要求棵数是 100 的倍数
+
+- **torch 和 LightGBM 的 OpenMP 冲突**
+  - **现象**：写完测试后，集成测试在 LightGBM 构建 Dataset 时段错误，完整的 `make test-fast` 卡住不结束（等了 10 分钟后手动停掉）；单独用 python 先后 import torch 和 lightgbm 再训练，进程直接退出，报 `OMP: Error #15: Initializing libomp.dylib, but found libomp.dylib already initialized`。
+  - **原因**（用 `DYLD_PRINT_LIBRARIES` 确认）：torch 加载自带的 `.venv/.../torch/lib/libomp.dylib`，LightGBM 加载 Homebrew 的 `/opt/homebrew/Cellar/libomp/22.1.4/lib/libomp.dylib`，一个进程里有两份 OpenMP 运行库。此前没有暴露，是因为 M0–M6 没有用到 LightGBM。
+  - **处理**：
+    1. M7 的进程不加载 torch。`git_state` 和 `warn_uncommitted_changes` 从 `hpo/runner.py`（它 import `recall/`，进而 import torch）移到新的底层模块 `src/hmrec/git_state.py`；`hpo/runner.py` 仍然转出这两个函数，M2–M6 的脚本和 `tests/unit/test_hpo_runner.py` 不用改；日志里的名字保持 `hmrec.hpo.runner` 不变。`tests/unit/test_m7_code_rules.py` 在一个新进程里 import M7 用到的模块，确认 torch、implicit 和 `hmrec.recall` 都没有被加载。
+    2. 测试分两个进程：`uv run pytest tests/unit` 只跑 torch 一侧，`--lightgbm-side` 只跑 LightGBM 一侧（文件名以 `test_ranker_`、`test_v_`、`test_speed_test`、`test_m7_` 开头）；另一侧的文件不会被 import。`make test-fast` 和 `make test` 两个都跑。一个测试进程里同时出现 torch 和 lightgbm 时，`tests/conftest.py` 让这次运行失败。
+    3. AGENTS.md §5、§7、§8 写明这两条规则（§5 的 `fusion/` 一条是用户要求的；`git_state.py` 和"不能 import torch"、§7 的"测试分两个进程"是这次为了解决这个问题加的）。
+  - **环境上的一个事实**：LightGBM 的 OpenMP 运行库来自 Homebrew（libomp 22.1.4），不在 `uv.lock` 里，所以它的版本不随仓库锁定。
+  - **libomp 是 `uv.lock` 之外的系统依赖，升级它之后需要重新做一次"两次训练得到相同模型"的核对**（同一个 binary Dataset、同一组参数训练两次，模型文本必须相同；以及训到 k 棵的模型与训到更多棵的模型的前 k 棵相同），核对通过之后才能继续产生新的结果。README 的安装步骤写明了 `brew install libomp` 和当前的版本 22.1.4。
+  - **每个 M7 进程都记录实际用到的库**（`src/hmrec/ranker/runtime.py`）：`results/v_phase.csv`、`results/m7_speed_test.csv`（每个 trial 一行）和 `results/m7_runs.csv`（采样、构建 Dataset、RRF baseline 各一行）都有三列 `lightgbm_version`、`libomp_path`、`libomp_version`。路径取自操作系统给出的"本进程已加载的库"（macOS 的 dyld 列表），不是按安装位置猜的；版本从 Homebrew 的路径 `.../Cellar/libomp/<版本>/...` 里读出，其他位置记为 `unknown`。两个驱动脚本（`m7_speed_test.py`、`m7_ranker_hpo.py`）自己不写结果行，只把这三项写进运行日志。进程里如果加载了两份 OpenMP 运行库，`read_lightgbm_runtime` 直接报错，每个 M7 脚本在启动时调用它。
+- **计时用的训练不要求棵数是检查点的倍数**：最初的检查要求每个 trial 的棵数都是 `checkpoint_every`（100）的倍数，而测速里比较两种直方图方式的训练是 50 棵，会被这条检查拒绝。小数据的集成测试发现了这个问题（在全量数据上运行之前）。现在只有要评估的 trial 才要求棵数落在检查点上。
+- **还没有做的**：`configs/ranker.yaml` 的 `histogram.mode` 仍是 `undecided`；还没有在全量数据上运行任何 M7 的步骤；`configs/locks/ranker.lock.yaml` 在 V4 结束后才写。
