@@ -6,6 +6,8 @@ from typing import Any
 import pytest
 
 from hmrec.config import (
+    HISTOGRAM_MODES,
+    HISTOGRAM_ROW_WISE,
     HISTOGRAM_UNDECIDED,
     N_PROPOSAL_FEATURES,
     PROPOSAL_CATEGORICAL_FEATURES,
@@ -576,7 +578,9 @@ def test_repo_ranker_yaml_matches_the_proposal() -> None:
     config = load_ranker_config(REPO_CONFIGS / "ranker.yaml")
     # proposal §9.2-9.4
     assert (config.window_weeks, config.top_k) == (4, 12)
-    assert (config.num_trees, config.checkpoint_every) == (2000, 100)
+    # 1000 trees since 2026-11-18 (2000 before; docs/decisions.md): 100, 200, ..., 1000.
+    assert (config.num_trees, config.checkpoint_every) == (1000, 100)
+    assert config.scoring_query_chunk_size == 2500
     assert config.sampling.ratios == (40, 60, 80) and config.sampling.seed == 42
     assert config.tuned_defaults == RankerTunedParams(31, 500, 40)
     # proposal §9.3 fixed parameters
@@ -598,10 +602,12 @@ def test_repo_ranker_yaml_matches_the_proposal() -> None:
     assert set(config.dataset_params) == RANKER_DATASET_PARAM_KEYS
 
 
-def test_histogram_mode_is_undecided_until_the_speed_test() -> None:
-    # The rule is committed before the speed test; the mode is filled in after it.
+def test_histogram_mode_is_the_result_of_the_speed_test() -> None:
+    # The rule was committed before the speed test (mode "undecided"); the speed test of
+    # 2026-11-18 chose row_wise (results/m7_speed_test.csv) and the mode was filled in.
     histogram = load_ranker_config(REPO_CONFIGS / "ranker.yaml").histogram
-    assert histogram.mode == HISTOGRAM_UNDECIDED
+    assert histogram.mode == HISTOGRAM_ROW_WISE
+    assert HISTOGRAM_UNDECIDED in HISTOGRAM_MODES  # still a valid value: "not decided yet"
     assert (histogram.comparison_trees, histogram.warmup_trees) == (50, 10)
     assert histogram.min_row_wise_speedup == 0.15
 
@@ -611,6 +617,7 @@ def test_histogram_mode_is_undecided_until_the_speed_test() -> None:
     [
         (None, "num_trees", 2050, "multiple of checkpoint_every"),
         (None, "top_k", 0, "must be > 0"),
+        (None, "scoring_query_chunk_size", 0, "must be > 0"),
         ("sampling", "ratios", [60, 40], "ascending"),
         ("sampling", "ratios", [60, 80], "must be one of sampling.ratios"),
         ("sampling", "row_group_rows", 0, "must be > 0"),

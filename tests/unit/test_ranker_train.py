@@ -68,9 +68,11 @@ def test_training_params_of_the_real_config() -> None:
 
 
 def test_undecided_histogram_mode_cannot_train() -> None:
-    assert REAL.histogram.mode == "undecided"  # until the speed test has decided it
     with pytest.raises(ValueError, match="decided by the speed test"):
-        training_params(REAL, REAL.tuned_defaults, REAL.histogram.mode, 6)
+        training_params(REAL, REAL.tuned_defaults, "undecided", 6)
+    # The real config holds the speed test's decision (2026-11-18).
+    assert REAL.histogram.mode == "row_wise"
+    assert training_params(REAL, REAL.tuned_defaults, REAL.histogram.mode, 6)["force_row_wise"]
 
 
 def test_dataset_params_define_the_bins() -> None:

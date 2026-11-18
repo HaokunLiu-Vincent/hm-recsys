@@ -16,9 +16,22 @@ window_weeks: 4
 top_k: 12
 
 # Every model of the grid is trained to num_trees trees and evaluated after every
-# checkpoint_every trees (100, 200, ..., 2000). No early stopping (proposal §9.4).
-num_trees: 2000
+# checkpoint_every trees (100, 200, ..., 1000). No early stopping (proposal §9.4).
+#
+# num_trees was 2000 until 2026-11-18. It was lowered to 1000 AFTER the V1 speed test was
+# seen, as a decision about the compute budget (docs/decisions.md): MAP@12 on V1 grew by
+# +2.5% from 100 to 200 trees and by +1.4% from 200 to 300, each step about 0.6 of the
+# one before; at that rate the step from 900 to 1000 trees is about 0.03%, far below the
+# 1% "about equal" tolerance. The rule "stop if the winner's k* is the last checkpoint"
+# (configs/hpo/v_phase.yaml) stays and catches the case where this guess is wrong.
+num_trees: 1000
 checkpoint_every: 100
+
+# Queries scored at a time when a fold is evaluated. A part file of the wide table holds
+# 10,000 queries (about 3 million rows); scoring it in one piece needed 5.69 GB in the
+# speed test. 2,500 queries x ~305 candidates x 71 features x 4 B = 0.22 GB per float32
+# matrix. It changes memory only: a row's score does not depend on the rows scored with it.
+scoring_query_chunk_size: 2500
 
 # The training-set NDCG@12 is computed and logged every this many trees (training log
 # only, proposal §9.3). Not every tree: that would slow training down.
@@ -49,7 +62,11 @@ histogram:
   # trees (the same sums in another order), so the mode is decided ONCE, by the speed
   # test, before any grid trial, and M8 uses the same mode. `undecided` = not decided
   # yet: grid trials refuse to run.
-  mode: undecided
+  #
+  # DECIDED by the speed test of 2026-11-18 (HEAD 25cacf2, results/m7_speed_test.csv), with
+  # the rule below: col_wise 0.682 s/tree, row_wise 0.368 s/tree = 46% faster (>= 15%), and
+  # the row_wise process peaked at 1.99 GB (<= 8 GB).
+  mode: row_wise
   # THE RULE, written before the speed test (docs/decisions.md 2026-11-18). The speed test
   # trains comparison_trees trees with each mode on the same Dataset, in two processes,
   # WITHOUT any evaluation (no label of a V fold is read, no score is seen). seconds per

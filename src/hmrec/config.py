@@ -1880,9 +1880,10 @@ class RankerConfig:
     Attributes:
         window_weeks: Training weeks right before the predicted week (4).
         top_k: Rows kept per query when ranking (12).
-        num_trees: Trees of a grid model (2000).
+        num_trees: Trees of a grid model (1000; 2000 until 2026-11-18).
         checkpoint_every: Evaluate after every this many trees (100).
         train_metric_every: Log the training-set metric every this many trees.
+        scoring_query_chunk_size: Queries scored at a time (memory only).
         seed: LightGBM seed.
         sampling: Negative sampling settings.
         tuned_defaults: Default values of the tuned parameters.
@@ -1897,6 +1898,7 @@ class RankerConfig:
     num_trees: int
     checkpoint_every: int
     train_metric_every: int
+    scoring_query_chunk_size: int
     seed: int
     sampling: RankerSamplingConfig
     tuned_defaults: RankerTunedParams
@@ -1984,6 +1986,7 @@ def parse_ranker_config(raw: Mapping[str, Any]) -> RankerConfig:
         "num_trees",
         "checkpoint_every",
         "train_metric_every",
+        "scoring_query_chunk_size",
         "seed",
         "sampling",
         "tuned_defaults",
@@ -2001,6 +2004,7 @@ def parse_ranker_config(raw: Mapping[str, Any]) -> RankerConfig:
         num_trees=get_int(raw, "num_trees", where),
         checkpoint_every=get_int(raw, "checkpoint_every", where),
         train_metric_every=get_int(raw, "train_metric_every", where),
+        scoring_query_chunk_size=get_int(raw, "scoring_query_chunk_size", where),
         seed=get_int(raw, "seed", where),
         sampling=_parse_ranker_sampling(get_mapping(raw, "sampling", where), f"{where}.sampling"),
         tuned_defaults=parse_ranker_tuned_params(
@@ -2028,7 +2032,15 @@ def parse_ranker_config(raw: Mapping[str, Any]) -> RankerConfig:
 
 def _validate_ranker_config(config: RankerConfig, where: str) -> None:
     """Range checks that involve more than one field."""
-    for name in ("window_weeks", "top_k", "num_trees", "checkpoint_every", "train_metric_every"):
+    positive = (
+        "window_weeks",
+        "top_k",
+        "num_trees",
+        "checkpoint_every",
+        "train_metric_every",
+        "scoring_query_chunk_size",
+    )
+    for name in positive:
         require_positive(getattr(config, name), f"{where}.{name}")
     if config.seed < 0:
         raise ValueError(f"{where}.seed must be >= 0, got {config.seed}")

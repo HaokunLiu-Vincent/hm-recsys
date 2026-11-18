@@ -13,7 +13,9 @@
 #
 # THE RULE of a step (docs/decisions.md 2026-11-18):
 #   1. Number of trees first, per configuration. P(k) = MAP@12 of the 4 folds pooled
-#      (all queries together, §4.1) with the first k trees, k = 100, 200, ..., 2000.
+#      (all queries together, §4.1) with the first k trees, k = 100, 200, ..., num_trees
+#      (num_trees of configs/ranker.yaml: 2000 when this file was written, 1000 since
+#      2026-11-18, see the comment there; this rule itself did not change).
 #        k* = the SMALLEST k with (max P - P(k)) / max P < 1%
 #      (1% = acceptance.min_relative_improvement of configs/selection_rule.yaml).
 #   2. Then the configurations are compared with the §4.2 multi-candidate rule
@@ -22,9 +24,10 @@
 #      and it is strictly better on >= 3 of the 4 folds; among the passing candidates,
 #      those within 1% of the best passing score are "about equal" and the one listed
 #      FIRST below wins. No candidate passes -> the default stays.
-#   3. If the winner's k* is the last checkpoint (2000), its curve may still be rising:
+#   3. If the winner's k* is the last checkpoint (num_trees), its curve may still be rising:
 #      the run STOPS after this step and a human decides whether to train more trees.
-#      A losing configuration whose k* is 2000 is only flagged in the step report.
+#      A losing configuration whose k* is the last checkpoint is only flagged in the
+#      step report.
 
 phase: V
 target_folds: [V1, V2, V3, V4]
