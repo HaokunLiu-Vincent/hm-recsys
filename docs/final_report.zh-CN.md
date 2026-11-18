@@ -1,7 +1,7 @@
 # H&M 个性化时尚推荐系统 — 最终报告
 
 > **语言**：英文版（`docs/final_report.md`）是原稿，这份中文版是它的译本。两份的数字完全相同；有出入时以英文版为准。
-> 日期：2026-11-19。分支 `m8-final`。
+> 日期：2026-11-19。Tag `v0.1`。
 > 设计依据是 `docs/proposal.md`，过程中的每个决定记在 `docs/decisions.md`。这份报告面向没有参与项目的读者，可以独立阅读；需要细节时按文中给出的章节和文件去查。
 > **数字的来源**：结果数字都来自 `results/` 下的文件或 `docs/decisions.md`，在表下或句末注明。由结果表算出的数（相对变化、按 query 数加权的合并值）注明算法。配置数值（名额、窗口、τ 等）来自 `configs/locks/` 下的四个锁定文件和 `configs/fold_manifest.yaml`。
 > **这份报告不做的事**：不给出任何 Kaggle 名次（原因见 §7.3）；不把相关关系写成因果（§5）。
@@ -100,7 +100,7 @@ flowchart TD
 
 **R6 — Two-Tower**（名额 100）。两个神经网络塔分别把顾客和商品映射成 128 维的单位向量，点积就是分数。
 
-- 商品塔：图像向量（CLIP，512 维）、文本向量（MiniLM，384 维）、商品 ID、款式和 6 个类目字段，各自投影后拼接成 442 维，再经过 `Linear → ReLU → Linear` 和 L2 归一化（`docs/decisions.md` 2026-11-17"Two-Tower 模型结构"）。
+- 商品塔：图像向量（CLIP，512 维）、文本向量（MiniLM，384 维）、商品 ID、款式和 6 个类目字段，各自投影后拼接成 442 维，再经过 `Linear → ReLU → Linear` 和 L2 归一化（`docs/decisions.md` 2026-11-17 "Two-Tower model structure"）。
 - 顾客塔：顾客在 anchor 之前最近 20 件购买，经过同一个商品塔，按位置加权平均，再拼上年龄桶等三个属性。
 - 训练：batch 内 softmax，带 LogQ 修正（压低热门商品作为负样本的偏差），温度 0.05。
 - **训练链**是 R6 与其他五路最大的不同：先用 2019-12-03 至 2020-06-02 的购买训练一个 base 模型（取第 4 个 epoch），之后每周"先预测这一周，再用这一周的购买 fine-tune 2 个 epoch"，fine-tune 的数据里一半是新的一周、一半是从前 4 周抽的旧样本（replay 50%）。整个项目只有这一条链，从 D1 一直走到 T4。每周的分数都是模型还没见过这一周时得到的。
@@ -234,7 +234,7 @@ T1–T4 的最终评估（M8）只运行一次。顺序是：写代码和测试�
 | R5 WALS | Recall@100 | 12.295 | 11.760 | 9.576 | 10.444 | **10.807** | +8.05% |
 | R6 Two-Tower | Recall@100 | 14.478 | 15.912 | 13.970 | 14.575 | **14.634** | +23.57%（相对不更新的 base） |
 
-来源：`results/d_phase.csv`（R3 为 `results/m4_trials.csv`）；"相对默认配置"取自 `docs/decisions.md` 2026-11-17"D 阶段 R1–R5 最终选择"，R6 取自 `results/d_phase_steps/r6_twotower.csv`。D 阶段共 54 个 trial（R1–R6 分别 8、5、7、9、11、14 个）。
+来源：`results/d_phase.csv`（R3 为 `results/m4_trials.csv`）；"相对默认配置"取自 `docs/decisions.md` 2026-11-17 "Final D-phase selection for R1–R5"，R6 取自 `results/d_phase_steps/r6_twotower.csv`。D 阶段共 54 个 trial（R1–R6 分别 8、5、7、9、11、14 个）。
 
 - R3：D 阶段规则选中的配置是 3.257%（相对默认 +2.34%）；之后按预先登记的规则改为只输出活跃池内的商品，分数变为 3.240%（§7.1）。
 - R6：不更新的 base（第 4 个 epoch）合并 11.843%；每周 fine-tune 之后 14.634%。规则选中的是不加 replay 的配置（14.576%），最终采用的是加 50% replay 的配置，这是人工决定（§7.1）。
@@ -579,7 +579,7 @@ T1 这一周，三路基于顾客历史的通道同时被标出，而 R1 比前 
 
 **数据**
 
-8. **`customers.csv` 是一份快照，顾客属性无法按 anchor 回溯。** 年龄、会员状态（`club_member_status`）、订阅频率（`fashion_news_frequency`）、`FN`、`Active` 在数据里各只有一个值，没有时间戳，大概是数据导出时的状态；`articles.csv`（款式、类目、颜色、描述）同样是没有时间戳的快照。系统在每个 anchor 都直接使用这些值：R1 的年龄桶、R6 顾客塔的三个属性、D 组的 5 个属性特征，以及由年龄得到的 `ui_age_gap` 和 `item_buyer_age_mean_4w`。如果这些属性在 anchor 之后变过（例如顾客在 9 月才成为会员），就把之后的信息带进了之前的预测。年龄的影响很小（最多差一两岁）；会员状态和订阅字段可能含有未来的信息。交易表有日期，不受影响。从 feature importance 看，受影响最直接的几个特征贡献很小（`club_member_status` 0.0045%、`fashion_news_frequency` 0.0017%、`active` 0.0013%、`fn` 0.0008%），但 R1 的分桶和 R6 的顾客属性的影响没有单独测过。**这一条此前没有写进 `docs/proposal.md` 或 `docs/decisions.md`。**
+8. **`customers.csv` 是一份快照，顾客属性无法按 anchor 回溯。** 年龄、会员状态（`club_member_status`）、订阅频率（`fashion_news_frequency`）、`FN`、`Active` 在数据里各只有一个值，没有时间戳，大概是数据导出时的状态；`articles.csv`（款式、类目、颜色、描述）同样是没有时间戳的快照。系统在每个 anchor 都直接使用这些值：R1 的年龄桶、R6 顾客塔的三个属性、D 组的 5 个属性特征，以及由年龄得到的 `ui_age_gap` 和 `item_buyer_age_mean_4w`。如果这些属性在 anchor 之后变过（例如顾客在 9 月才成为会员），就把之后的信息带进了之前的预测。年龄的影响很小（最多差一两岁）；会员状态和订阅字段可能含有未来的信息。交易表有日期，不受影响。从 feature importance 看，受影响最直接的几个特征贡献很小（`club_member_status` 0.0045%、`fashion_news_frequency` 0.0017%、`active` 0.0013%、`fn` 0.0008%），但 R1 的分桶和 R6 的顾客属性的影响没有单独测过。这一条最早写在这份报告里，随后记入了 `docs/decisions.md`（2026-11-19）。
 9. **活跃池不是真实库存。** 它只是"最近 28 天至少卖出 3 次"的近似。已经下架的商品可能被推荐，刚上架的商品要等卖出 3 次才能进入五路的候选。
 10. **图像向量不全。** 105,542 个商品里有 442 个没有图像向量（`docs/decisions.md` 2026-11-15），R6 对它们只用文本、ID 和类目。
 

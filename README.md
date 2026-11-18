@@ -26,8 +26,8 @@ only what it is meant to select:
 | Phase | Weeks | What happens |
 |---|---|---|
 | D | D1–D4 | the configuration of the six recall channels is selected, then locked |
-| F | F1–F4 | candidates are generated with the locked configuration; training data of the Ranker only, nothing is selected |
-| V | V1–V4 | the configuration of the Ranker is selected, then locked |
+| F | F1–F4 | candidates are generated with the locked configuration; training data of the ranker only, nothing is selected |
+| V | V1–V4 | the configuration of the ranker is selected, then locked |
 | T | T1–T4 | final evaluation with everything locked, **run once** |
 
 Every week is predicted from data before its first day (the anchor) only. The labels of the T
@@ -69,13 +69,16 @@ read; the verdict was written by code to `results/t_phase_goals.csv`):
 ## Documents
 
 The only design reference is [`docs/proposal.md`](docs/proposal.md). Design changes are logged in
-[`docs/decisions.md`](docs/decisions.md); both are still written in Chinese. Results and their
-limitations are in the final report: [`docs/final_report.md`](docs/final_report.md) (English,
-authoritative) and [`docs/final_report.zh-CN.md`](docs/final_report.zh-CN.md) (Chinese
-translation). Rules for coding agents are in [`AGENTS.md`](AGENTS.md).
+[`docs/decisions.md`](docs/decisions.md). Results and their limitations are in the final report:
+[`docs/final_report.md`](docs/final_report.md) (English, authoritative) and
+[`docs/final_report.zh-CN.md`](docs/final_report.zh-CN.md) (Chinese translation). Rules for coding
+agents are in [`AGENTS.md`](AGENTS.md).
 
 English is the primary language of this project: new documents are written in English first, and
 a Chinese version, when there is one, is a translation saved as `*.zh-CN.md` (AGENTS.md §11).
+The proposal, the decision log and `AGENTS.md` were written in Chinese up to tag `v0.1`; those
+originals are kept as frozen archives (`docs/proposal.zh-CN.md`, `docs/decisions.zh-CN.md`,
+`AGENTS.zh-CN.md`) and are no longer maintained. The English files are authoritative.
 
 ## Install
 
@@ -94,7 +97,7 @@ Target machine: macOS on Apple Silicon (PyTorch MPS; no CUDA).
    make setup
    ```
 
-3. Install the OpenMP runtime that LightGBM needs (the Ranker, M7 and later):
+3. Install the OpenMP runtime that LightGBM needs (the ranker, M7 and later):
 
    ```bash
    brew install libomp
@@ -103,7 +106,7 @@ Target machine: macOS on Apple Silicon (PyTorch MPS; no CUDA).
    The LightGBM wheel does not contain an OpenMP runtime; on macOS it loads Homebrew's
    `libomp.dylib` (`/opt/homebrew/opt/libomp/lib`). **This is a system dependency outside
    `uv.lock`**: `make setup` neither installs nor pins it, and `brew upgrade` can change it
-   without any change in this repository. Version in use when the Ranker was built:
+   without any change in this repository. Version in use when the ranker was built:
    **libomp 22.1.4** (`brew list --versions libomp`). Every M7 result row records the
    LightGBM version and the path and version of the libomp that the process really loaded
    (columns `lightgbm_version`, `libomp_path`, `libomp_version`). After upgrading libomp,
@@ -111,7 +114,7 @@ Target machine: macOS on Apple Silicon (PyTorch MPS; no CUDA).
    (`docs/decisions.md`, 2026-11-18).
 
    torch brings its own copy of libomp, and two OpenMP runtimes in one process abort, hang
-   or crash. So Ranker code never imports torch, and the tests run in two processes.
+   or crash. So ranker code never imports torch, and the tests run in two processes.
 
 Other commands (all run through `uv run`):
 
@@ -152,20 +155,18 @@ All code gets paths from `src/hmrec/paths.py`.
 
 ## Milestones and scripts
 
-Placeholders for now; filled in as each milestone is implemented. See proposal §11.
+The main entry point of each milestone. See proposal §11 for the milestones and §14 for every script.
 
 | Milestone | What | Script |
 |---|---|---|
-| M0 | Preprocess CSV → Parquet, int32 IDs | `scripts/m0_preprocess.py` (TODO) |
-| M0 | Validate fold manifest | `scripts/m0_check_folds.py` (TODO) |
-| M0 | Two-Tower 200-step MPS/CPU benchmark | `scripts/m0_benchmark_twotower.py` (TODO) |
+| M0 | Preprocess CSV → Parquet, int32 IDs | `scripts/m0_preprocess.py` |
+| M0 | Two-Tower 200-step MPS/CPU benchmark | `scripts/m0_benchmark_twotower.py --device mps` |
 | M1 | Metrics + R1–R5 | unit tests only |
-| M2 | R1–R5 ablation + HPO on D1–D4 | `scripts/m2_recall_hpo.py --channel r1` (TODO) |
-| M3 | Two-Tower base model | `scripts/m3_twotower_base.py` (TODO) |
-| M3 | Two-Tower D1–D4 chain | `scripts/m3_twotower_chain.py` (TODO) |
-| M4 | Union recall check | `scripts/m4_union_check.py` (TODO) |
+| M2 | R1–R5 ablation + HPO on D1–D4 | `scripts/m2_recall_hpo.py --channels r1_popularity` |
+| M3 | Two-Tower base model | `scripts/m3_twotower_base.py` |
+| M4 | Union recall check | `scripts/m4_union_check.py` |
 | M5 | Freeze recall configs | `configs/locks/`; check with `scripts/m5_verify_locks.py --channel ...`; git tag `lock-channels-v1` |
-| M6 | Candidates per fold | `scripts/m6_generate_candidates.py --fold F1` (TODO) |
-| M6 | Features per fold | `scripts/m6_build_features.py --fold F1` (TODO) |
-| M7 | Ranker HPO on V1–V4 | `scripts/m7_ranker_hpo.py` (TODO) |
-| M8 | Final evaluation on T1–T4 | `scripts/m8_final_eval.py` (TODO) |
+| M6 | Candidates per fold | `scripts/m6_generate_candidates.py --fold F1` |
+| M6 | Features per fold | `scripts/m6_build_features.py --fold F1` |
+| M7 | Ranker HPO on V1–V4 | `scripts/m7_ranker_hpo.py --stage ...` |
+| M8 | Final evaluation on T1–T4 | `scripts/m8_final_eval.py --stage ...` |
