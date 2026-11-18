@@ -118,7 +118,10 @@ def _context(tmp_path: Path, launcher_setup: dict[str, float]) -> tuple[GridCont
     launcher = FakeLauncher(inputs, lambda tuned, fold, k: 0.02 + k / 10000, baseline=0.015)
     launcher.seconds_per_tree.update(launcher_setup)
     grid = parse_v_phase_grid(TINY_GRID_RAW)
-    return GridContext(inputs, grid, RULE, Path("scripts"), launcher, "abc"), launcher
+    context = GridContext(
+        inputs, grid, RULE, Path("scripts"), launcher, "abc", check_speed_test_model=False
+    )
+    return context, launcher
 
 
 def test_speed_test_runs_every_part_once_and_picks_row_wise(tmp_path: Path) -> None:

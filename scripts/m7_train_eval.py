@@ -3,7 +3,7 @@
 Usage (normally started by scripts/m7_ranker_hpo.py or scripts/m7_speed_test.py):
     caffeinate -i uv run python scripts/m7_train_eval.py --area v_phase --experiment full \
         --step leaves_x_min_data --target V1 --num-leaves 31 --min-data-in-leaf 500 \
-        --ratio 40 --num-trees 2000 --histogram-mode col_wise
+        --ratio 40 --num-trees 1000 --histogram-mode row_wise
 
 Loads the binary Dataset of the 4 weeks before the target fold, trains from
 scratch to --num-trees trees, then scores ALL candidates of the target fold and

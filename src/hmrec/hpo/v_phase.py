@@ -21,10 +21,12 @@ starts checks its folds again (hmrec.ranker.window).
 
 import json
 from collections.abc import Callable, Mapping, Sequence
-from dataclasses import asdict, dataclass
+from dataclasses import asdict, dataclass, replace
 from datetime import datetime
 from pathlib import Path
 from typing import Any
+
+import lightgbm as lgb
 
 from hmrec.config import (
     HISTOGRAM_UNDECIDED,
@@ -56,9 +58,11 @@ from hmrec.hpo.selection import (
     count_folds_better,
 )
 from hmrec.hpo.v_records import (
+    AREA_SPEED_TEST,
     AREA_V_PHASE,
     NO_TREES,
     RRF_BASELINE,
+    SPEED_TEST_STEP,
     MetricRow,
     complete_tree_counts,
     config_rows,
@@ -72,7 +76,7 @@ from hmrec.hpo.v_records import (
     scores_at,
 )
 from hmrec.hpo.v_trial import TrialInputs, TrialSpec, model_config, ranker_config_id
-from hmrec.locks import load_features_lock
+from hmrec.locks import file_sha256, load_features_lock
 from hmrec.logging_utils import get_logger, setup_logging
 from hmrec.paths import ProjectPaths, get_paths
 from hmrec.ranker.ablation import FULL, MINUS_R6, build_experiment, wide_table_columns
@@ -80,7 +84,7 @@ from hmrec.ranker.dataset import dataset_is_built
 from hmrec.ranker.predict import checkpoints
 from hmrec.ranker.runtime import read_lightgbm_runtime
 from hmrec.ranker.sampling import SampleJob, record_file
-from hmrec.ranker.train import gain_importance, load_model
+from hmrec.ranker.train import first_trees_sha256, gain_importance, load_model
 from hmrec.ranker.window import (
     M7_TRAINING_PHASES,
     m7_sampling_folds,
@@ -273,7 +277,7 @@ def config_scores(
         tuned: The configuration.
         config_id: Its id.
         grid: The V-phase grid (folds, metric).
-        tree_counts: The checkpoints every fold must have (100, ..., 2000).
+        tree_counts: The checkpoints every fold must have (100, ..., num_trees).
         tolerance: Relative tolerance of the number-of-trees rule (0.01).
 
     Raises:
@@ -430,6 +434,10 @@ class GridContext:
         scripts_dir: The folder of the m7_*.py scripts.
         launch: Runs a script in a new process and waits (hmrec.pipeline.run_script).
         git_commit: HEAD of the driver.
+        check_speed_test_model: True = when the grid has trained the default
+            configuration on the speed test's fold, its first trees must equal the
+            speed test's model (check_default_against_speed_test). Only tests that
+            train no real model switch it off.
     """
 
     inputs: TrialInputs
@@ -438,6 +446,7 @@ class GridContext:
     scripts_dir: Path
     launch: Launcher
     git_commit: str
+    check_speed_test_model: bool = True
 
 
 def refuse_to_launch(script: Path, arguments: Sequence[str]) -> float:
@@ -625,6 +634,65 @@ def _read_metrics(context: GridContext) -> list[MetricRow]:
     return read_metric_rows(metrics_file, context.grid.metrics)
 
 
+def _recorded_model(
+    context: GridContext, area: str, config_id: str, fold: str, step: str | None
+) -> tuple[lgb.Booster, Mapping[str, str]]:
+    """(the saved model, its trial row) of a recorded trial; the file must be the recorded one."""
+    paths = context.inputs.paths
+    trial_file, _ = results_files(paths, area)
+    row = find_trial(read_trial_rows(trial_file), FULL, config_id, fold, step)
+    if row is None:
+        raise ValueError(
+            f"no recorded trial of configuration {config_id} on {fold} in {trial_file}"
+        )
+    model_file = paths.ranker_model_file(area, FULL, config_id, fold)
+    if file_sha256(model_file) != row["model_sha256"]:
+        raise ValueError(f"{model_file} is not the model recorded in {trial_file}")
+    return load_model(model_file), row
+
+
+def check_default_against_speed_test(context: GridContext) -> str:
+    """The grid's default model on the speed test's fold must START with the speed test's model.
+
+    The speed test trained the default configuration to speed_test.num_trees trees
+    (300). The grid trains the same configuration on the same fold to num_trees.
+    Training is deterministic, so the first 300 trees must be the same trees. If
+    they are not, training is not reproducible (another LightGBM or libomp, another
+    Dataset, a changed parameter): the run stops before more trials are spent.
+
+    Returns:
+        The sha256 of the text of the common first trees.
+
+    Raises:
+        ValueError: If the speed test has no evaluated trial of the grid's default
+            configuration (it ran with another histogram mode or not at all), a
+            model file is not the recorded one, or the first trees differ.
+    """
+    ranker = context.inputs.ranker
+    fold = ranker.speed_test.target_fold
+    config_id = _config_id(context, ranker.tuned_defaults, FULL)
+    speed_model, speed_row = _recorded_model(
+        context, AREA_SPEED_TEST, config_id, fold, SPEED_TEST_STEP
+    )
+    grid_model, _ = _recorded_model(context, AREA_V_PHASE, config_id, fold, None)
+    n_trees = int(speed_row["num_trees"])
+    speed_sha256 = first_trees_sha256(speed_model, n_trees)
+    grid_sha256 = first_trees_sha256(grid_model, n_trees)
+    if speed_sha256 != grid_sha256:
+        raise ValueError(
+            f"the first {n_trees} trees of the grid's default model on {fold} ({grid_sha256[:12]}) "
+            f"differ from the speed test's model ({speed_sha256[:12]}): training is not "
+            "reproducible. STOPPED; no further trial is run."
+        )
+    LOGGER.info(
+        "first %d trees of the grid's default model on %s equal the speed test's model (%s)",
+        n_trees,
+        fold,
+        speed_sha256[:12],
+    )
+    return speed_sha256
+
+
 def run_step(context: GridContext, step: Step, default: RankerTunedParams) -> StepResult:
     """Run every missing trial of a step, then decide it.
 
@@ -643,6 +711,12 @@ def run_step(context: GridContext, step: Step, default: RankerTunedParams) -> St
                 AREA_V_PHASE, FULL, step.name, fold_name, tuned, ranker.num_trees, mode, True
             )
             ensure_trial(context, spec, match_step=False)
+            is_speed_test_trial = (
+                tuned == ranker.tuned_defaults and fold_name == ranker.speed_test.target_fold
+            )
+            if context.check_speed_test_model and is_speed_test_trial:
+                # Right after this trial, before any other trial is spent.
+                check_default_against_speed_test(context)
     metric_rows = _read_metrics(context)
     tree_counts = checkpoints(ranker.num_trees, ranker.checkpoint_every)
     scored = [
@@ -812,14 +886,7 @@ def final_winner(context: GridContext) -> ConfigScores:
         RuntimeError: If the grid is not finished.
         ValueError: If the grid stopped early (a winner needs all trees).
     """
-    replay = GridContext(
-        context.inputs,
-        context.grid,
-        context.rule,
-        context.scripts_dir,
-        refuse_to_launch,
-        context.git_commit,
-    )
+    replay = replace(context, launch=refuse_to_launch)
     results = run_grid(replay, None)
     if len(results) != len(context.grid.steps) or results[-1].stop:
         raise ValueError("the grid stopped early; there is no final configuration yet")

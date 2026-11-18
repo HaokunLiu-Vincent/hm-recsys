@@ -8,6 +8,7 @@ scores taken from a function the test supplies. No model is trained.
 
 import json
 from collections.abc import Callable, Sequence
+from dataclasses import asdict
 from pathlib import Path
 
 from hmrec.config import RankerTunedParams, load_selection_rule
@@ -20,10 +21,17 @@ from hmrec.hpo.v_records import (
     append_trial,
     results_files,
 )
-from hmrec.hpo.v_trial import TrialInputs, model_config, ranker_config_id
+from hmrec.hpo.v_trial import (
+    TrialInputs,
+    TrialOutcome,
+    TrialSpec,
+    model_config,
+    ranker_config_id,
+    run_trial,
+)
 from hmrec.ranker.dataset import RECORD_FILE
 from hmrec.ranker.predict import checkpoints
-from hmrec.ranker.runtime import LightGBMRuntime
+from hmrec.ranker.runtime import LightGBMRuntime, read_lightgbm_runtime
 from hmrec.ranker.sampling import record_file
 
 N_QUERIES = 100
@@ -185,3 +193,44 @@ class FakeLauncher:
     def _baseline(self, args: dict[str, list[str]]) -> None:
         self._area = args["area"][0]
         self._metric_row(RRF_BASELINE, RRF_BASELINE, args["fold"][0], 0, self.baseline)
+
+
+def run_and_record_trial(inputs: TrialInputs, spec: TrialSpec) -> TrialOutcome:
+    """Run a REAL (tiny) trial in this process and write its rows, like scripts/m7_train_eval.py."""
+    outcome = run_trial(inputs, spec, "it")
+    trial_file, metrics_file = results_files(inputs.paths, spec.area)
+    for metric_row in outcome.metric_rows:
+        append_metric_row(metrics_file, metric_row, inputs.metrics, "it", "t")
+    append_trial(
+        trial_file,
+        RankerTrialRecord(
+            phase="V",
+            experiment=spec.experiment,
+            step=spec.step,
+            config_id=outcome.config_id,
+            fold=spec.target_fold,
+            train_folds=outcome.train_folds,
+            params=asdict(spec.tuned),
+            config=outcome.config,
+            histogram_mode=spec.histogram_mode,
+            num_trees=spec.num_trees,
+            evaluated=spec.evaluate,
+            n_train_rows=outcome.n_train_rows,
+            n_train_queries=outcome.n_train_queries,
+            n_scored_rows=outcome.n_scored_rows,
+            n_queries=outcome.n_queries,
+            load_seconds=outcome.load_seconds,
+            train_seconds=outcome.train_seconds,
+            seconds_per_tree=outcome.seconds_per_tree,
+            score_seconds=outcome.score_seconds,
+            total_seconds=outcome.train_seconds + outcome.score_seconds,
+            sampled_peak_rss_gb=0.5,
+            process_max_rss_gb=0.5,
+            model_sha256=outcome.model_sha256,
+            runtime=read_lightgbm_runtime(),
+            git_commit="it",
+            git_dirty=False,
+            finished_at="t",
+        ),
+    )
+    return outcome

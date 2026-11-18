@@ -9,8 +9,8 @@ from pathlib import Path
 from typing import Any
 
 import pytest
-from ranker_example import REPO, tiny_inputs
-from v_phase_example import N_QUERIES, RULE, TINY_GRID_RAW, FakeLauncher
+from ranker_example import REPO, build_workspace, tiny_inputs
+from v_phase_example import N_QUERIES, RULE, TINY_GRID_RAW, FakeLauncher, run_and_record_trial
 
 from hmrec.config import RankerTunedParams, load_yaml
 from hmrec.csv_records import read_rows
@@ -23,6 +23,7 @@ from hmrec.hpo.v_phase import (
     ConfigScores,
     GridContext,
     VPhaseGrid,
+    check_default_against_speed_test,
     check_grid,
     compare_systems,
     config_scores,
@@ -40,9 +41,25 @@ from hmrec.hpo.v_phase import (
     step_columns,
     trial_arguments,
 )
-from hmrec.hpo.v_records import AREA_V_PHASE, MetricRow, read_metric_rows
-from hmrec.hpo.v_trial import TrialInputs, TrialSpec
+from hmrec.hpo.v_records import (
+    AREA_SPEED_TEST,
+    AREA_V_PHASE,
+    SPEED_TEST_STEP,
+    MetricRow,
+    read_metric_rows,
+)
+from hmrec.hpo.v_trial import (
+    TrialInputs,
+    TrialSpec,
+    build_and_save_dataset,
+    load_planned_dataset,
+    model_config,
+    plan_dataset,
+    ranker_config_id,
+)
+from hmrec.locks import file_sha256
 from hmrec.paths import get_paths
+from hmrec.ranker.train import save_model, train_ranker, training_params
 
 REAL_GRID_FILE = REPO / "configs" / "hpo" / "v_phase.yaml"
 FOLDS = ("V1", "V2", "V3", "V4")
@@ -259,7 +276,10 @@ def rising_curves(tuned: RankerTunedParams, fold: str, k: int) -> float:
 def _context(inputs: TrialInputs, launcher: FakeLauncher) -> GridContext:
     grid: VPhaseGrid = parse_v_phase_grid(TINY_GRID_RAW)
     check_grid(grid, RULE, inputs)
-    return GridContext(inputs, grid, RULE, Path("scripts"), launcher, "abc")
+    # FakeLauncher trains nothing, so there is no model to compare with the speed test.
+    return GridContext(
+        inputs, grid, RULE, Path("scripts"), launcher, "abc", check_speed_test_model=False
+    )
 
 
 def test_grid_runs_every_trial_once_and_selects(tmp_path: Path) -> None:
@@ -368,8 +388,24 @@ def test_baseline_ablation_and_goals(tmp_path: Path) -> None:
     assert goal_lines(below, RULE, 0.03)[1].startswith("G3 NOT met")
 
 
+def test_grid_stops_right_after_the_default_trial_if_the_speed_test_is_missing(
+    tmp_path: Path,
+) -> None:
+    # With the model check on (the real driver), the default configuration on the speed
+    # test's fold (V1) runs first and is compared with the speed test's model at once.
+    # Here no speed test ran: the grid stops after that ONE trial instead of going on.
+    inputs = tiny_inputs(tmp_path)
+    launcher = FakeLauncher(inputs, flat_curves)
+    context = replace(_context(inputs, launcher), check_speed_test_model=True)
+    with pytest.raises(ValueError, match="no recorded trial of configuration"):
+        run_grid(context, None)
+    assert launcher.count(TRIAL_SCRIPT) == 1
+    (trial,) = [args for name, args in launcher.calls if name == TRIAL_SCRIPT]
+    assert trial["target"] == ["V1"] and trial["num-leaves"] == ["4"]
+
+
 def test_trial_arguments_match_the_trial_script() -> None:
-    spec = TrialSpec(AREA_V_PHASE, "full", "s", "V1", TUNED, 2000, "col_wise", True)
+    spec = TrialSpec(AREA_V_PHASE, "full", "s", "V1", TUNED, 1000, "row_wise", True)
     arguments = trial_arguments(spec)
     assert arguments[arguments.index("--num-leaves") + 1] == "31"
     assert arguments[arguments.index("--min-data-in-leaf") + 1] == "500"
@@ -380,3 +416,68 @@ def test_trial_arguments_match_the_trial_script() -> None:
     for argument in arguments:
         if argument.startswith("--"):
             assert f'"{argument}"' in script
+
+
+# ---------------------------------------------------------------- first trees = speed test
+
+
+def _speed_test_and_grid_models(tmp_path: Path) -> tuple[GridContext, TrialSpec]:
+    """Real tiny models: the speed test's (10 trees) and the grid's default (20 trees) on V1."""
+    inputs = build_workspace(tmp_path)
+    build_and_save_dataset(plan_dataset(inputs, "full", "V1", 2, "c"), 64)
+    defaults = inputs.ranker.tuned_defaults
+    speed = TrialSpec(
+        AREA_SPEED_TEST, "full", SPEED_TEST_STEP, "V1", defaults, 10, "col_wise", True
+    )
+    grid = TrialSpec(
+        AREA_V_PHASE, "full", "leaves_x_min_data", "V1", defaults, 20, "col_wise", True
+    )
+    run_and_record_trial(inputs, speed)
+    run_and_record_trial(inputs, grid)
+    context = GridContext(
+        inputs, parse_v_phase_grid(TINY_GRID_RAW), RULE, Path("scripts"), refuse_to_launch, "abc"
+    )
+    return context, speed
+
+
+def test_default_model_starts_with_the_speed_test_model(tmp_path: Path) -> None:
+    context, _ = _speed_test_and_grid_models(tmp_path)
+    assert context.check_speed_test_model is True  # the default of the real driver
+    common = check_default_against_speed_test(context)
+    assert len(common) == 64
+
+
+def test_a_different_speed_test_model_stops_the_grid(tmp_path: Path) -> None:
+    # Everything that defines a model is in its config id, so in practice only another
+    # environment (LightGBM, libomp) can make the trees differ. Simulated here: the speed
+    # test's model file is replaced by a model with other trees, and its recorded sha256
+    # is changed to match, as if the speed test had really produced that model.
+    context, speed = _speed_test_and_grid_models(tmp_path)
+    inputs = context.inputs
+    config_id = ranker_config_id(
+        model_config(inputs.ranker, speed.tuned, "full", speed.histogram_mode)
+    )
+    model_file = inputs.paths.ranker_model_file(AREA_SPEED_TEST, "full", config_id, "V1")
+    old_sha256 = file_sha256(model_file)
+    other_params = training_params(inputs.ranker, replace(speed.tuned, num_leaves=8), "col_wise", 2)
+    dataset, _ = load_planned_dataset(plan_dataset(inputs, "full", "V1", 2, "c"), other_params)
+    other_model, _ = train_ranker(dataset, other_params, 10, 10)
+    model_file.unlink()
+    new_sha256 = save_model(other_model, model_file)
+    trial_file = inputs.paths.m7_speed_test_file
+    trial_file.write_text(trial_file.read_text().replace(old_sha256, new_sha256))
+    with pytest.raises(ValueError, match="first 10 trees .* differ from the speed test"):
+        check_default_against_speed_test(context)
+
+
+def test_a_model_file_that_is_not_the_recorded_one_stops_the_grid(tmp_path: Path) -> None:
+    context, speed = _speed_test_and_grid_models(tmp_path)
+    inputs = context.inputs
+    config_id = ranker_config_id(
+        model_config(inputs.ranker, speed.tuned, "full", speed.histogram_mode)
+    )
+    model_file = inputs.paths.ranker_model_file(AREA_V_PHASE, "full", config_id, "V1")
+    with model_file.open("a") as handle:
+        handle.write("\n")
+    with pytest.raises(ValueError, match="is not the model recorded"):
+        check_default_against_speed_test(context)

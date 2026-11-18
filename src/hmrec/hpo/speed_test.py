@@ -28,6 +28,7 @@ from hmrec.hpo.v_records import (
     AREA_SPEED_TEST,
     NO_TREES,
     RRF_BASELINE,
+    SPEED_TEST_STEP,
     MetricRow,
     config_rows,
     find_trial,
@@ -45,7 +46,7 @@ TIMING_STEPS = {
     HISTOGRAM_COL_WISE: "histogram_col_wise",
     HISTOGRAM_ROW_WISE: "histogram_row_wise",
 }
-EVALUATED_STEP = "speed_test"
+EVALUATED_STEP = SPEED_TEST_STEP
 
 
 @dataclass(frozen=True)

@@ -18,7 +18,7 @@ RRF baseline clearly on every fold.
 import importlib.util
 import sys
 from collections.abc import Sequence
-from dataclasses import asdict, replace
+from dataclasses import replace
 from pathlib import Path
 from types import ModuleType
 
@@ -34,6 +34,7 @@ from hmrec.hpo.v_phase import (
     SAMPLE_SCRIPT,
     TRIAL_SCRIPT,
     GridContext,
+    check_default_against_speed_test,
     compare_systems,
     final_winner,
     parse_v_phase_grid,
@@ -46,9 +47,7 @@ from hmrec.hpo.v_phase import (
 )
 from hmrec.hpo.v_records import (
     AREA_V_PHASE,
-    RankerTrialRecord,
     append_metric_row,
-    append_trial,
     read_metric_rows,
     read_trial_rows,
     results_files,
@@ -59,9 +58,7 @@ from hmrec.hpo.v_trial import (
     build_and_save_dataset,
     plan_dataset,
     rrf_baseline_row,
-    run_trial,
 )
-from hmrec.ranker.runtime import read_lightgbm_runtime
 from hmrec.ranker.sampling import sample_fold
 from hmrec.ranker.train import first_trees_sha256, load_model
 
@@ -129,46 +126,20 @@ class InProcessLauncher:
             histogram_mode=args["histogram-mode"][0],
             evaluate="no-eval" not in args,
         )
-        outcome = run_trial(inputs, spec, "it")
-        trial_file, metrics_file = results_files(inputs.paths, spec.area)
-        for metric_row in outcome.metric_rows:
-            append_metric_row(metrics_file, metric_row, inputs.metrics, "it", "t")
-        append_trial(
-            trial_file,
-            RankerTrialRecord(
-                phase="V",
-                experiment=spec.experiment,
-                step=spec.step,
-                config_id=outcome.config_id,
-                fold=spec.target_fold,
-                train_folds=outcome.train_folds,
-                params=asdict(tuned),
-                config=outcome.config,
-                histogram_mode=spec.histogram_mode,
-                num_trees=spec.num_trees,
-                evaluated=spec.evaluate,
-                n_train_rows=outcome.n_train_rows,
-                n_train_queries=outcome.n_train_queries,
-                n_scored_rows=outcome.n_scored_rows,
-                n_queries=outcome.n_queries,
-                load_seconds=outcome.load_seconds,
-                train_seconds=outcome.train_seconds,
-                seconds_per_tree=outcome.seconds_per_tree,
-                score_seconds=outcome.score_seconds,
-                total_seconds=outcome.train_seconds + outcome.score_seconds,
-                sampled_peak_rss_gb=0.5,
-                process_max_rss_gb=0.5,
-                model_sha256=outcome.model_sha256,
-                runtime=read_lightgbm_runtime(),
-                git_commit="it",
-                git_dirty=False,
-                finished_at="t",
-            ),
-        )
+        v_phase_example.run_and_record_trial(inputs, spec)
 
 
 def _context(tmp_path: Path) -> tuple[GridContext, InProcessLauncher]:
-    inputs: TrialInputs = ranker_example.tiny_inputs(tmp_path)
+    # min_row_wise_speedup 0.99: row_wise would have to be 99% faster, so the speed test
+    # always picks col_wise here, the mode of the test config. (Timing 6 trees on 720
+    # rows is noise; the rule itself is tested in tests/unit/test_ranker_train.py.)
+    histogram = {
+        "mode": "col_wise",
+        "comparison_trees": 6,
+        "warmup_trees": 2,
+        "min_row_wise_speedup": 0.99,
+    }
+    inputs: TrialInputs = ranker_example.tiny_inputs(tmp_path, histogram=histogram)
     ranker_example.write_learnable_folds(inputs.paths)
     for seed, (fold, first_query_id) in enumerate({"V2": 6000, "V3": 7000, "V4": 8000}.items()):
         ranker_example.write_learnable_fold(inputs.paths, fold, first_query_id, 60, 100 + seed)
@@ -190,7 +161,7 @@ def test_m7_from_sampling_to_selection(tmp_path: Path) -> None:
 
     # ---- the speed test: V1 only, into its own result files
     summary = run_speed_test(context)
-    assert summary.timing.chosen_mode in ("col_wise", "row_wise")
+    assert summary.timing.chosen_mode == "col_wise"
     assert [row.num_trees for row in summary.checkpoints] == [10, 20]
     assert summary.below_baseline is False
     assert summary.checkpoints[-1].scores["map@12"] > 0.8 > summary.baseline.scores["map@12"]
@@ -211,17 +182,13 @@ def test_m7_from_sampling_to_selection(tmp_path: Path) -> None:
     assert sum(row["selected"] == "True" for row in step_rows) == 2  # one winner per step
     assert winner.choice.num_trees in (10, 20)
 
-    # ---- training is reproducible: the grid's default V1 model = the speed test's model
+    # ---- training is reproducible: the grid's default V1 model = the speed test's model.
+    # run_grid made this check itself, right after the first trial (it would have raised).
     default_id = results[0].default.config_id
-    if speed_trial["histogram_mode"] == inputs.ranker.histogram.mode:
-        assert speed_trial["config_id"] == default_id
-        grid_model = load_model(
-            inputs.paths.ranker_model_file(AREA_V_PHASE, "full", default_id, "V1")
-        )
-        speed_model = load_model(
-            inputs.paths.ranker_model_file("speed_test", "full", default_id, "V1")
-        )
-        assert first_trees_sha256(grid_model, 20) == first_trees_sha256(speed_model, 20)
+    assert speed_trial["config_id"] == default_id
+    common_trees = check_default_against_speed_test(context)
+    grid_model = load_model(inputs.paths.ranker_model_file(AREA_V_PHASE, "full", default_id, "V1"))
+    assert first_trees_sha256(grid_model, 20) == common_trees
 
     # ---- baseline, the system without R6, goals
     run_baseline(context, AREA_V_PHASE, folds)

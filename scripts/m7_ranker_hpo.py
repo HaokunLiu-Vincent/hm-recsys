@@ -12,7 +12,10 @@ Stages:
     grid        the steps of configs/hpo/v_phase.yaml in order: every missing trial is
                 run in its own process (sampling and the binary Dataset first, if they
                 are missing), then the step is decided and written to
-                results/v_phase_steps.csv. Stops after a step whose winner needs all trees;
+                results/v_phase_steps.csv. Stops after a step whose winner needs all trees.
+                Right after the default configuration's trial on the speed test's fold, its
+                first trees are compared with the speed test's model; a difference stops
+                the run;
     minus_r6    the final configuration without R6 (needs a finished grid);
     importance  gain importance of the final configuration's models (analysis only);
     report      G1 / G3 and the three systems side by side; starts nothing.

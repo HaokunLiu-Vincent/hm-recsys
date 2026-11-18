@@ -55,6 +55,7 @@ AREA_SPEED_TEST = "speed_test"
 AREAS = (AREA_V_PHASE, AREA_SPEED_TEST)
 
 RRF_BASELINE = "rrf_baseline"  # experiment name and config_id of the RRF baseline rows
+SPEED_TEST_STEP = "speed_test"  # step name of the speed test's evaluated trial
 NO_TREES = 0  # num_trees of a row that has no model (the RRF baseline)
 TRAIN_METRIC_COLUMN = "train_ndcg@12"
 NOT_COMPUTED = ""
