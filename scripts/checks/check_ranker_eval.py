@@ -69,7 +69,16 @@ def check_ranking(rows: list[tuple[int, int, float]], query_id: int) -> None:
 
 
 def query_metrics(ranked_articles: list[int], labels: set[int]) -> tuple[float, float, float]:
-    """(AP@12, Recall@12, NDCG@12) of one query, from the definitions in proposal §2.5."""
+    """(AP@12, Recall@12, NDCG@12) of one query, from the definitions in proposal §2.5.
+
+    `labels` is G_q: everything the customer bought in the label week, whether or
+    not it was among the candidates. With K = 12 and hits = labels found in the
+    first K positions:
+        AP@K     = sum over hit positions r of (hits up to r) / r, divided by min(K, |G_q|)
+        Recall@K = hits / |G_q|                  (the denominator is NOT cut at K)
+        NDCG@K   = DCG@K / IDCG@K, DCG@K = sum over hit positions r of 1 / log2(r + 1),
+                   IDCG@K = the DCG of a perfect list = min(K, |G_q|) hits at ranks 1, 2, ...
+    """
     hits = 0
     precision_sum = 0.0
     dcg = 0.0
@@ -78,7 +87,9 @@ def query_metrics(ranked_articles: list[int], labels: set[int]) -> tuple[float, 
             hits += 1
             precision_sum += hits / position
             dcg += 1.0 / math.log2(position + 1)
-    ideal_dcg = sum(1.0 / math.log2(position + 1) for position in range(1, len(labels) + 1))
+    # A perfect Top-K list can hold at most K labels: min(K, |G_q|) hits, not |G_q|.
+    ideal_hits = min(TOP_K, len(labels))
+    ideal_dcg = sum(1.0 / math.log2(position + 1) for position in range(1, ideal_hits + 1))
     average_precision = precision_sum / min(TOP_K, len(labels))
     return average_precision, hits / len(labels), dcg / ideal_dcg
 

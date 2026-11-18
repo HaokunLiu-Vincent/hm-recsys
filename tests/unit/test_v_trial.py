@@ -256,6 +256,22 @@ def test_check_script_query_metrics_by_hand() -> None:
     assert recall == 1.0
     assert ndcg == pytest.approx((1 / math.log2(3) + 0.5) / (1 + 1 / math.log2(3)))
     assert check.query_metrics([], {1}) == (0.0, 0.0, 0.0)
+    # 13 labels (more than K = 12), and the Top-12 holds 12 of them: a perfect list.
+    #   AP@12 = (1/1 + 2/2 + ... + 12/12) / min(12, 13) = 12 / 12 = 1
+    #   Recall@12 = 12 / 13: its denominator is all of G_q, so it cannot reach 1 here
+    #   NDCG@12 = 1: the ideal list also has only min(12, 13) = 12 hits
+    many_labels = set(range(13))
+    average_precision, recall, ndcg = check.query_metrics(list(range(12)), many_labels)
+    assert average_precision == pytest.approx(1.0)
+    assert recall == pytest.approx(12 / 13)
+    assert ndcg == pytest.approx(1.0)
+    # The same labels with the single hit at rank 12: DCG = 1 / log2(13), and the ideal
+    # DCG is the sum of 1 / log2(r + 1) for r = 1 .. 12 (not 1 .. 13).
+    one_hit = [100 + i for i in range(11)] + [0]
+    ideal = sum(1 / math.log2(r + 1) for r in range(1, 13))
+    assert check.query_metrics(one_hit, many_labels)[2] == pytest.approx(
+        (1 / math.log2(13)) / ideal
+    )
 
 
 def test_timing_only_trial_reads_no_label_and_saves_nothing(inputs: TrialInputs) -> None:
