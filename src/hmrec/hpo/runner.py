@@ -18,7 +18,6 @@ The runner never reads labels itself: each fold has an eval.report.FoldEvaluator
 
 import hashlib
 import json
-import subprocess
 import time
 from collections.abc import Callable, Mapping, Sequence
 from dataclasses import asdict, dataclass
@@ -42,6 +41,15 @@ from hmrec.config import (
 )
 from hmrec.data.folds import Fold
 from hmrec.eval.report import IS_HIT, FoldEvaluator, MultiFoldSummary, summarize_folds
+
+# git_state and warn_uncommitted_changes moved to hmrec.git_state (2026-11-18), a module
+# without the recall imports of this one. They stay importable from here, because the
+# M2-M6 scripts import them from this module.
+from hmrec.git_state import (  # noqa: F401  (re-exported, see the comment above)
+    UNCOMMITTED_BANNER,
+    git_state,
+    warn_uncommitted_changes,
+)
 from hmrec.hpo.grid import (
     RawConfig,
     Step,
@@ -198,51 +206,6 @@ def check_tuning_folds(folds: Sequence[Fold]) -> None:
             )
     if len({fold.phase for fold in folds}) != 1:
         raise ValueError(f"folds mix phases: {[fold.name for fold in folds]}")
-
-
-UNCOMMITTED_BANNER = "!" * 78
-
-
-def warn_uncommitted_changes(commit: str) -> None:
-    """Log a hard-to-miss warning: results will not match any commit exactly.
-
-    Does not stop the run (AGENTS.md: the user commits). Rows record
-    git_dirty=True, so they can be found later.
-    """
-    LOGGER.warning(UNCOMMITTED_BANNER)
-    LOGGER.warning("!! UNCOMMITTED CHANGES in the working tree (HEAD = %s).", commit[:12])
-    LOGGER.warning("!! Results are recorded with git_dirty=True: the code that produced them")
-    LOGGER.warning("!! is HEAD plus uncommitted edits. Commit first for reproducible results.")
-    LOGGER.warning(UNCOMMITTED_BANNER)
-
-
-def git_state(repo_root: Path, results_root: Path) -> tuple[str, bool]:
-    """HEAD commit, and whether the code or configs differ from HEAD.
-
-    "Dirty" means any tracked change or untracked file in the working tree,
-    EXCEPT under results_root. results/ holds this runner's own output: after
-    one channel finishes, results/d_phase.csv is new or modified, and that must
-    not mark the next channel's trials as git_dirty (the code is still HEAD).
-    data/ and artifacts/ are in .gitignore, so git never reports them anyway.
-    Everything else (src/, configs/, scripts/, docs/, pyproject.toml, ...) counts.
-
-    Args:
-        repo_root: Root of the git repository.
-        results_root: Folder of committed result tables; must be inside repo_root.
-
-    Returns:
-        (HEAD commit hash, True if there are changes outside results_root).
-    """
-    commit = subprocess.run(
-        ["git", "rev-parse", "HEAD"], cwd=repo_root, capture_output=True, text=True, check=True
-    ).stdout.strip()
-    # A git "exclude" pathspec: list changes in the whole tree ("."), minus results_root.
-    results_relative = results_root.resolve().relative_to(repo_root.resolve()).as_posix()
-    status_command = ["git", "status", "--porcelain", "--", ".", f":(exclude){results_relative}"]
-    status = subprocess.run(
-        status_command, cwd=repo_root, capture_output=True, text=True, check=True
-    ).stdout
-    return commit, bool(status.strip())
 
 
 # ---------------------------------------------------------------- one trial
