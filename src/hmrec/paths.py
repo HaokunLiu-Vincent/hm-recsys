@@ -109,6 +109,16 @@ class ProjectPaths:
         return self.configs_dir / "features.yaml"
 
     @property
+    def ranker_config_file(self) -> Path:
+        """configs/ranker.yaml: the Ranker's fixed parameters and tuned defaults (proposal §9)."""
+        return self.configs_dir / "ranker.yaml"
+
+    @property
+    def v_phase_grid_file(self) -> Path:
+        """configs/hpo/v_phase.yaml: the V-phase steps of the Ranker and their priority order."""
+        return self.configs_dir / "hpo" / "v_phase.yaml"
+
+    @property
     def m6_config_file(self) -> Path:
         """configs/m6_candidates.yaml: monitoring and stop settings of M6 candidate generation."""
         return self.configs_dir / "m6_candidates.yaml"
@@ -333,6 +343,44 @@ class ProjectPaths:
         """artifacts/predictions/{run_id}/{fold}.parquet."""
         return self.artifacts_root / "predictions" / run_id / f"{fold}.parquet"
 
+    # ------------------------------------------------------------ ranker (M7, M8)
+
+    def ranker_sample_file(self, experiment: str, fold: str, ratio: int) -> Path:
+        """artifacts/ranker/samples/{experiment}/{fold}/r{ratio}.parquet: sampled training rows.
+
+        experiment is "full" or "minus_r6"; ratio is the negatives per positive.
+        """
+        return self.artifacts_root / "ranker" / "samples" / experiment / fold / f"r{ratio}.parquet"
+
+    def ranker_sample_record_file(self, experiment: str, fold: str, ratio: int) -> Path:
+        """The record next to a sample file (r{ratio}.json): written LAST, marks it finished."""
+        return self.ranker_sample_file(experiment, fold, ratio).with_suffix(".json")
+
+    def ranker_dataset_dir(self, experiment: str, target_fold: str, ratio: int) -> Path:
+        """artifacts/lgb_datasets/{experiment}/{target_fold}_r{ratio}/: the binary Dataset.
+
+        The Dataset holds the 4 training weeks of the model that predicts target_fold.
+        """
+        return self.lgb_dataset_dir(experiment) / f"{target_fold}_r{ratio}"
+
+    def ranker_model_file(self, area: str, experiment: str, config_id: str, fold: str) -> Path:
+        """artifacts/models/ranker/{area}/{experiment}/{config_id}/{fold}/model.txt.
+
+        area is "v_phase" or "speed_test"; fold is the fold the model predicts.
+        """
+        return self.model_dir("ranker", area) / experiment / config_id / fold / "model.txt"
+
+    def ranker_predictions_file(
+        self, area: str, experiment: str, config_id: str, fold: str
+    ) -> Path:
+        """artifacts/predictions/{area}/{experiment}/{config_id}/{fold}.parquet: Top-K rows."""
+        return self.predictions_file(f"{area}/{experiment}/{config_id}", fold)
+
+    def ranker_per_query_file(self, area: str, experiment: str, config_id: str, fold: str) -> Path:
+        """artifacts/predictions/.../{fold}_per_query.parquet: every query's metric values."""
+        predictions = self.ranker_predictions_file(area, experiment, config_id, fold)
+        return predictions.with_name(f"{fold}_per_query.parquet")
+
     def run_dir(self, run_id: str) -> Path:
         """artifacts/runs/{run_id}/: config snapshot, logs, metrics."""
         return self.artifacts_root / "runs" / run_id
@@ -441,8 +489,38 @@ class ProjectPaths:
 
     @property
     def v_phase_results_file(self) -> Path:
-        """results/v_phase.csv."""
+        """results/v_phase.csv: one row per Ranker trial (a configuration on one fold)."""
         return self.results_root / "v_phase.csv"
+
+    @property
+    def v_phase_metrics_file(self) -> Path:
+        """results/v_phase_metrics.csv: one row per (configuration, fold, number of trees)."""
+        return self.results_root / "v_phase_metrics.csv"
+
+    @property
+    def v_phase_steps_file(self) -> Path:
+        """results/v_phase_steps.csv: every step's configurations, their k and the decision."""
+        return self.results_root / "v_phase_steps.csv"
+
+    @property
+    def v_phase_feature_importance_file(self) -> Path:
+        """results/v_phase_feature_importance.csv: gain of the selected configuration's models."""
+        return self.results_root / "v_phase_feature_importance.csv"
+
+    @property
+    def m7_runs_file(self) -> Path:
+        """results/m7_runs.csv: one row per M7 helper process (sampling, Dataset, baseline)."""
+        return self.results_root / "m7_runs.csv"
+
+    @property
+    def m7_speed_test_file(self) -> Path:
+        """results/m7_speed_test.csv: the trials of the speed test (same columns as v_phase.csv)."""
+        return self.results_root / "m7_speed_test.csv"
+
+    @property
+    def m7_speed_test_metrics_file(self) -> Path:
+        """results/m7_speed_test_metrics.csv: the speed test's metric rows."""
+        return self.results_root / "m7_speed_test_metrics.csv"
 
     @property
     def t_phase_results_file(self) -> Path:

@@ -10,6 +10,8 @@ Loaders in this module:
     - load_queries_config: configs/queries.yaml -> QueriesConfig
     - load_popularity_config / load_repurchase_config / load_sibling_config:
       configs/recall/r{1,2,3}_*.yaml -> PopularityConfig / RepurchaseConfig / SiblingConfig
+    - load_features_config: configs/features.yaml -> FeaturesConfig
+    - load_ranker_config: configs/ranker.yaml -> RankerConfig
 
 The fold manifest is parsed in hmrec.data.folds, which reuses load_yaml and the
 small field helpers defined here.
@@ -1756,3 +1758,298 @@ def parse_features_config(raw: Mapping[str, Any]) -> FeaturesConfig:
 def load_features_config(path: Path) -> FeaturesConfig:
     """Read and validate configs/features.yaml."""
     return parse_features_config(load_yaml(path))
+
+
+# ---------------------------------------------------------------- ranker.yaml
+
+HISTOGRAM_UNDECIDED = "undecided"
+HISTOGRAM_COL_WISE = "col_wise"
+HISTOGRAM_ROW_WISE = "row_wise"
+HISTOGRAM_MODES = (HISTOGRAM_UNDECIDED, HISTOGRAM_COL_WISE, HISTOGRAM_ROW_WISE)
+
+# The exact keys of dataset_params and train_params in configs/ranker.yaml. A key that
+# is missing or unknown is an error: every LightGBM parameter that can change the
+# result is written out, and nothing else is passed.
+RANKER_DATASET_PARAM_KEYS = frozenset(
+    {
+        "max_bin",
+        "min_data_in_bin",
+        "bin_construct_sample_cnt",
+        "use_missing",
+        "zero_as_missing",
+        "enable_bundle",
+        "feature_pre_filter",
+    }
+)
+RANKER_TRAIN_PARAM_KEYS = frozenset(
+    {
+        "objective",
+        "boosting",
+        "learning_rate",
+        "feature_fraction",
+        "bagging_fraction",
+        "bagging_freq",
+        "bagging_by_query",
+        "feature_fraction_bynode",
+        "max_depth",
+        "min_sum_hessian_in_leaf",
+        "min_gain_to_split",
+        "lambda_l1",
+        "lambda_l2",
+        "lambdarank_truncation_level",
+        "lambdarank_norm",
+        "max_cat_threshold",
+        "cat_l2",
+        "cat_smooth",
+        "max_cat_to_onehot",
+        "min_data_per_group",
+        "metric",
+        "eval_at",
+        "deterministic",
+        "verbosity",
+    }
+)
+RANKER_TUNED_KEYS = ("num_leaves", "min_data_in_leaf", "negatives_per_positive")
+
+
+@dataclass(frozen=True)
+class RankerTunedParams:
+    """The three values the V phase tunes (proposal §9.4).
+
+    Attributes:
+        num_leaves: Leaves per tree.
+        min_data_in_leaf: Minimum training rows in a leaf.
+        negatives_per_positive: r, sampled negatives per positive (proposal §9.1).
+    """
+
+    num_leaves: int
+    min_data_in_leaf: int
+    negatives_per_positive: int
+
+
+@dataclass(frozen=True)
+class RankerSamplingConfig:
+    """The `sampling` section of configs/ranker.yaml (proposal §9.1).
+
+    Attributes:
+        seed: Seed of the negative sampling.
+        ratios: Negatives per positive of the sample files that are written.
+        row_group_rows: Rows per Parquet row group of a sample file.
+    """
+
+    seed: int
+    ratios: tuple[int, ...]
+    row_group_rows: int
+
+
+@dataclass(frozen=True)
+class HistogramConfig:
+    """The `histogram` section of configs/ranker.yaml: col-wise or row-wise histograms.
+
+    Attributes:
+        mode: "undecided", "col_wise" or "row_wise".
+        comparison_trees: Trees each mode trains in the speed test.
+        warmup_trees: First trees left out of the seconds-per-tree mean.
+        min_row_wise_speedup: row_wise is chosen only if it saves at least this
+            share of col_wise's seconds per tree (0.15 = 15%).
+    """
+
+    mode: str
+    comparison_trees: int
+    warmup_trees: int
+    min_row_wise_speedup: float
+
+
+@dataclass(frozen=True)
+class SpeedTestConfig:
+    """The `speed_test` section of configs/ranker.yaml.
+
+    Attributes:
+        target_fold: The fold the speed test predicts ("V1").
+        num_trees: Trees of its evaluated model (300).
+    """
+
+    target_fold: str
+    num_trees: int
+
+
+@dataclass(frozen=True)
+class RankerConfig:
+    """Settings from configs/ranker.yaml (proposal §9).
+
+    Attributes:
+        window_weeks: Training weeks right before the predicted week (4).
+        top_k: Rows kept per query when ranking (12).
+        num_trees: Trees of a grid model (2000).
+        checkpoint_every: Evaluate after every this many trees (100).
+        train_metric_every: Log the training-set metric every this many trees.
+        seed: LightGBM seed.
+        sampling: Negative sampling settings.
+        tuned_defaults: Default values of the tuned parameters.
+        histogram: Histogram mode and the rule that decides it.
+        speed_test: What the speed test runs before the grid.
+        dataset_params: LightGBM parameters that define the bins.
+        train_params: The fixed LightGBM training parameters.
+    """
+
+    window_weeks: int
+    top_k: int
+    num_trees: int
+    checkpoint_every: int
+    train_metric_every: int
+    seed: int
+    sampling: RankerSamplingConfig
+    tuned_defaults: RankerTunedParams
+    histogram: HistogramConfig
+    speed_test: SpeedTestConfig
+    dataset_params: dict[str, Any]
+    train_params: dict[str, Any]
+
+
+def parse_ranker_tuned_params(raw: Mapping[str, Any], where: str) -> RankerTunedParams:
+    """Build RankerTunedParams from a mapping with exactly the three tuned keys."""
+    check_keys(raw, set(RANKER_TUNED_KEYS), where)
+    tuned = RankerTunedParams(
+        num_leaves=get_int(raw, "num_leaves", where),
+        min_data_in_leaf=get_int(raw, "min_data_in_leaf", where),
+        negatives_per_positive=get_int(raw, "negatives_per_positive", where),
+    )
+    for name in RANKER_TUNED_KEYS:
+        require_positive(getattr(tuned, name), f"{where}.{name}")
+    return tuned
+
+
+def _parse_ranker_sampling(raw: Mapping[str, Any], where: str) -> RankerSamplingConfig:
+    """The `sampling` section: seed, ratios (distinct, ascending), row_group_rows."""
+    check_keys(raw, {"seed", "ratios", "row_group_rows"}, where)
+    ratios = raw["ratios"]
+    is_int_list = isinstance(ratios, list) and all(
+        isinstance(ratio, int) and not isinstance(ratio, bool) and ratio > 0 for ratio in ratios
+    )
+    if not is_int_list or not ratios or sorted(set(ratios)) != ratios:
+        raise ValueError(
+            f"{where}.ratios: expected distinct positive integers in ascending order, "
+            f"got {ratios!r}"
+        )
+    sampling = RankerSamplingConfig(
+        seed=get_int(raw, "seed", where),
+        ratios=tuple(ratios),
+        row_group_rows=get_int(raw, "row_group_rows", where),
+    )
+    require_positive(sampling.row_group_rows, f"{where}.row_group_rows")
+    if sampling.seed < 0:
+        raise ValueError(f"{where}.seed must be >= 0, got {sampling.seed}")
+    return sampling
+
+
+def _parse_histogram(raw: Mapping[str, Any], where: str) -> HistogramConfig:
+    """The `histogram` section: the mode and the numbers of the decision rule."""
+    check_keys(raw, {"mode", "comparison_trees", "warmup_trees", "min_row_wise_speedup"}, where)
+    histogram = HistogramConfig(
+        mode=_get_choice(raw, "mode", where, HISTOGRAM_MODES),
+        comparison_trees=get_int(raw, "comparison_trees", where),
+        warmup_trees=get_int(raw, "warmup_trees", where),
+        min_row_wise_speedup=get_float(raw, "min_row_wise_speedup", where),
+    )
+    if not 0 <= histogram.warmup_trees < histogram.comparison_trees:
+        raise ValueError(f"{where}: need 0 <= warmup_trees < comparison_trees")
+    if not 0 < histogram.min_row_wise_speedup < 1:
+        raise ValueError(f"{where}.min_row_wise_speedup must be in (0, 1)")
+    return histogram
+
+
+def _parse_lightgbm_params(
+    raw: Mapping[str, Any], expected: frozenset[str], where: str
+) -> dict[str, Any]:
+    """A section of LightGBM parameters with exactly the expected keys and plain values."""
+    check_keys(raw, set(expected), where)
+    for key, value in raw.items():
+        is_scalar = isinstance(value, bool | int | float | str)
+        is_int_list = isinstance(value, list) and all(isinstance(item, int) for item in value)
+        if not is_scalar and not is_int_list:
+            raise ValueError(f"{where}.{key}: expected a number, text, bool or list of ints")
+    return dict(raw)
+
+
+def parse_ranker_config(raw: Mapping[str, Any]) -> RankerConfig:
+    """Build a RankerConfig from the parsed content of configs/ranker.yaml.
+
+    Raises:
+        ValueError: If a key is missing or unknown, or a value is out of range.
+    """
+    where = "ranker"
+    expected = {
+        "window_weeks",
+        "top_k",
+        "num_trees",
+        "checkpoint_every",
+        "train_metric_every",
+        "seed",
+        "sampling",
+        "tuned_defaults",
+        "histogram",
+        "speed_test",
+        "dataset_params",
+        "train_params",
+    }
+    check_keys(raw, expected, where)
+    speed_test = get_mapping(raw, "speed_test", where)
+    check_keys(speed_test, {"target_fold", "num_trees"}, f"{where}.speed_test")
+    config = RankerConfig(
+        window_weeks=get_int(raw, "window_weeks", where),
+        top_k=get_int(raw, "top_k", where),
+        num_trees=get_int(raw, "num_trees", where),
+        checkpoint_every=get_int(raw, "checkpoint_every", where),
+        train_metric_every=get_int(raw, "train_metric_every", where),
+        seed=get_int(raw, "seed", where),
+        sampling=_parse_ranker_sampling(get_mapping(raw, "sampling", where), f"{where}.sampling"),
+        tuned_defaults=parse_ranker_tuned_params(
+            get_mapping(raw, "tuned_defaults", where), f"{where}.tuned_defaults"
+        ),
+        histogram=_parse_histogram(get_mapping(raw, "histogram", where), f"{where}.histogram"),
+        speed_test=SpeedTestConfig(
+            target_fold=get_str(speed_test, "target_fold", f"{where}.speed_test"),
+            num_trees=get_int(speed_test, "num_trees", f"{where}.speed_test"),
+        ),
+        dataset_params=_parse_lightgbm_params(
+            get_mapping(raw, "dataset_params", where),
+            RANKER_DATASET_PARAM_KEYS,
+            f"{where}.dataset_params",
+        ),
+        train_params=_parse_lightgbm_params(
+            get_mapping(raw, "train_params", where),
+            RANKER_TRAIN_PARAM_KEYS,
+            f"{where}.train_params",
+        ),
+    )
+    _validate_ranker_config(config, where)
+    return config
+
+
+def _validate_ranker_config(config: RankerConfig, where: str) -> None:
+    """Range checks that involve more than one field."""
+    for name in ("window_weeks", "top_k", "num_trees", "checkpoint_every", "train_metric_every"):
+        require_positive(getattr(config, name), f"{where}.{name}")
+    if config.seed < 0:
+        raise ValueError(f"{where}.seed must be >= 0, got {config.seed}")
+    if config.num_trees % config.checkpoint_every != 0:
+        raise ValueError(
+            f"{where}.num_trees ({config.num_trees}) must be a multiple of checkpoint_every "
+            f"({config.checkpoint_every})"
+        )
+    speed_trees = config.speed_test.num_trees
+    if speed_trees <= 0 or speed_trees % config.checkpoint_every != 0:
+        raise ValueError(
+            f"{where}.speed_test.num_trees ({speed_trees}) must be a positive multiple of "
+            f"checkpoint_every ({config.checkpoint_every})"
+        )
+    if config.tuned_defaults.negatives_per_positive not in config.sampling.ratios:
+        raise ValueError(
+            f"{where}.tuned_defaults.negatives_per_positive must be one of sampling.ratios "
+            f"{list(config.sampling.ratios)}"
+        )
+
+
+def load_ranker_config(path: Path) -> RankerConfig:
+    """Read and validate configs/ranker.yaml."""
+    return parse_ranker_config(load_yaml(path))

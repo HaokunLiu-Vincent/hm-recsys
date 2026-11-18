@@ -1,0 +1,70 @@
+# V-phase experiments of the Ranker (proposal §9.4, §9.5), read by hmrec.hpo.v_phase.
+#
+# WRITTEN BEFORE ANY RANKER RESULT EXISTS. The ORDER of the candidates is part of the
+# selection rule (proposal §4.2). DO NOT reorder or add candidates after a run.
+#
+# A "configuration" is the three tuned values of configs/ranker.yaml:
+#     num_leaves, min_data_in_leaf, negatives_per_positive
+# It starts from tuned_defaults (31, 500, 40) and the steps below run in order. The winner
+# of a step is the default of the next step (proposal §4.3).
+#
+# A "trial" is one configuration on ONE target fold: a model trained from scratch on the
+# 4 weeks before the fold, then all candidates of the fold scored. One process per trial.
+#
+# THE RULE of a step (docs/decisions.md 2026-11-18):
+#   1. Number of trees first, per configuration. P(k) = MAP@12 of the 4 folds pooled
+#      (all queries together, §4.1) with the first k trees, k = 100, 200, ..., 2000.
+#        k* = the SMALLEST k with (max P - P(k)) / max P < 1%
+#      (1% = acceptance.min_relative_improvement of configs/selection_rule.yaml).
+#   2. Then the configurations are compared with the §4.2 multi-candidate rule
+#      (hmrec.hpo.selection.choose_winner), each one with the scores at ITS OWN k*:
+#      a candidate passes if its pooled MAP@12 is >= 1% (relative) above the default's
+#      and it is strictly better on >= 3 of the 4 folds; among the passing candidates,
+#      those within 1% of the best passing score are "about equal" and the one listed
+#      FIRST below wins. No candidate passes -> the default stays.
+#   3. If the winner's k* is the last checkpoint (2000), its curve may still be rising:
+#      the run STOPS after this step and a human decides whether to train more trees.
+#      A losing configuration whose k* is 2000 is only flagged in the step report.
+
+phase: V
+target_folds: [V1, V2, V3, V4]
+
+# The selection metric; must equal selection_metric.ranker of configs/selection_rule.yaml.
+metric: map@12
+# Reported next to it, never used to select.
+extra_metrics: [recall@12, ndcg@12]
+
+stop_if_winner_uses_all_trees: true
+
+# Goal G1 (proposal §0.1): pooled MAP@12 of the final configuration on V1-V4. Goal G3:
+# the final configuration is strictly above the RRF baseline on at least 3 of the 4 folds
+# (the same "3 of 4" as acceptance.min_folds_better of configs/selection_rule.yaml).
+# Both are only reported; they change no selection.
+g1_min_pooled_score: 0.032
+
+steps:
+  - name: leaves_x_min_data        # proposal §9.4 step 1: 6 configurations x 4 folds
+    kind: select
+    order: listed                  # smaller num_leaves first; 500 before 100
+    candidates:
+      - {num_leaves: 31, min_data_in_leaf: 500}    # the default
+      - {num_leaves: 31, min_data_in_leaf: 100}
+      - {num_leaves: 63, min_data_in_leaf: 500}
+      - {num_leaves: 63, min_data_in_leaf: 100}
+      - {num_leaves: 127, min_data_in_leaf: 500}
+      - {num_leaves: 127, min_data_in_leaf: 100}
+  - name: negatives_per_positive   # proposal §9.4 step 2: +2 configurations x 4 folds
+    kind: select
+    order: listed                  # fewer training rows first
+    candidates:
+      - {negatives_per_positive: 40}               # the default = the winner of step 1
+      - {negatives_per_positive: 60}
+      - {negatives_per_positive: 80}
+
+# System-level experiments on the same 4 folds (proposal §9.5). They select nothing.
+#   rrf_baseline: no model; Top-12 by rrf_score DESC, best_rank ASC, article_idx ASC.
+#   minus_r6:     the final configuration WITHOUT R6. Rows returned only by R6 and the 4
+#                 R6 features are removed, n_channels / best_rank / rrf_score are computed
+#                 again from the other five channels, the samples are drawn again, and the
+#                 4 models are trained to the selected k* trees.
+experiments: [rrf_baseline, minus_r6]

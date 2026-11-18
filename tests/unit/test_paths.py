@@ -56,6 +56,38 @@ def test_build_paths_derives_everything_from_roots(tmp_path: Path) -> None:
         "/abs/artifacts/predictions/run7/T4.parquet"
     )
     assert paths.d_phase_results_file == tmp_path / "results" / "d_phase.csv"
+    # Ranker (M7).
+    assert paths.ranker_config_file == tmp_path / "configs" / "ranker.yaml"
+    assert paths.v_phase_grid_file == tmp_path / "configs" / "hpo" / "v_phase.yaml"
+    assert paths.ranker_sample_file("full", "F1", 40) == Path(
+        "/abs/artifacts/ranker/samples/full/F1/r40.parquet"
+    )
+    assert paths.ranker_sample_record_file("minus_r6", "V3", 60) == Path(
+        "/abs/artifacts/ranker/samples/minus_r6/V3/r60.json"
+    )
+    assert paths.ranker_dataset_dir("full", "V1", 40) == Path(
+        "/abs/artifacts/lgb_datasets/full/V1_r40"
+    )
+    assert paths.ranker_model_file("v_phase", "full", "abc", "V2") == Path(
+        "/abs/artifacts/models/ranker/v_phase/full/abc/V2/model.txt"
+    )
+    assert paths.ranker_predictions_file("speed_test", "full", "abc", "V1") == Path(
+        "/abs/artifacts/predictions/speed_test/full/abc/V1.parquet"
+    )
+    assert paths.ranker_per_query_file("speed_test", "full", "abc", "V1") == Path(
+        "/abs/artifacts/predictions/speed_test/full/abc/V1_per_query.parquet"
+    )
+    for name in (
+        "v_phase",
+        "v_phase_metrics",
+        "v_phase_steps",
+        "v_phase_feature_importance",
+        "m7_runs",
+        "m7_speed_test",
+        "m7_speed_test_metrics",
+    ):
+        attribute = "v_phase_results_file" if name == "v_phase" else f"{name}_file"
+        assert getattr(paths, attribute) == tmp_path / "results" / f"{name}.csv"
     assert paths.union_precheck_candidates_file("D2", "r5_wals", "abc123") == Path(
         "/abs/artifacts/hpo/D/union_precheck/D2/r5_wals_abc123.parquet"
     )

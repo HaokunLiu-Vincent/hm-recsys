@@ -6,10 +6,14 @@ from typing import Any
 import pytest
 
 from hmrec.config import (
+    HISTOGRAM_UNDECIDED,
     N_PROPOSAL_FEATURES,
     PROPOSAL_CATEGORICAL_FEATURES,
     PROPOSAL_FEATURES,
+    RANKER_DATASET_PARAM_KEYS,
+    RANKER_TRAIN_PARAM_KEYS,
     ActivePoolConfig,
+    RankerTunedParams,
     load_base_config,
     load_candidate_run_config,
     load_catalog_config,
@@ -18,6 +22,7 @@ from hmrec.config import (
     load_popularity_config,
     load_preprocess_config,
     load_queries_config,
+    load_ranker_config,
     load_repurchase_config,
     load_selection_rule,
     load_sibling_config,
@@ -33,6 +38,7 @@ from hmrec.config import (
     parse_popularity_config,
     parse_preprocess_config,
     parse_queries_config,
+    parse_ranker_config,
     parse_selection_rule,
     parse_sibling_config,
     parse_twotower_config,
@@ -557,3 +563,88 @@ def test_features_config_refuses_any_change_of_the_feature_list() -> None:
         parse_features_config(with_features(mismatch))
     with pytest.raises(ValueError, match="must be > 0"):
         parse_features_config({**raw, "rrf_k": 0})
+
+
+# ---------------------------------------------------------------- ranker.yaml
+
+
+def _raw_ranker() -> dict[str, Any]:
+    return load_yaml(REPO_CONFIGS / "ranker.yaml")
+
+
+def test_repo_ranker_yaml_matches_the_proposal() -> None:
+    config = load_ranker_config(REPO_CONFIGS / "ranker.yaml")
+    # proposal §9.2-9.4
+    assert (config.window_weeks, config.top_k) == (4, 12)
+    assert (config.num_trees, config.checkpoint_every) == (2000, 100)
+    assert config.sampling.ratios == (40, 60, 80) and config.sampling.seed == 42
+    assert config.tuned_defaults == RankerTunedParams(31, 500, 40)
+    # proposal §9.3 fixed parameters
+    train = config.train_params
+    assert train["objective"] == "lambdarank" and train["learning_rate"] == 0.05
+    assert (train["feature_fraction"], train["bagging_fraction"], train["bagging_freq"]) == (
+        0.8,
+        0.8,
+        1,
+    )
+    assert config.dataset_params["max_bin"] == 255
+    assert train["metric"] == "ndcg" and train["eval_at"] == [12]
+    # Reproducibility, and the one dataset parameter that is not LightGBM's default.
+    assert train["deterministic"] is True and config.seed == 42
+    assert config.dataset_params["feature_pre_filter"] is False
+    # LightGBM 4.7.0 defaults that are written out because they change the result.
+    assert train["lambdarank_truncation_level"] == 30 and train["bagging_by_query"] is False
+    assert set(train) == RANKER_TRAIN_PARAM_KEYS
+    assert set(config.dataset_params) == RANKER_DATASET_PARAM_KEYS
+
+
+def test_histogram_mode_is_undecided_until_the_speed_test() -> None:
+    # The rule is committed before the speed test; the mode is filled in after it.
+    histogram = load_ranker_config(REPO_CONFIGS / "ranker.yaml").histogram
+    assert histogram.mode == HISTOGRAM_UNDECIDED
+    assert (histogram.comparison_trees, histogram.warmup_trees) == (50, 10)
+    assert histogram.min_row_wise_speedup == 0.15
+
+
+@pytest.mark.parametrize(
+    ("section", "key", "value", "message"),
+    [
+        (None, "num_trees", 2050, "multiple of checkpoint_every"),
+        (None, "top_k", 0, "must be > 0"),
+        ("sampling", "ratios", [60, 40], "ascending"),
+        ("sampling", "ratios", [60, 80], "must be one of sampling.ratios"),
+        ("sampling", "row_group_rows", 0, "must be > 0"),
+        ("histogram", "mode", "auto", "expected one of"),
+        ("histogram", "warmup_trees", 50, "warmup_trees < comparison_trees"),
+        ("histogram", "min_row_wise_speedup", 1.5, "must be in"),
+        ("speed_test", "num_trees", 250, "multiple of"),
+        ("tuned_defaults", "num_leaves", 0, "must be > 0"),
+    ],
+)
+def test_ranker_config_range_checks(
+    section: str | None, key: str, value: object, message: str
+) -> None:
+    raw = _raw_ranker()
+    target = raw if section is None else raw[section]
+    target[key] = value
+    with pytest.raises(ValueError, match=message):
+        parse_ranker_config(raw)
+
+
+def test_ranker_config_refuses_missing_and_unknown_lightgbm_parameters() -> None:
+    raw = _raw_ranker()
+    raw["train_params"]["num_leaves"] = 31  # a tuned value does not belong to the fixed ones
+    with pytest.raises(ValueError, match="unknown keys"):
+        parse_ranker_config(raw)
+    raw = _raw_ranker()
+    del raw["train_params"]["lambdarank_truncation_level"]
+    with pytest.raises(ValueError, match="missing keys"):
+        parse_ranker_config(raw)
+    raw = _raw_ranker()
+    del raw["dataset_params"]["feature_pre_filter"]
+    with pytest.raises(ValueError, match="missing keys"):
+        parse_ranker_config(raw)
+    raw = _raw_ranker()
+    raw["tuned_defaults"]["learning_rate"] = 0.1
+    with pytest.raises(ValueError, match="unknown keys"):
+        parse_ranker_config(raw)
