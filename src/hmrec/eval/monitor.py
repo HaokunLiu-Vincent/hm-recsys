@@ -394,6 +394,24 @@ def monitor_rows(
     """
     if evaluator is not None:
         require_label_phase(data.fold, data.phase)
+    return build_monitor_rows(data, evaluator, earlier_rows, config, query_chunk_size, stamp)
+
+
+def build_monitor_rows(
+    data: FoldCandidates,
+    evaluator: FoldEvaluator | None,
+    earlier_rows: Sequence[Mapping[str, str]],
+    config: CandidateRunConfig,
+    query_chunk_size: int,
+    stamp: RunStamp,
+) -> list[dict[str, str]]:
+    """The monitoring rows of one fold, WITHOUT a phase check (arguments as monitor_rows).
+
+    Two callers: monitor_rows (M6; it refuses an evaluator of a T fold first) and
+    the final evaluation (hmrec.final.monitor, M8), which gets the evaluator of a
+    T fold from hmrec.eval.final_eval and so has its own guard. The numbers are
+    computed in exactly the same way for both.
+    """
     metrics = {channel: lock.d_phase_record.metric for channel, lock in data.locked.items()}
     labels = (
         None if evaluator is None else label_metrics(evaluator, data.candidates_by_channel, metrics)

@@ -5,8 +5,13 @@ A trial = one configuration on ONE target fold, run in its own process
 peak. Also here: the plan of a binary Dataset (shared by the build script and
 the trial, so both mean the same Dataset) and the RRF baseline of a fold.
 
-Every function that takes a fold checks it FIRST (hmrec.ranker.window): a T fold
-raises before any file is opened.
+Every M7 function that takes a fold checks it FIRST (hmrec.ranker.window): a T
+fold raises before any file is opened. The steps that do not depend on which
+fold is predicted (plan_dataset_for_folds, train_planned_model, score_and_save,
+rrf_baseline_metric_row) take the training folds or the evaluator as an
+argument and check nothing themselves: the M7 entry points below call them after
+their own checks, and the final evaluation (hmrec.final, M8) calls them after
+its own (hmrec.ranker.final_window, hmrec.eval.final_eval).
 
 Outputs of an evaluated trial, written in this order (never replaced):
     artifacts/predictions/{area}/{experiment}/{config_id}/{fold}.parquet
@@ -30,7 +35,7 @@ import lightgbm as lgb
 import polars as pl
 
 from hmrec.config import BaseConfig, RankerConfig, RankerTunedParams
-from hmrec.data.folds import FoldManifest
+from hmrec.data.folds import Fold, FoldManifest
 from hmrec.eval.ranker_eval import load_m7_evaluator, ranking_scores
 from hmrec.eval.report import FoldEvaluator
 from hmrec.feature_files import verify_feature_files
@@ -140,18 +145,33 @@ class DatasetPlan:
     record: DatasetRecord
 
 
-def plan_dataset(
-    inputs: TrialInputs, experiment_name: str, target_fold: str, ratio: int, git_commit: str
+def plan_dataset_for_folds(
+    inputs: TrialInputs,
+    experiment_name: str,
+    target_fold: str,
+    folds: Sequence[Fold],
+    ratio: int,
+    git_commit: str,
+    directory: Path,
 ) -> DatasetPlan:
-    """Describe the Dataset of a target fold from the CURRENT sample records and config.
+    """Describe the Dataset of given training folds from the CURRENT sample records and config.
 
-    The fold window is checked first (M7: target V, training folds F / V).
+    No fold is checked here: the caller decided which folds may train the model
+    that predicts `target_fold` (M7: plan_dataset; M8: hmrec.final.trial).
+
+    Args:
+        inputs: Configuration.
+        experiment_name: "full" or "minus_r6".
+        target_fold: The fold the model predicts.
+        folds: Its training folds in time order.
+        ratio: Negatives per positive of the sample files.
+        git_commit: HEAD of this run.
+        directory: Where train.bin and dataset.json go.
 
     Raises:
         FileNotFoundError: If a training fold's sample is not finished.
         ValueError: If a sample was drawn with another seed or has other columns.
     """
-    folds = m7_training_window(inputs.manifest, target_fold, inputs.ranker.window_weeks)
     experiment = build_experiment(experiment_name, inputs.lock)
     expected_columns = (QUERY_ID, ARTICLE_IDX, LABEL, *experiment.feature_names)
     sources = []
@@ -178,8 +198,21 @@ def plan_dataset(
         binary_sha256="",
         git_commit=git_commit,
     )
-    directory = inputs.paths.ranker_dataset_dir(experiment_name, target_fold, ratio)
     return DatasetPlan(directory, experiment, tuple(sources), params, record)
+
+
+def plan_dataset(
+    inputs: TrialInputs, experiment_name: str, target_fold: str, ratio: int, git_commit: str
+) -> DatasetPlan:
+    """The Dataset of an M7 target fold (plan_dataset_for_folds after the M7 fold check).
+
+    The fold window is checked first (M7: target V, training folds F / V).
+    """
+    folds = m7_training_window(inputs.manifest, target_fold, inputs.ranker.window_weeks)
+    directory = inputs.paths.ranker_dataset_dir(experiment_name, target_fold, ratio)
+    return plan_dataset_for_folds(
+        inputs, experiment_name, target_fold, folds, ratio, git_commit, directory
+    )
 
 
 def build_and_save_dataset(plan: DatasetPlan, block_rows: int) -> DatasetRecord:
@@ -338,7 +371,9 @@ class TrialOutcome:
     metric_rows: tuple[MetricRow, ...]
 
 
-def _output_files(inputs: TrialInputs, spec: TrialSpec, config_id: str) -> tuple[Path, Path, Path]:
+def trial_output_files(
+    inputs: TrialInputs, spec: TrialSpec, config_id: str
+) -> tuple[Path, Path, Path]:
     """(predictions, per-query, model) files of a trial; none of them may exist yet."""
     key = (spec.area, spec.experiment, config_id, spec.target_fold)
     files = (
@@ -355,7 +390,7 @@ def _output_files(inputs: TrialInputs, spec: TrialSpec, config_id: str) -> tuple
     return files
 
 
-def _train(
+def train_planned_model(
     inputs: TrialInputs, spec: TrialSpec, plan: DatasetPlan, config: dict[str, Any]
 ) -> tuple[lgb.Booster, TrialOutcome, dict[int, float]]:
     """Load the Dataset and train; returns the model, the outcome so far and the train metric."""
@@ -388,7 +423,7 @@ def _train(
     return booster, outcome, log.train_metric
 
 
-def _score_and_save(
+def score_and_save(
     inputs: TrialInputs,
     spec: TrialSpec,
     experiment: Experiment,
@@ -396,13 +431,37 @@ def _score_and_save(
     outcome: TrialOutcome,
     train_metric: Mapping[int, float],
     files: tuple[Path, Path, Path],
+    evaluator: FoldEvaluator,
+    evaluated_trees: Sequence[int] | None = None,
 ) -> TrialOutcome:
-    """Score the target fold, evaluate every checkpoint and write the trial's files."""
+    """Score the target fold, evaluate checkpoints and write the trial's files.
+
+    Args:
+        inputs: Configuration.
+        spec: The trial.
+        experiment: Which rows and features (full or minus_r6).
+        booster: The trained model.
+        outcome: The outcome so far (from train_planned_model).
+        train_metric: Number of trees -> training-set metric.
+        files: (predictions, per-query, model) from trial_output_files.
+        evaluator: The target fold's evaluator. The CALLER got it through its own
+            guarded loader (M7: load_m7_evaluator; M8: hmrec.eval.final_eval), so
+            this function reads no label file itself.
+        evaluated_trees: The checkpoints to evaluate and save; None = all of them
+            (M7). The scores with k trees do not depend on this choice.
+    """
     started = time.perf_counter()
-    target = inputs.manifest.get(spec.target_fold)
-    evaluator = load_m7_evaluator(target, inputs.paths.labels_file(spec.target_fold))
+    if evaluator.fold != spec.target_fold:
+        raise ValueError(
+            f"the evaluator holds fold {evaluator.fold}, the trial predicts {spec.target_fold}"
+        )
     features_dir = inputs.paths.features_dir(spec.target_fold)
     tops, n_scored_rows = score_fold(booster, features_dir, experiment, inputs, spec.num_trees)
+    if evaluated_trees is not None:
+        missing = sorted(set(evaluated_trees) - set(tops))
+        if missing:
+            raise ValueError(f"no checkpoint at {missing} trees; scored were {sorted(tops)}")
+        tops = {k: tops[k] for k in evaluated_trees}
     evaluation = evaluate_checkpoints(
         evaluator, tops, inputs.metrics, spec.experiment, outcome.config_id, train_metric
     )
@@ -465,24 +524,35 @@ def run_trial(inputs: TrialInputs, spec: TrialSpec, git_commit: str) -> TrialOut
     ratio = spec.tuned.negatives_per_positive
     plan = plan_dataset(inputs, spec.experiment, spec.target_fold, ratio, git_commit)
     config = model_config(inputs.ranker, spec.tuned, spec.experiment, spec.histogram_mode)
-    files = _output_files(inputs, spec, ranker_config_id(config)) if spec.evaluate else None
-    booster, outcome, train_metric = _train(inputs, spec, plan, config)
+    files = trial_output_files(inputs, spec, ranker_config_id(config)) if spec.evaluate else None
+    booster, outcome, train_metric = train_planned_model(inputs, spec, plan, config)
     if files is None:
         return outcome
-    return _score_and_save(inputs, spec, plan.experiment, booster, outcome, train_metric, files)
+    target = inputs.manifest.get(spec.target_fold)
+    evaluator = load_m7_evaluator(target, inputs.paths.labels_file(spec.target_fold))
+    return score_and_save(
+        inputs, spec, plan.experiment, booster, outcome, train_metric, files, evaluator
+    )
 
 
 # ---------------------------------------------------------------- RRF baseline
 
 
-def rrf_baseline_row(inputs: TrialInputs, fold_name: str) -> MetricRow:
-    """The RRF baseline of one V fold (proposal §9.5): no model, the same candidates.
+def rrf_baseline_metric_row(
+    inputs: TrialInputs, fold_name: str, evaluator: FoldEvaluator
+) -> MetricRow:
+    """The RRF baseline of one fold (proposal §9.5): no model, the same candidates.
 
     Every query's Top-K by rrf_score DESC, best_rank ASC, article_idx ASC
     (hmrec.fusion.rrf.rrf_baseline), evaluated with the same metrics as the Ranker.
+
+    Args:
+        inputs: Configuration.
+        fold_name: The fold.
+        evaluator: The fold's evaluator, from the caller's guarded loader.
     """
-    fold = inputs.manifest.get(fold_name)
-    evaluator = load_m7_evaluator(fold, inputs.paths.labels_file(fold_name))  # checks the phase
+    if evaluator.fold != fold_name:
+        raise ValueError(f"the evaluator holds fold {evaluator.fold}, expected {fold_name}")
     features_dir = inputs.paths.features_dir(fold_name)
     feature_files = verify_feature_files(features_dir, wide_table_columns(inputs.lock))
     columns = [QUERY_ID, ARTICLE_IDX, RRF_SCORE, BEST_RANK]
@@ -502,3 +572,10 @@ def rrf_baseline_row(inputs: TrialInputs, fold_name: str) -> MetricRow:
         scores=scores.means,
         train_metric=None,
     )
+
+
+def rrf_baseline_row(inputs: TrialInputs, fold_name: str) -> MetricRow:
+    """The RRF baseline of one V fold (M7): the phase is checked before the labels are read."""
+    fold = inputs.manifest.get(fold_name)
+    evaluator = load_m7_evaluator(fold, inputs.paths.labels_file(fold_name))  # checks the phase
+    return rrf_baseline_metric_row(inputs, fold_name, evaluator)
