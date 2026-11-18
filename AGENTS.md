@@ -63,6 +63,8 @@ H&M 个性化时尚推荐（Kaggle H&M 数据集）。目标：预测每个用�
 
 **M5 之后，六路 recall 的配置只能通过 `src/hmrec/recall/locked.py` 获取**（它只读 `configs/locks/`；锁定文件的解析在 `src/hmrec/locks.py`）。M6 及之后的代码不能再读 `configs/recall/` 的默认值，也不能从 `results/d_phase.csv` 重放选择来得到配置。R6 的模型文件必须通过这个入口加载：它在加载权重之前核对 sha256，不一致就报错。`tests/unit/test_locked.py` 会扫描 M6–M8 的脚本和 `fusion/`、`features/`、`ranker/`。
 
+**M7 之后，Ranker 的配置只能通过 `src/hmrec/ranker/locked.py` 的 `load_locked_ranker` 获取**（它读 `configs/locks/ranker.lock.yaml`；`configs/ranker.yaml` 只提供两个只影响内存和日志的值）。M8 的代码不能再读 `configs/ranker.yaml` 的调参默认值和固定参数、`configs/hpo/v_phase.yaml`，也不能在 `results/v_phase*.csv` 上重放选择来得到配置（`src/hmrec/hpo/v_lock.py` 只是给测试用的核对，M8 不调用）。这个入口在返回配置之前核对：锁定文件里的设置算出的 `config_id` 与记录一致、引用的 features / channels / twotower 锁定文件的 sha256 一致、本进程的 LightGBM 版本、libomp 版本和 `num_threads` 与记录一致；不一致就报错。`tests/unit/test_ranker_locked.py` 会扫描 M8 的代码，**新写的 M8 模块要加进它的 `M8_FILES`**。
+
 ### 3.4 其他禁止事项
 
 - 不要删除 `data/`、`artifacts/`、`results/` 下的文件。
@@ -113,7 +115,7 @@ scripts/  →  src/hmrec/{recall, fusion, features, ranker, hpo, pipeline}  → 
 - `recall/`、`features/`、`ranker/` 之间**互不 import**，通过 `artifacts/` 里的文件交接。
 - `fusion/`（合并去重、`n_channels` / `best_rank` / `rrf_score` 的表达式、RRF baseline 的排序）不在上一条的限制里：**`features/` 和 `ranker/` 都可以 import `fusion/`**，`fusion/` 不 import 这三者。`ranker/` 用它在去掉 R6 时重算三个聚合特征（`ranker/ablation.py`），`hpo/` 用它计算 RRF baseline，所以宽表、ablation 和 baseline 用的是同一组表达式。
 - `src/hmrec/vectors.py`（用户 / 商品向量、批量点积、保存 / 读取）属于底层，`recall/` 和 `features/` 都可以 import 它（见 proposal §14.1）。R5 / R6 的召回分数和 §8.3 的 `wals_dot` / `tt_dot` 都只通过它计算。
-- `src/hmrec/locks.py`（读取并校验 `configs/locks/` 的锁定文件、核对文件 sha256）也属于底层，与 `vectors.py` 同层，只依赖 `config.py` 和标准库；`recall/` 和 `features/` 都可以 import 它。从锁定文件**构建** channel 在 `src/hmrec/recall/locked.py`（见 §3.3）。
+- `src/hmrec/locks.py`（读取并校验 `configs/locks/` 的锁定文件、核对文件 sha256）也属于底层，与 `vectors.py` 同层，只依赖 `config.py` 和标准库；`recall/`、`features/` 和 `ranker/` 都可以 import 它。从锁定文件**构建** Ranker 的配置在 `src/hmrec/ranker/locked.py`（见 §3.3）；从锁定文件**构建** channel 在 `src/hmrec/recall/locked.py`（见 §3.3）。
 - `src/hmrec/csv_records.py`（只追加、表头固定的结果表 `results/*.csv` 的读写）和 `src/hmrec/run_records.py`（每个进程一行的运行记录：耗时、采样峰值、真实峰值）也属于底层，只依赖标准库和 `memory.py`；任何上层模块和 `eval/` 都可以 import 它们。
 - `src/hmrec/feature_files.py`（每个 fold 特征文件的记录 `features.json` 和核对函数）也属于底层，只依赖标准库、polars 和 `locks.py`：`features/` 写记录，`ranker/` 在读取特征之前调用 `verify_feature_files` 核对，两者互不 import。
 - `src/hmrec/git_state.py`（读取 HEAD commit 和工作区是否有未提交的改动）也属于底层，只依赖标准库和 `logging_utils.py`。`hpo/runner.py` 仍然转出这两个函数，M2–M6 的脚本不用改。

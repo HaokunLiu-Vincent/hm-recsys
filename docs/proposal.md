@@ -847,6 +847,22 @@ M4 在 D1–D4 上的实测（2026-11-17，§5.7，M5 锁定的配置）：六�
 
 V4 结束后、T1 之前，把 Ranker 配置写进 `configs/locks/ranker.lock.yaml`。
 
+**已锁定（2026-11-18）**：`num_leaves` 31、`min_data_in_leaf` 500、负采样比例 40、500 棵树（V 阶段的结果见 §9.7 末尾）。锁定文件写明：
+
+- `model`：三个调参项中的两个、树的棵数、`seed`、直方图方式（row-wise），以及传给 LightGBM 的全部参数（7 个分箱参数、24 个训练参数）；
+- `sampling`：负采样的方法、`seed`、比例 40、采样文件的 row group 行数；
+- `training_window`：4 周，每次从头训练；`scoring`：分段打分的步长（100 棵一段，float64 累加）和 Top-12；
+- `runtime`：LightGBM 4.7.0、libomp 22.1.4、`num_threads` 6；
+- `references`：`features.lock.yaml`、`channels.lock.yaml` 和 `twotower.lock.yaml` 的路径和 sha256（R6 的候选和四个 `tt_` 特征依赖 twotower 的锁定）；
+- `selection`：选择依据（规则选择，保留默认值）、对应的 `config_id`（`ca1a3cdfce49`）、`docs/decisions.md` 的记录、V 上的分数（只作记录）；
+- `lock` 段（日期和当时的 HEAD）。
+
+没有写进锁定文件的：只影响内存和日志的设置（`scoring_query_chunk_size`、`train_metric_every`、`configs/base.yaml` 的内存上限和分块）。
+
+**唯一入口**：M8 只能通过 `src/hmrec/ranker/locked.py` 的 `load_locked_ranker` 取 Ranker 的配置，不能再读 `configs/ranker.yaml` 的默认值和固定参数、`configs/hpo/v_phase.yaml`，也不能在 `results/v_phase*.csv` 上重放选择。入口在返回配置之前核对三件事，任何一件不过就报错：(1) 用锁定文件里的设置重新算出的 `config_id` 等于文件记录的；(2) 引用的三个锁定文件（features、channels、twotower）的 sha256 与记录一致；(3) 本进程的 LightGBM 版本、libomp 版本和 `num_threads` 与记录一致（libomp 是 `uv.lock` 之外的系统依赖，升级之后 M8 会在这里停下）。
+
+**与记录的核对**（`src/hmrec/hpo/v_lock.py`，只在测试里调用）：不读锁定文件，在 `results/v_phase_metrics.csv` 上重放两步的选择规则，加上 V 阶段运行时的固定配置和赢家 trial 记录的版本，得到锁定文件应当写的内容，再逐项比较。`tests/unit/test_v_lock.py` 还把锁定文件的每一个值逐个改掉，确认每一处改动都被拒绝。
+
 ### 9.7 落实后的约定（M7，2026-11-18）
 
 配置在 `configs/ranker.yaml`（固定参数、三个调参项的默认值、采样设置、直方图方式的规则、测速设置）和 `configs/hpo/v_phase.yaml`（步骤、优先顺序、选择规则；在任何 Ranker 结果出现之前提交）。
@@ -894,6 +910,74 @@ V4 结束后、T1 之前，把 Ranker 配置写进 `configs/locks/ranker.lock.ya
 
 **进程里不能同时有 torch 和 LightGBM**：torch 自带一份 libomp，LightGBM 用的是 Homebrew 的 libomp（`/opt/homebrew/Cellar/libomp/22.1.4`，不由 `uv.lock` 锁定），两份在一个进程里会直接退出、卡死或段错误。M7 的代码不 import torch（`git_state` 为此从 `hpo/runner.py` 移到 `src/hmrec/git_state.py`），测试分两个进程运行（`tests/conftest.py`，AGENTS.md §7）。libomp 是 `uv.lock` 之外的系统依赖（`brew install libomp`，见 README）：每个 M7 进程的结果行都记录 `lightgbm_version`、`libomp_path`、`libomp_version`（`ranker/runtime.py`，取自本进程实际加载的库）；升级 libomp 之后要重新做一次"两次训练得到相同模型"的核对。
 
+**V 阶段的结果（2026-11-18，M7 的最终结果）**。结果表：`results/v_phase.csv`（36 个 trial）、`results/v_phase_metrics.csv`、`results/v_phase_steps.csv`、`results/v_phase_feature_importance.csv`；逐项记录见 `docs/decisions.md`。
+
+第 1 步（`num_leaves` × `min_data_in_leaf`，r = 40）和第 2 步（负采样比例），各自先定 k，再按 §4.2 的规则与默认比较。两步都没有候选通过，**保留默认值**：
+
+| 步骤 | 配置 | 选中的 k | V1–V4 合并 MAP@12 | 最高分所在的 k | 最高分 | 相对默认 |
+|---|---|---|---|---|---|---|
+| 1、2 | **(31, 500)，r = 40（默认，最终配置）** | **500** | **0.032713** | 1000 | 0.032865 | — |
+| 1 | (31, 100) | 500 | 0.032619 | 1000 | 0.032849 | −0.29% |
+| 1 | (63, 500) | 300 | 0.032645 | 600 | 0.032804 | −0.21% |
+| 1 | (63, 100) | 300 | 0.032555 | 600 | 0.032755 | −0.48% |
+| 1 | (127, 500) | 200 | 0.032536 | 500 | 0.032766 | −0.54% |
+| 1 | (127, 100) | 200 | 0.032528 | 400 | 0.032653 | −0.56% |
+| 2 | (31, 500)，r = 60 | 400 | 0.032664 | 900 | 0.032917 | −0.15% |
+| 2 | (31, 500)，r = 80 | 400 | 0.032698 | 800 | 0.032952 | −0.04% |
+
+- "各自定 k"带来的现象：r 越大，最高分越高，规则给 r = 60、80 选了更小的 k（400），所以表里的差距是负的。在相同的 k = 500 上，r = 80 是 0.032821，比 r = 40 高 0.33%；按最高分比高 0.27%。都远低于 1% 的门槛，结论不变。
+- 默认配置的最高分落在上限 1000 棵，但选中的 k 是 500，没有触发"赢家的 k 等于上限就停下"；900 → 1000 棵只增加 0.03%。
+- **Ranker 的这几个参数已经在平台期**：8 组配置的合并 MAP@12 都在 0.0325–0.0330 之间。提升空间在候选和特征。备选清单（`lambdarank_truncation_level`、把漂移明显的分数类特征换算成 query 内名次）没有评估，留到下一版；下一版还可以考虑删掉贡献接近 0 的特征。
+
+最终配置（k = 500）与 RRF baseline、去掉 R6 的系统：
+
+| MAP@12 | V1 | V2 | V3 | V4 | 合并 |
+|---|---|---|---|---|---|
+| RRF baseline | 0.018511 | 0.019064 | 0.020604 | 0.019662 | 0.019419 |
+| 完整系统 | 0.030112 | 0.031332 | 0.035029 | 0.034850 | **0.032713** |
+| 去掉 R6 | 0.028727 | 0.029881 | 0.033603 | 0.033013 | 0.031193 |
+| 去掉 R6 的相对下降 | −4.60% | −4.63% | −4.07% | −5.27% | −4.64% |
+
+- **G1（合并 MAP@12 ≥ 0.032）在 V 上达标**，G3（4 周中至少 3 周高于 RRF baseline）达标（4 周都更高）。**余量只有 2.2%，而且 V 上的分数偏乐观**（k 和参数就是在这四周上选的），**T 上有可能低于 0.032**；以 M8 为准。
+- 去掉 R6 之后合并 MAP@12 降 4.64%，低于 G1；Recall@12 降 7.00%（0.072987 → 0.067875），NDCG@12 降 6.05%。
+
+Feature importance（最终配置的 4 个模型，前 500 棵，gain 占比的四周平均；只用于分析）。前 20 个：
+
+| 名次 | 特征 | 组 | 占比 | 名次 | 特征 | 组 | 占比 |
+|---|---|---|---|---|---|---|---|
+| 1 | `best_rank` | A | 12.01% | 11 | `section_no` | C | 2.85% |
+| 2 | `rrf_score` | A | 10.80% | 12 | `item_days_since_first_sale` | C | 2.02% |
+| 3 | `tt_dot` | B | 9.37% | 13 | `tt_sim_max_hist` | B | 1.87% |
+| 4 | `ui_days_since_pcode` | E | 9.28% | 14 | `rep_score` | A | 1.79% |
+| 5 | `tt_rank` | A | 7.57% | 15 | `pop_bucket_score` | B | 1.78% |
+| 6 | `product_type_no` | C | 5.39% | 16 | `ui_cnt_pcode` | E | 1.68% |
+| 7 | `ui_days_since_item` | E | 4.15% | 17 | `ui_channel_gap` | E | 1.62% |
+| 8 | `item_cnt_1w` | C | 3.21% | 18 | `wals_dot` | B | 1.40% |
+| 9 | `colour_group_code` | C | 3.07% | 19 | `item_discount_ratio` | C | 1.19% |
+| 10 | `user_days_since_last_purchase` | D | 2.97% | 20 | `item_online_share_4w` | C | 1.06% |
+
+前 5 个合计 49.0%，前 20 个合计 85.1%；4 个 R6 特征合计约 19.0%。最后 10 个：
+
+| 名次 | 特征 | 组 | 占比 | 名次 | 特征 | 组 | 占比 |
+|---|---|---|---|---|---|---|---|
+| 62 | `ui_share_index_52w` | E | 0.0499% | 67 | `index_group_no` | C | 0.0040% |
+| 63 | `ui_share_pgroup_52w` | E | 0.0419% | 68 | `pop_is_fallback` | A | 0.0028% |
+| 64 | `product_group_name` | C | 0.0327% | 69 | `fashion_news_frequency` | D | 0.0017% |
+| 65 | `n_channels` | A | 0.0245% | 70 | `active` | D | 0.0013% |
+| 66 | `club_member_status` | D | 0.0045% | 71 | `fn` | D | 0.0008% |
+
+五组各自的占比：
+
+| 组 | 特征数 | 占比（四周平均） | 四周的范围 |
+|---|---|---|---|
+| A（召回来源） | 14 | 33.85% | 33.09–35.14% |
+| B（稠密分数） | 7 | 15.02% | 14.27–15.98% |
+| C（商品特征） | 17 | 24.22% | 23.82–24.68% |
+| D（用户特征） | 12 | 5.27% | 4.93–5.82% |
+| E（用户–商品交叉特征） | 21 | 21.64% | 21.23–22.68% |
+
+耗时和内存：1000 棵的 trial 每个 433–707 秒（训练 0.27–0.53 秒/棵，打分加评估 148–286 秒），真实峰值 2.63–3.84 GB；36 个 trial 中最大 3.84 GB。
+
 ---
 
 ## 10. T 阶段（T1–T4）
@@ -918,7 +1002,7 @@ V4 结束后、T1 之前，把 Ranker 配置写进 `configs/locks/ranker.lock.ya
 | M4 | D 阶段 union 检查（§5.7） | union recall 表 | **G2 达标**，否则回到 M2 / M3 | **完成**（4 周合并 25.24%，G2 达标；R3 按预先登记的规则改为只输出 `A(a)`） |
 | M5 | **冻结全部 recall 配置**（打 git tag） | `channels.lock.yaml`、`twotower.lock.yaml` | 之后不再修改 | **完成**（2026-11-17 写入锁定文件；锁定后在 D1 上重新生成候选、与记录逐位核对的结果，以及 tag，见 `docs/decisions.md`） |
 | M6 | 逐周生成 F1–T4 的候选和宽表特征（Two-Tower 沿训练链逐周推进） | `artifacts/candidates/`、`artifacts/features/` | 每周通过时间截断测试 | 12 周的候选（2026-11-17）和特征（2026-11-18）都已生成并通过检查；特征已锁定（`features.lock.yaml`，tag `lock-features-v1`）。待用户确认 |
-| M7 | Ranker 在 V1–V4 上滚动 HPO + baseline + 系统 ablation | `results/v_phase.csv` | `ranker.lock.yaml`；**G1、G3 在 V 上达标** | 代码和测试已写（2026-11-18，§9.7）；选择规则已写进 `configs/hpo/v_phase.yaml`。测速已完成（2026-11-18，§9.7）：选定 row-wise，默认配置 300 棵在 V1 上 MAP@12 0.0297（RRF baseline 0.0185）。树的上限改为 1000。**第 1 步已完成**（2026-11-18，24 个 trial，结果在 `results/v_phase*.csv`，记录见 `docs/decisions.md`）：按规则保留默认配置（31 叶、`min_data_in_leaf` 500、r = 40），k = 500，V1–V4 合并 MAP@12 **0.032713**；五个候选在各自的 k 上都低于默认（−0.21% 到 −0.56%）。RRF baseline 合并 0.019419（四周 0.018511 / 0.019064 / 0.020604 / 0.019662）。**G1 目前达标**，但只高出 0.032 约 2.2%，而且 V 上的分数偏乐观（k 和参数就是在这四周上选的），所以 T 上是否达标现在不能确定；**G3 目前达标**（4 周都高于 baseline）。下一步：第 2 步（r = 60、80，各 4 周）；选中的不是 80 且赢家的 k 不是 1000 时，继续做去掉 R6 的 ablation 和 feature importance。`ranker.lock.yaml` 还没有写 |
+| M7 | Ranker 在 V1–V4 上滚动 HPO + baseline + 系统 ablation | `results/v_phase.csv` | `ranker.lock.yaml`；**G1、G3 在 V 上达标** | 代码和测试已写（2026-11-18，§9.7）；选择规则已写进 `configs/hpo/v_phase.yaml`。测速已完成（2026-11-18，§9.7）：选定 row-wise，默认配置 300 棵在 V1 上 MAP@12 0.0297（RRF baseline 0.0185）。树的上限改为 1000。**第 1 步已完成**（2026-11-18，24 个 trial，结果在 `results/v_phase*.csv`，记录见 `docs/decisions.md`）：按规则保留默认配置（31 叶、`min_data_in_leaf` 500、r = 40），k = 500，V1–V4 合并 MAP@12 **0.032713**；五个候选在各自的 k 上都低于默认（−0.21% 到 −0.56%）。RRF baseline 合并 0.019419（四周 0.018511 / 0.019064 / 0.020604 / 0.019662）。**G1 目前达标**，但只高出 0.032 约 2.2%，而且 V 上的分数偏乐观（k 和参数就是在这四周上选的），所以 T 上是否达标现在不能确定；**G3 目前达标**（4 周都高于 baseline）。**第 2 步、去掉 R6 和 feature importance 已完成**（2026-11-18，§9.7 末尾）：r = 60、80 都没有通过规则，保留 r = 40；去掉 R6 后合并 MAP@12 降到 0.031193（−4.64%）。**最终配置已锁定**（`configs/locks/ranker.lock.yaml`，§9.6）：31 叶、`min_data_in_leaf` 500、r = 40、500 棵。**完成，待用户确认并打 tag**。V 上的余量只有 2.2%，T 上有可能低于 0.032 |
 | M8 | T1–T4 最终评估 | 最终报告 | 报告 G1–G3 | |
 
 M2 中计算量小的 R1–R3 可以和 M3 的 Two-Tower 训练同时跑；R4 建图和 R5 拟合不要和 Two-Tower 同时跑。
@@ -1004,7 +1088,7 @@ hm-recsys/
 │   ├── memory.py                # 内存监控：分阶段的采样峰值（下限）和整个进程的真实峰值（ru_maxrss）
 │   ├── threads.py               # 在 import polars 之前按 base.yaml 设置 POLARS_MAX_THREADS（只依赖标准库和 yaml）
 │   ├── vectors.py               # 用户 / 商品向量（WALS、Two-Tower 共用）：按 (customer_idx, article_idx) 批量点积、保存 / 读取
-│   ├── locks.py                 # 读取并校验 configs/locks/ 的锁定文件；文件 sha256 核对（底层，recall / features 都可以用）
+│   ├── locks.py                 # 读取并校验 configs/locks/ 的锁定文件；文件 sha256 核对（底层，recall / features / ranker 都可以用）
 │   ├── csv_records.py           # 只追加、表头固定的结果表（results/*.csv）的读写
 │   ├── feature_files.py         # 每个 fold 特征文件的记录（features.json：各 part 的 sha256、行数、列清单）和核对；M7 读特征前调用
 │   ├── git_state.py             # HEAD commit 和工作区是否干净（结果记录里的 git_commit / git_dirty）；不依赖 torch
@@ -1066,7 +1150,9 @@ hm-recsys/
 │   │   ├── dataset.py           # lgb.Sequence 流式读取，构建 LightGBM Dataset，存成 binary 并核对
 │   │   ├── train.py             # LightGBM 参数、直方图方式的规则、确定性训练、模型文件
 │   │   ├── runtime.py           # 本进程实际用到的 LightGBM 版本和 libomp 的路径、版本；两份 OpenMP 时报错
-│   │   └── predict.py           # "k 棵树时的分数"（分段累加）、Top-12 和 tie-break
+│   │   ├── predict.py           # "k 棵树时的分数"（分段累加）、Top-12 和 tie-break
+│   │   ├── identity.py          # model_config 和 12 位的 config_id（V 阶段的 trial 和锁定入口共用）
+│   │   └── locked.py            # 锁定之后取 Ranker 配置的唯一入口（M8 用）；核对 config_id、引用的锁定文件、运行环境
 │   │
 │   ├── eval/
 │   │   ├── metrics.py           # Recall@K、AP@12、NDCG@K、union recall
@@ -1087,7 +1173,8 @@ hm-recsys/
 │       ├── v_records.py         # M7：V 阶段的三张结果表（trial、指标、步骤）；合并分数
 │       ├── v_trial.py           # M7：一个 trial（训练 + 全量打分 + 评估）；Dataset 的计划；RRF baseline
 │       ├── v_phase.py           # M7：读 v_phase.yaml；先定 k 再比参数；逐步启动各进程（可续跑）；−R6、importance
-│       └── speed_test.py        # M7：网格之前的测速；直方图方式的选择；低于 RRF baseline 时停下
+│       ├── speed_test.py        # M7：网格之前的测速；直方图方式的选择；低于 RRF baseline 时停下
+│       └── v_lock.py            # M7：在结果表上重放选择，逐项核对 ranker.lock.yaml（只是核对，不是配置的来源）
 │
 ├── scripts/                     # 命令行入口，只做"读参数 → 调用 src → 写结果"
 │   ├── m0_preprocess.py
@@ -1195,7 +1282,7 @@ scripts/  →  src/hmrec/{recall, fusion, features, ranker, hpo, pipeline}  → 
 - `fusion/` 不在上一条的限制里：`features/` 和 `ranker/` 都可以 import `fusion/`，`fusion/` 不 import 这三者。宽表、−R6 的重算和 RRF baseline 因此用同一组表达式。
 - `git_state.py`（HEAD commit、工作区是否干净）属于底层，只依赖标准库和 `logging_utils.py`。
 - M7 的代码（`ranker/`、`hpo/v_*.py`、`hpo/speed_test.py`、`eval/ranker_eval.py`、`scripts/m7_*.py`）不能 import torch，也不能 import 会加载 torch 的模块（`recall/`、`hpo/runner.py`）：torch 和 LightGBM 的两份 OpenMP 运行库不能在同一个进程里（§9.7）。
-- `locks.py` 属于底层（只依赖 `config.py` 和标准库）：它只读取、校验 `configs/locks/` 的锁定文件。`recall/` 和 `features/` 都可以 import 它（特征需要某一路的锁定参数时从这里取，不经过 `recall/`）。从锁定文件**构建** channel 在 `recall/locked.py`。
+- `locks.py` 属于底层（只依赖 `config.py` 和标准库）：它只读取、校验 `configs/locks/` 的锁定文件。`recall/` 和 `features/` 都可以 import 它（特征需要某一路的锁定参数时从这里取，不经过 `recall/`）。`ranker/` 也可以 import 它。从锁定文件**构建** channel 在 `recall/locked.py`；**构建 Ranker 的配置**在 `ranker/locked.py`（M8 取 Ranker 配置的唯一入口，§9.6）。`ranker/identity.py`（`model_config` 和 `config_id`）在 `ranker/` 里，`hpo/` 从它那里 import，因为 `ranker/` 不能 import `hpo/`。
 - `csv_records.py`（只追加、表头固定的结果表的读写）和 `run_records.py`（每个进程一行的运行记录：耗时、采样峰值、真实峰值）属于底层，只依赖标准库和 `memory.py`。
 - `feature_files.py`（特征文件的记录和核对）属于底层，只依赖标准库、polars 和 `locks.py`：`features/` 写记录，`ranker/` 核对，两者互不 import。
 - `pipeline.py`（一个 fold 的各步各用一个独立进程依次运行；每个 fold 的摘要）属于上层，与 `recall/`、`hpo/` 同层：它可以 import `eval/` 和底层模块，`recall/`、`features/`、`ranker/` 不能 import 它。
