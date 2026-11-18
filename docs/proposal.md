@@ -1,233 +1,233 @@
-# H&M 个性化时尚推荐系统 — 项目方案 v0.1.2
+# H&M Personalized Fashion Recommendation System — Project Proposal v0.1.2
 
-> 日期：2026-11-15（v0.1.1：O1–O5 已决定，新增 §14 目录结构、§15 代码规范）
-> v0.1.2（2026-11-15，根据项目骨架和工具链迁移的结果）：§1.2 / §15 改为 Python 3.12 + uv（`uv.lock` 锁定依赖）+ Pyright；§1.3 注明内存峰值是采样值；§2.1 写入预计算 embedding 的实测事实；§4.2 明确"更好"指严格更好；§5 R6 说明缺图像向量的商品用 mask；§8.3 规定 `img_sim_hist` / `txt_sim_hist` 何时为 NaN；§14 更新 `data/` 目录树。
-> 状态：重新开始的第一版方案。旧项目的结果只作为参考数字，不沿用任何旧代码、旧配置或旧结论。
-> 系统结构：**6 路 recall → 候选合并去重（union + dedup）→ 1 个 LightGBM LambdaMART ranker → Top-12**
-> 原则：**能少跑就少跑**。每路只做 1–2 个 ablation 加一个小的 HPO 网格。一次只改一个因素（one-factor-at-a-time, OAT），不做全组合。
+> Date: 2026-11-15 (v0.1.1: O1–O5 decided; §14 directory structure and §15 code conventions added)
+> v0.1.2 (2026-11-15, from the outcome of the project skeleton and the toolchain migration): §1.2 / §15 changed to Python 3.12 + uv (dependencies locked by `uv.lock`) + Pyright; §1.3 notes that memory peaks are sampled values; §2.1 records the measured facts about the precomputed embeddings; §4.2 states that "better" means strictly better; §5 R6 explains that articles without an image embedding use a mask; §8.3 specifies when `img_sim_hist` / `txt_sim_hist` are NaN; §14 updates the `data/` directory tree.
+> Status: the first version of the plan after starting over. Results of the old project serve only as reference numbers; no old code, configuration or conclusion is carried over.
+> System structure: **6 recall channels → candidate union + dedup → 1 LightGBM LambdaMART ranker → Top-12**
+> Principle: **run as little as possible**. Each channel gets only 1–2 ablations plus a small HPO grid. One factor is changed at a time (one-factor-at-a-time, OAT); no full factorial.
 
 ---
 
-## 0. 一页总结
+## 0. One-page summary
 
-### 0.1 目标
+### 0.1 Goals
 
-| 编号 | 指标 | 目标 | 在哪里检查 |
+| ID | Metric | Target | Where it is checked |
 |---|---|---|---|
-| G1 | 端到端 macro **MAP@12**（LambdaMART） | **≥ 0.032**（最低目标） | V1–V4 选模型，T1–T4 最终报告 |
-| G2 | 6 路合并后的 macro **union recall** | **≥ 24%**（D1–D4 实测 **25.24%**，M5 锁定的配置；见下表说明） | D1–D4（锁定 recall 前）和 F/V/T 每周 |
-| G3 | LambdaMART 优于 RRF baseline | 4 周中至少 3 周 MAP@12 更高 | V1–V4、T1–T4 |
+| G1 | End-to-end macro **MAP@12** (LambdaMART) | **≥ 0.032** (minimum target) | V1–V4 select the model, T1–T4 give the final report |
+| G2 | Macro **union recall** of the 6 channels merged | **≥ 24%** (measured on D1–D4: **25.24%**, the configuration locked at M5; see the note below the next table) | D1–D4 (before recall is locked) and every week of F/V/T |
+| G3 | LambdaMART better than the RRF baseline | MAP@12 higher in at least 3 of the 4 weeks | V1–V4, T1–T4 |
 
-各路 Recall@quota 的参考值（来自旧项目，**存疑，只作为 sanity check，不作为验收标准**）：
+Reference values of Recall@quota per channel (from the old project, **doubtful; used only as a sanity check, not as acceptance criteria**):
 
-| Channel | Quota | 参考 Recall@quota | D 阶段实测（M5 锁定的配置，D1–D4 四周合并） |
+| Channel | Quota | Reference Recall@quota | Measured in the D phase (the configuration locked at M5, the four weeks D1–D4 pooled) |
 |---|---|---|---|
 | R1 Popularity | 100 | ~7% | **7.39%** |
 | R2 Repurchase | ≤30 | ~4% | **4.27%** |
-| R3 Sibling | ≤50 | ~3.6% | **3.24%**（只输出 `A(a)`；切换前 3.26%） |
+| R3 Sibling | ≤50 | ~3.6% | **3.24%** (outputs only `A(a)`; 3.26% before the switch) |
 | R4 ItemCF | 100 | ~8% | **9.33%** |
 | R5 WALS | 100 | ~10% | **10.81%** |
-| R6 Two-Tower | 100 | ~10% | **14.63%**（训练链，每周先预测后 fine-tune；不更新的 base 为 11.84%） |
+| R6 Two-Tower | 100 | ~10% | **14.63%** (training chain, each week predicted first and fine-tuned afterwards; 11.84% for the base without updates) |
 
-实测列来自 `configs/locks/` 中每一路记录的 trial（`results/d_phase.csv`，R3 为 `results/m4_trials.csv`）。**D 阶段的分数偏乐观**（配置就是在这 4 周上选出来的，见 §12 第 4 条），只用来和参考值对照，不代表 F / V / T 周的表现。没有哪一路比参考值低一半以上。
+The measured column comes from the trial recorded for each channel in `configs/locks/` (`results/d_phase.csv`; for R3, `results/m4_trials.csv`). **The D-phase scores are optimistically biased** (the configurations were selected on these very 4 weeks, see §12 item 4); they serve only for comparison with the reference values and do not represent performance on the F / V / T weeks. No channel is more than half below its reference value.
 
-如果某一路实测结果比参考值低一半以上，先排查 bug（时间截断、ID 映射、去重），再讨论模型本身。
+If the measured result of a channel is more than half below its reference value, first look for bugs (time cut-off, ID mapping, deduplication), and only then discuss the model itself.
 
-### 0.2 时间安排
+### 0.2 Schedule
 
-| 阶段 | 周 | 日期（2020，含首尾） | 做什么 | 在这里被选择的东西 |
+| Phase | Weeks | Dates (2020, inclusive) | What happens | What is selected here |
 |---|---|---|---|---|
-| Base | — | 2019-12-03 – 06-02 | Two-Tower base model 训练 | — |
-| **D** | D1–D4 | 06-03 – 06-30 | 6 路 recall 的 **ablation + HPO**，然后冻结全部 recall 配置 | R1–R6 超参数 |
-| **F** | F1–F4 | 07-01 – 07-28 | 用冻结配置生成候选，作为 **Ranker 训练数据** | 不选任何东西 |
-| **V** | V1–V4 | 07-29 – 08-25 | Ranker **滚动重训 + HPO**，系统级 ablation | Ranker 超参数 |
-| **T** | T1–T4 | 08-26 – 09-22 | 全部锁定，最终评估 | 不选任何东西 |
+| Base | — | 2019-12-03 – 06-02 | Training of the Two-Tower base model | — |
+| **D** | D1–D4 | 06-03 – 06-30 | **Ablation + HPO** of the 6 recall channels, then all recall configurations are frozen | Hyperparameters of R1–R6 |
+| **F** | F1–F4 | 07-01 – 07-28 | Candidates generated with the frozen configuration, as **ranker training data** | Nothing |
+| **V** | V1–V4 | 07-29 – 08-25 | **Rolling retraining + HPO** of the ranker, system-level ablation | Hyperparameters of the ranker |
+| **T** | T1–T4 | 08-26 – 09-22 | Everything locked, final evaluation | Nothing |
 
-### 0.3 三条铁律
+### 0.3 Three iron rules
 
-1. **每一周的预测只用 `t_dat < anchor` 的数据**。模型权重、统计量、特征都一样。
-2. **每个阶段只选它该选的东西**：D 选 recall，V 选 Ranker，F 和 T 只执行。
-3. **超参数（包括 epoch 数和 tree 数）在 4 周上一次选定，然后锁住**。之后每周只更新模型参数（权重或统计量），不再重新选。
+1. **Each week is predicted using only data with `t_dat < anchor`**. This holds for model weights, statistics and features alike.
+2. **Each phase selects only what it is meant to select**: D selects recall, V selects the ranker, F and T only execute.
+3. **Hyperparameters (including the number of epochs and the number of trees) are selected once over 4 weeks and then locked**. Afterwards only model parameters (weights or statistics) are updated each week; nothing is selected again.
 
 ---
 
-## 1. 实验环境与资源预算
+## 1. Experiment environment and resource budget
 
-### 1.1 硬件
+### 1.1 Hardware
 
-| 项目 | 规格 |
+| Item | Specification |
 |---|---|
-| 机器 | MacBook Pro，Apple **M1 Max**（10 核 CPU + 32 核 GPU） |
-| 项目可用 CPU | **6 核** |
-| 项目可用 GPU | **28 核**（PyTorch **MPS** 后端） |
-| 项目可用内存 | **12 GB 统一内存（unified memory），CPU 和 GPU 共用**（2026-11-18 之前是 8 GB，见 §1.3）。这是项目自己定的预算；本机的物理内存是 32 GB |
-| 云端 | 不使用。只有本机跑不了时才考虑 Colab |
+| Machine | MacBook Pro, Apple **M1 Max** (10 CPU cores + 32 GPU cores) |
+| CPU available to the project | **6 cores** |
+| GPU available to the project | **28 cores** (PyTorch **MPS** backend) |
+| Memory available to the project | **12 GB of unified memory, shared by CPU and GPU** (8 GB before 2026-11-18, see §1.3). This is a budget the project sets for itself; the machine has 32 GB of physical memory |
+| Cloud | Not used. Colab is considered only when something cannot run on this machine |
 
-### 1.2 软件约定
+### 1.2 Software conventions
 
-| 组件 | 设备 | 设置 |
+| Component | Device | Settings |
 |---|---|---|
-| 数据处理 | CPU | 只用 Polars（优先 lazy API / streaming），不用 pandas；中间结果一律存 Parquet |
-| R1–R4 | CPU | 向量化计算，按需分块 |
-| R5 WALS | CPU | `implicit` CPU 版，`num_threads=6`（GPU 版只支持 CUDA） |
-| R6 Two-Tower | **CPU** | PyTorch，`device="cpu"`（`configs/recall/r6_twotower.yaml` 的 `training.device`），`torch.set_num_threads(6)`，全部 float32。原计划用 MPS；真实模型的 200 步 benchmark 中 CPU 每步 30.4 ms、MPS 45.2 ms，不满足"MPS 快 1.3 倍以上才用 MPS"的规则，而且 CPU 结果可以逐位复现（`docs/decisions.md` 2026-11-17） |
-| Ranker | CPU | LightGBM，`num_threads=6` |
-| 随机种子 | 全部 | 每个配置固定 seed，写进 config |
-| Python 环境 | — | **Python 3.12**（`.python-version`），由 **uv** 管理（`.venv`）；依赖写在 `pyproject.toml`，精确版本由 **`uv.lock`** 锁定（进 git） |
-| 开发工具 | — | `ruff` 格式化和 lint；**Pyright**（`standard` 模式）类型检查；`pytest` 测试。与 §15 一致 |
+| Data processing | CPU | Polars only (lazy API / streaming preferred), no pandas; all intermediate results are stored as Parquet |
+| R1–R4 | CPU | Vectorized computation, chunked where needed |
+| R5 WALS | CPU | `implicit`, CPU version, `num_threads=6` (the GPU version supports CUDA only) |
+| R6 Two-Tower | **CPU** | PyTorch, `device="cpu"` (`training.device` in `configs/recall/r6_twotower.yaml`), `torch.set_num_threads(6)`, float32 throughout. The original plan was MPS; in the 200-step benchmark of the real model CPU takes 30.4 ms per step and MPS 45.2 ms, which does not satisfy the rule "use MPS only if it is more than 1.3 times faster", and CPU results are bit-reproducible (`docs/decisions.md` 2026-11-17) |
+| Ranker | CPU | LightGBM, `num_threads=6` |
+| Random seeds | all | A fixed seed for every configuration, written in the config |
+| Python environment | — | **Python 3.12** (`.python-version`), managed by **uv** (`.venv`); dependencies are written in `pyproject.toml`, and exact versions are locked by **`uv.lock`** (in git) |
+| Development tools | — | `ruff` for formatting and lint; **Pyright** (`standard` mode) for type checking; `pytest` for tests. Consistent with §15 |
 
-### 1.3 内存预算（12 GB）的约束和对策
+### 1.3 Constraints of the memory budget (12 GB) and how they are met
 
-内存是最主要的限制。预算是项目自己定的（§1.1；本机物理内存 32 GB），现在是 12 GB。**单个进程的真实峰值上限为 12 GB**（`configs/base.yaml` 的 `memory.limit_gb`），等于预算。**重任务一次只跑一个**，不并行。
+Memory is the main limitation. The budget is set by the project itself (§1.1; the machine has 32 GB of physical memory) and is now 12 GB. **The limit on the true peak of a single process is 12 GB** (`memory.limit_gb` in `configs/base.yaml`), equal to the budget. **Only one heavy task runs at a time**; nothing runs in parallel.
 
-上限只是警戒线：超过时进程在写完运行记录之后报错，让人来决定；它不参与任何计算，不影响结果和速度。**分块设置（`configs/base.yaml` 的 `chunking`、`configs/ranker.yaml` 的 `scoring_query_chunk_size` 等）不随上限放宽**，每个进程的真实峰值照常记录。到 2026-11-18 为止实测的最高真实峰值是 V2 特征生成的 7.25 GB。
+The limit is only an alert threshold: when it is exceeded, the process raises an error after writing its run record and a person decides; it takes part in no computation and affects neither results nor speed. **The chunk settings (`chunking` in `configs/base.yaml`, `scoring_query_chunk_size` in `configs/ranker.yaml` and so on) are not relaxed with the limit**, and the true peak of every process is recorded as usual. The highest true peak measured up to 2026-11-18 is the 7.25 GB of feature generation for V2.
 
-上限的变化（都在 2026-11-18，见 `docs/decisions.md`）：最初是"约 6 GB"；F1 特征生成的真实峰值是 6.10 GB，用户决定不改代码，把上限调到 7 GB（"留 1 GB 余量"）；随后 V1 的真实峰值是 7.002 GB，而本机物理内存是 32 GB，"留余量防止交换"的理由不成立，上限改为等于当时预算的 8 GB；M7 第 1 步之后、第 2 步之前，预算和上限一起改为 12 GB。下表、表下说明和后面各节中写于此前的"6 GB 上限""6 GB 以内""8 GB"指当时的上限，作为记录保留，没有改写。
+Changes of the limit (all on 2026-11-18, see `docs/decisions.md`): at first it was "about 6 GB"; the true peak of F1 feature generation was 6.10 GB, and the user decided not to change the code and raised the limit to 7 GB ("leave 1 GB of headroom"); then the true peak of V1 was 7.002 GB while the machine has 32 GB of physical memory, so the reason "leave headroom to prevent swapping" did not hold, and the limit was set equal to the budget of the time, 8 GB; after M7 step 1 and before step 2, the budget and the limit were both changed to 12 GB. The "6 GB limit", "within 6 GB" and "8 GB" written earlier in the table below, in the notes below the table and in later sections refer to the limit of their time and are kept as a record, not rewritten.
 
-| 任务 | 估算内存 | 实测 | 对策 |
+| Task | Estimated memory | Measured | How it is handled |
 |---|---|---|---|
-| 交易表常驻内存 | ~0.5 GB | **0.44 GB**（454.7 MB，31,788,324 行；Parquet 文件 160 MB） | ID 全部映射成 int32；日期存 int16（距起始日天数）；price 用 float32；channel 用 int8 |
-| M0 预处理（CSV 流式转 Parquet、对齐 embedding） | — | **峰值 2.25 GB**（其中交易表一步峰值 2.10 GB）；全程约 6 秒 | Polars lazy 扫描 + streaming `sink_parquet`；字符串 ID 先换成 int32 再排序 |
-| M0 query / label 生成（16 个 fold） | — | **峰值 0.36 GB**（MemoryTracker 采样；`/usr/bin/time` 最大 RSS 0.38 GB）；16 个 fold 共约 1.9 秒（每个 fold 约 0.1 秒） | 每个 fold 只读 label 周的两列（`customer_idx, article_idx`）；每周约 6.9 万–12.0 万个 query，约 21 万–49 万条 label |
-| R1–R3 候选生成（D1，默认配置） | — | **整体峰值 1.77 GB**（`/usr/bin/time` 最大 RSS，整个脚本：读 queries / labels、算活跃池、跑 3 路、评估）；耗时 R1 0.6 秒、R2 0.2 秒、R3 0.5 秒，全程 2.2 秒。单个 channel 的运行时间短于 0.5 秒的采样间隔，**单路峰值不可靠**，不单独列出 | 每路只读需要的列；R2 / R3 的历史先按 query 用户 semi-join |
-| R4 ItemCF 共现矩阵（365 天） | 不分块可能远超 8 GB | **D1（CF3，α=0.7）：整体峰值 2.95 GB**（`/usr/bin/time` 最大 RSS，含读数据；MemoryTracker 采样 2.62 GB）；耗时 17.2 秒（建图 + 邻居 15.5 秒，打分 1.8 秒）。图规模：1,540 万条购买行 → 1,325 万个 (用户, 商品) 对，98.8 万用户，7.2 万商品，`Σ d_u²` ≈ 5.1 亿；28,110 个 seed，分 15 块。**D 阶段（D1–D4 四周，9 个配置）：最重的 trial 峰值 4.76 GB**（MemoryTracker 采样，整个进程，含已加载的 4 周数据；配置 seed 窗口 365 天、衰减关，4 周共 115 秒）；seed 窗口越长，要算邻居的 seed 越多，峰值越高（其余 trial 3.9–4.6 GB） | **按 seed item 分块**，每块算完只保留 Top-`K_n` 邻居就释放。D 阶段每块 2,000 个 item；4.76 GB 离 6 GB 上限太近，所以 **M5 把 `chunking.item_chunk_size` 从 2000 改为 1000**（分块只影响内存和速度，不影响结果：分块和不分块的 `C_w` 逐位相同，有测试）。**新分块（1000）实测**（M5 锁定的配置：seed 窗口 365 天、衰减开；D1）：generate 25.8 秒，真实峰值 generate 结束时 3.72 GB、整个进程 4.20 GB；候选文件与分块 2000 时生成的文件逐字节相同（见表下"M5 锁定配置在 D1 上的单路实测"） |
-| R5 WALS（180 天） | ~0.5–1 GB | **D1（W2，默认配置）：整体峰值 3.10 GB**（`/usr/bin/time` 最大 RSS；MemoryTracker 采样：拟合 0.96 GB，打分 2.11 GB）；耗时 63.8 秒（拟合 53.0 秒，打分 10.8 秒）。矩阵 71.1 万用户 × 5.2 万商品，590 万个非零值。**峰值来自打分**而不是拟合：打分按 `chunking.dense_score_query_chunk_size` = 5,000 个 query 分块，每块 5,000 × 20,764 个活跃商品的 float32 分数矩阵约 0.41 GB，再加 `np.partition` 的副本（分块为 1 万时整体峰值 4.05 GB；两种分块的 Recall@100 都是 11.36%，候选行数相同）。当前 `implicit` 的 macOS wheel 没有链接 OpenMP，拟合实际是**单线程**（`num_threads=6` 不起作用） | 稀疏 CSR，没问题 |
-| R6 Two-Tower 训练 | ~1.5–2 GB | **训练数组生成（base 窗口，2026-11-17）：峰值 4.70 GB**（取较保守的值：两次运行 MemoryTracker 采样分别为 3.35 GB 和 4.70 GB，任务只有约 4.5 秒，0.5 秒的采样间隔误差大；`/usr/bin/time` 最大 RSS 4.15 GB，含读数据），耗时 4.6 秒；616 万个样本，数组共 670 MB（`history` int32 470 MB、`history_mask` 118 MB）。**200 步 benchmark（占位模型，batch 512）**：MPS 进程最大 RSS 2.00 GB，MPS 张量占用 1.17 GB（驱动共持有 2.02 GB，统一内存，与 RSS 部分重叠）；CPU 进程最大 RSS 2.34 GB。真实模型（训练全程）待测 | 用户历史预先存成 int32 数组 `[N, 20]`；商品特征表（~10.5 万 × 896 维，约 380 MB）整块放进 MPS 显存；batch 直接按下标取，不用 DataLoader |
-| 候选生成（每周） | 合并前最多约 3,940 万行，全部放在内存约 0.73 GB（D3 约 1.07 GB）；单个 channel 最多约 0.15 GB；合并去重后约 **2,520 万行**（每个 query 平均 307 个；计算见表下 ①） | **M4 实测（D1–D4，2026-11-17，M5 锁定的配置，即 R3 只输出 `A(a)`）**：合并前 D1 3,219 万行、D3 4,947 万行（只保留 `query_id`、`article_idx`、`rank` 三列时约 0.36 / 0.55 GB）；去重后每个 query 平均 **307** 个候选（P50 320，P90 364；上限 480），D1 约 2,440 万行、D3 约 3,661 万行。R3 切换之前：平均 313（P50 327，P90 373），合并前 D1 3,268 万行、D3 5,015 万行。**内存**：第一次 M4 union 检查（四周一起处理）整个进程的真实峰值 6.66 GB（`/usr/bin/time`；0.5 秒采样只看到 5.22 GB），超过 6 GB；改为一次只处理一个 fold 后（R3 切换后的重跑）降到 **4.78 GB**（来源：`/usr/bin/time -l` 的终端输出，**没有写入运行日志**；日志里采样到的最大值是 4.72 GB）。**这个 4.78 GB 不包含 R6 现场预测**：那次运行 R1、R2、R4、R5、R6 的候选都从已有文件读回，只有 R3 是现场生成的。**单路的真实峰值**（每路一个进程，含 R6 现场预测）已在 M5 的 D1 核对中测得，见表下"M5 锁定配置在 D1 上的单路实测"：最高是 R4 的 4.20 GB。**M6 实测（F1–T4 共 12 周，2026-11-17，`results/m6_runs.csv`）**：每个 (fold, channel) 一个进程，所以不存在"六路在一个进程里"的峰值；12 周中任何进程的真实峰值最高 **4.70 GB**（F2 的 R6，含预测、全部商品向量和这一周的 fine-tune），各路范围：R1 1.9–2.1、R2 0.9–1.1、R3 1.0–1.1、R4 3.8–4.3、R5 3.6–4.2、R6 4.3–4.7 GB。监控进程（读回六路候选、统计去重后的候选数；F、V 周另算 recall）最高 2.12 GB。每周去重后的候选数平均 304–310（P50 317–324，P90 359–364），与 D 阶段的 307 一致。合并成宽表（`fusion/union.py`）的峰值留到 M6 后半 | 每个 channel 单独写 Parquet，再按 query 分块合并去重 |
-| 特征宽表（每周，§8） | 一周全放进内存约 **6.9 GB**（2,520 万行 × 292 B），不可行；按 1 万 query 分块后每块约 **0.83 GB**，P90 的块约 0.99 GB（计算见表下 ④）。12 周（F、V、T）的特征 Parquet 未压缩约 **77 GB**，压缩后估计 23–46 GB（计算见表下 ⑤）。以上按 71 个特征计（2026-11-17 从 56 个增加到 71 个） | **F1 实测（2026-11-18，`results/m6_runs.csv`）**：85,648 个 query，26,373,844 行，9 个 part 文件；耗时 61 秒（每 fold 的三类表 3.5 秒，`tt_sim_*` 一步 6.0 秒）。**真实峰值 6.10 GB，超过 6 GB 上限 0.10 GB**（采样 5.76 GB；与 `/usr/bin/time -l` 一致）。每个分块结束时的 RSS 从 3.80 GB 逐块升到 4.95 GB，即块与块之间内存没有完全释放；整周的六路候选和每 fold 的三类表在整个进程中常驻内存，各占多少没有分开测。文件已完整写出并通过全部检查；用户决定代码保持不变（`docs/decisions.md` 2026-11-18）。磁盘 **1.67 GB**（每个 part 约 209 MB），见表下 ⑤。**12 周实测（F1–T4，2026-11-18，`results/m6_runs.csv`）**：共 281,750,956 行（每周 2,098 万–2,637 万），每周 7–9 个 part 文件；每周耗时 48–61 秒，12 周合计约 11 分钟；真实峰值 **6.10–7.25 GB**（最高是 V2 的 7.25 GB），与行数无关（行数最多的 F1 峰值最低），在 8 GB 上限之内；磁盘合计 **17.8 GB**。特征生成的代码自 F1 起没有改动 | **按 query 分块计算**（每块 1 万个 query），每块算完直接写成一个 Parquet row group / part 文件，不在内存中保留整周 |
-| Ranker 训练（4 周） | 负采样 1:40 约 1,100 万行，1:80 约 2,170 万行（上限）；原始 float32 特征约 2.9–5.7 GB，分箱后约 0.7–1.4 GB（计算见表下 ②；71 个特征） | **行数实测（2026-11-18，只读统计，见 §9.1）**：4 周窗口 r = 40 为 1,045 万–1,071 万行，r = 60 为 1,530 万–1,569 万行，r = 80 为 1,976 万–2,028 万行，每个窗口约 15 万个 query。**测速实测（2026-11-18，V1 的窗口 F1–F4，r = 40，1,071 万行，154,815 个 query；`results/m7_speed_test.csv`、`results/m7_runs.csv`）**：采样每个 fold 21–24 秒（一次写出 r = 40 / 60 / 80），真实峰值 3.92–4.13 GB，4 个 fold 的采样文件共 4.0 GB（r = 40 每行约 91 B）；构建 Dataset 6.6 秒，真实峰值 2.00 GB，binary 644 MB；训练 50 棵（不评估）col-wise 0.682 秒/棵、峰值 1.47 GB，row-wise 0.368 秒/棵、峰值 1.99 GB；row-wise 训练 300 棵共 103.5 秒（0.342 秒/棵，每 100 棵依次 37.5、34.8、31.2 秒） | **流式加载（stream loading）**：每周特征按 row group 存 Parquet，用 LightGBM 的 `lgb.Sequence` 分批读入构建 `Dataset`，原始特征不必一次性放进内存；构建后的分箱数据（每个值 1 字节）约 0.5–1 GB，存成 LightGBM binary 文件复用 |
-| Ranker 推理（每周，不采样） | 一次全放进内存约 **6.7 GB**；按 1 万 query 分块后每块约 **0.81 GB**，P90 的块约 0.96 GB（计算见表下 ③；71 个特征） | **测速实测（2026-11-18，V1，2,523 万行 × 300 棵、31 叶，一个 part 一次打分）**：打分加评估 86.4 秒，每个 part（约 305 万行）约 10 秒；整个 trial（训练加打分）的真实峰值 **5.69 GB**，出在打分阶段（训练本身约 2 GB）。之后打分改为每 2,500 个 query 一块（见右栏），新的峰值待第 1 步网格实测 | **按 query 分块打分**：一个 part 文件（1 万个 query）读入后，再按 2,500 个 query 一块打分（`configs/ranker.yaml` 的 `scoring_query_chunk_size`；2026-11-18 测速后从"一个 part 一块"改小）。只影响内存：一行的分数与同一块里的其他行无关，query 不会被切开，测试确认分数和 Top-12 逐位相同 |
+| Transaction table held in memory | ~0.5 GB | **0.44 GB** (454.7 MB, 31,788,324 rows; the Parquet file is 160 MB) | All IDs mapped to int32; dates stored as int16 (days since the first day); price as float32; channel as int8 |
+| M0 preprocessing (streaming CSV to Parquet, aligning the embeddings) | — | **Peak 2.25 GB** (of which the transaction-table step peaks at 2.10 GB); about 6 seconds overall | Polars lazy scan + streaming `sink_parquet`; string IDs are converted to int32 before sorting |
+| M0 query / label generation (16 folds) | — | **Peak 0.36 GB** (sampled by MemoryTracker; maximum RSS from `/usr/bin/time`: 0.38 GB); about 1.9 seconds for the 16 folds (about 0.1 seconds per fold) | Each fold reads only two columns of the label week (`customer_idx, article_idx`); about 69,000–120,000 queries and about 210,000–490,000 labels per week |
+| Candidate generation of R1–R3 (D1, default configuration) | — | **Overall peak 1.77 GB** (maximum RSS from `/usr/bin/time`, the whole script: reading queries / labels, computing the active pool, running 3 channels, evaluating); run time R1 0.6 seconds, R2 0.2 seconds, R3 0.5 seconds, 2.2 seconds overall. A single channel runs for less than the 0.5-second sampling interval, so **single-channel peaks are not reliable** and are not listed separately | Each channel reads only the columns it needs; the histories of R2 / R3 are first semi-joined on the query users |
+| R4 ItemCF co-occurrence matrix (365 days) | Possibly far above 8 GB without chunking | **D1 (CF3, α=0.7): overall peak 2.95 GB** (maximum RSS from `/usr/bin/time`, including reading the data; 2.62 GB sampled by MemoryTracker); run time 17.2 seconds (building the graph + neighbours 15.5 seconds, scoring 1.8 seconds). Size of the graph: 15.4 million purchase lines → 13.25 million (user, article) pairs, 988,000 users, 72,000 articles, `Σ d_u²` ≈ 510 million; 28,110 seeds in 15 chunks. **D phase (the four weeks D1–D4, 9 configurations): the heaviest trial peaks at 4.76 GB** (sampled by MemoryTracker, the whole process, including the loaded data of 4 weeks; the configuration with a 365-day seed window and decay off, 115 seconds for the 4 weeks); the longer the seed window, the more seeds need neighbours and the higher the peak (3.9–4.6 GB for the other trials) | **Chunked by seed item**: each chunk keeps only the Top-`K_n` neighbours when done and is then released. The D phase used 2,000 items per chunk; 4.76 GB is too close to the 6 GB limit, so **M5 changed `chunking.item_chunk_size` from 2000 to 1000** (chunking affects only memory and speed, not results: chunked and unchunked `C_w` are bit-identical, tested). **Measured with the new chunk size (1000)** (the configuration locked at M5: 365-day seed window, decay on; D1): generate 25.8 seconds, true peak 3.72 GB at the end of generate and 4.20 GB for the whole process; the candidate file is byte-identical to the file generated with a chunk size of 2000 (see "Single-channel measurements of the M5 locked configuration on D1" below the table) |
+| R5 WALS (180 days) | ~0.5–1 GB | **D1 (W2, default configuration): overall peak 3.10 GB** (maximum RSS from `/usr/bin/time`; sampled by MemoryTracker: fit 0.96 GB, scoring 2.11 GB); run time 63.8 seconds (fit 53.0 seconds, scoring 10.8 seconds). Matrix of 711,000 users × 52,000 articles with 5.9 million non-zero values. **The peak comes from scoring**, not from the fit: scoring is chunked by `chunking.dense_score_query_chunk_size` = 5,000 queries, and each chunk has a float32 score matrix of 5,000 × 20,764 active articles, about 0.41 GB, plus the copy made by `np.partition` (with a chunk of 10,000 the overall peak is 4.05 GB; Recall@100 is 11.36% with both chunk sizes, with the same number of candidate rows). The current macOS wheel of `implicit` is not linked against OpenMP, so the fit is in fact **single-threaded** (`num_threads=6` has no effect) | Sparse CSR; no problem |
+| R6 Two-Tower training | ~1.5–2 GB | **Generating the training arrays (base window, 2026-11-17): peak 4.70 GB** (the more conservative value: two runs were sampled by MemoryTracker at 3.35 GB and 4.70 GB, and the task lasts only about 4.5 seconds, so the 0.5-second sampling interval has a large error; maximum RSS from `/usr/bin/time`: 4.15 GB, including reading the data), run time 4.6 seconds; 6.16 million samples, arrays of 670 MB in total (`history` int32 470 MB, `history_mask` 118 MB). **200-step benchmark (placeholder model, batch 512)**: maximum RSS of the MPS process 2.00 GB, MPS tensors 1.17 GB (the driver holds 2.02 GB in total; unified memory, partly overlapping with RSS); maximum RSS of the CPU process 2.34 GB. The real model (a full training run) is still to be measured | User histories are stored in advance as an int32 array `[N, 20]`; the item feature table (~105,000 × 896 dimensions, about 380 MB) is put into MPS memory as a whole; a batch is fetched directly by index, without a DataLoader |
+| Candidate generation (per week) | At most about 39.4 million rows before merging, about 0.73 GB if all are kept in memory (about 1.07 GB for D3); at most about 0.15 GB for a single channel; about **25.2 million rows** after merging and deduplication (307 per query on average; calculation in ① below the table) | **Measured at M4 (D1–D4, 2026-11-17, the configuration locked at M5, i.e. R3 outputs only `A(a)`)**: before merging, D1 has 32.19 million rows and D3 49.47 million rows (about 0.36 / 0.55 GB when only the three columns `query_id`, `article_idx`, `rank` are kept); after deduplication each query has **307** candidates on average (P50 320, P90 364; at most 480), D1 about 24.40 million rows and D3 about 36.61 million rows. Before the switch of R3: 313 on average (P50 327, P90 373), with 32.68 million rows for D1 and 50.15 million rows for D3 before merging. **Memory**: the true peak of the whole process in the first M4 union check (four weeks processed together) was 6.66 GB (`/usr/bin/time`; the 0.5-second sampling saw only 5.22 GB), above 6 GB; after changing to one fold at a time (the re-run after the switch of R3) it fell to **4.78 GB** (source: the terminal output of `/usr/bin/time -l`, **not written to the run log**; the largest value sampled in the log is 4.72 GB). **This 4.78 GB does not include on-the-spot prediction by R6**: in that run the candidates of R1, R2, R4, R5 and R6 were all read back from existing files, and only R3 was generated on the spot. **The true peak of a single channel** (one process per channel, including on-the-spot prediction by R6) was measured in the D1 check of M5, see "Single-channel measurements of the M5 locked configuration on D1" below the table: the highest is the 4.20 GB of R4. **Measured at M6 (the 12 weeks F1–T4, 2026-11-17, `results/m6_runs.csv`)**: one process per (fold, channel), so there is no "six channels in one process" peak; the highest true peak of any process over the 12 weeks is **4.70 GB** (R6 in F2, including prediction, all item vectors and the fine-tuning of that week); ranges per channel: R1 1.9–2.1, R2 0.9–1.1, R3 1.0–1.1, R4 3.8–4.3, R5 3.6–4.2, R6 4.3–4.7 GB. The monitoring process (reads back the candidates of the six channels and counts the deduplicated candidates; for F and V weeks also computes recall) peaks at 2.12 GB at most. The deduplicated candidates per week average 304–310 (P50 317–324, P90 359–364), in line with the 307 of the D phase. The peak of merging into the wide table (`fusion/union.py`) is left to the second half of M6 | Each channel writes its own Parquet, then the channels are merged and deduplicated in chunks of queries |
+| Wide feature table (per week, §8) | About **6.9 GB** for a whole week in memory (25.2 million rows × 292 B), which is not feasible; about **0.83 GB** per chunk of 10,000 queries, and about 0.99 GB for a P90 chunk (calculation in ④ below the table). The feature Parquet of 12 weeks (F, V, T) is about **77 GB** uncompressed, an estimated 23–46 GB compressed (calculation in ⑤ below the table). All of this is for 71 features (extended from 56 to 71 on 2026-11-17) | **Measured on F1 (2026-11-18, `results/m6_runs.csv`)**: 85,648 queries, 26,373,844 rows, 9 part files; run time 61 seconds (3.5 seconds for the three kinds of tables of the fold, 6.0 seconds for the `tt_sim_*` step). **True peak 6.10 GB, 0.10 GB above the 6 GB limit** (5.76 GB sampled; in agreement with `/usr/bin/time -l`). The RSS at the end of each chunk rises chunk by chunk from 3.80 GB to 4.95 GB, i.e. memory is not fully released between chunks; the candidates of the six channels for the whole week and the three kinds of tables of the fold stay in memory for the whole process, and how much each takes was not measured separately. The files were written completely and passed all checks; the user decided to leave the code unchanged (`docs/decisions.md` 2026-11-18). Disk **1.67 GB** (about 209 MB per part), see ⑤ below the table. **Measured on the 12 weeks (F1–T4, 2026-11-18, `results/m6_runs.csv`)**: 281,750,956 rows in total (20.98 million–26.37 million per week), 7–9 part files per week; run time 48–61 seconds per week, about 11 minutes for the 12 weeks together; true peak **6.10–7.25 GB** (highest: the 7.25 GB of V2), unrelated to the row count (F1, with the most rows, has the lowest peak), within the 8 GB limit; **17.8 GB** on disk in total. The feature-generation code has not changed since F1 | **Computed in chunks of queries** (10,000 queries per chunk); each chunk is written as one Parquet row group / part file as soon as it is computed, and the whole week is never held in memory |
+| Ranker training (4 weeks) | About 11 million rows with negative sampling at 1:40 and about 21.7 million rows at 1:80 (an upper bound); raw float32 features about 2.9–5.7 GB, about 0.7–1.4 GB after binning (calculation in ② below the table; 71 features) | **Measured rows (2026-11-18, a read-only count, see §9.1)**: for a 4-week window, 10.45 million–10.71 million rows at r = 40, 15.30 million–15.69 million rows at r = 60 and 19.76 million–20.28 million rows at r = 80, with about 150,000 queries per window. **Measured in the speed test (2026-11-18, the window F1–F4 of V1, r = 40, 10.71 million rows, 154,815 queries; `results/m7_speed_test.csv`, `results/m7_runs.csv`)**: sampling 21–24 seconds per fold (r = 40 / 60 / 80 written in one go), true peak 3.92–4.13 GB, the sample files of the 4 folds 4.0 GB in total (about 91 B per row at r = 40); building the Dataset 6.6 seconds, true peak 2.00 GB, binary 644 MB; training 50 trees (not evaluated): col-wise 0.682 seconds/tree with a peak of 1.47 GB, row-wise 0.368 seconds/tree with a peak of 1.99 GB; training 300 trees row-wise takes 103.5 seconds in total (0.342 seconds/tree; 37.5, 34.8 and 31.2 seconds for each successive 100 trees) | **Stream loading**: the features of each week are stored as Parquet by row group and read in batches through LightGBM's `lgb.Sequence` to build the `Dataset`, so the raw features never have to be in memory all at once; the binned data after construction (1 byte per value) take about 0.5–1 GB and are stored as a LightGBM binary file for reuse |
+| Ranker inference (per week, no sampling) | About **6.7 GB** all in memory at once; about **0.81 GB** per chunk of 10,000 queries, and about 0.96 GB for a P90 chunk (calculation in ③ below the table; 71 features) | **Measured in the speed test (2026-11-18, V1, 25.23 million rows × 300 trees, 31 leaves, one part scored at a time)**: scoring plus evaluation 86.4 seconds, about 10 seconds per part (about 3.05 million rows); the true peak of the whole trial (training plus scoring) is **5.69 GB**, occurring in the scoring stage (training itself takes about 2 GB). Afterwards scoring was changed to chunks of 2,500 queries (see the right column); the new peak is to be measured in the grid of step 1 | **Scored in chunks of queries**: after a part file (10,000 queries) is read in, it is scored in chunks of 2,500 queries (`scoring_query_chunk_size` in `configs/ranker.yaml`; made smaller than "one part per chunk" after the speed test of 2026-11-18). This affects memory only: the score of a row does not depend on the other rows of the chunk, a query is never split, and tests confirm that the scores and the Top-12 are bit-identical |
 
-**候选生成、Ranker 训练、Ranker 推理、特征宽表几行的估算过程**（2026-11-16 按实测 query 数重算；2026-11-17 按 M4 实测的候选数重算，同日 M5 锁定时再按 R3 切换后的候选数 307 重算；1 GB = 1024³ B）。共同输入：每周平均 **8.2 万** query（D3 最多 12.0 万；F、V、T 周 6.9–8.6 万），每个 query 平均约 **3.4** 个 label（去重后；F、V 周 3.2–3.6）；6 路 quota 合计 100 + 30 + 50 + 100 + 100 + 100 = **480**；合并去重后每个 query 平均 **307** 个候选，P50 320，P90 364（M4 在 D1–D4 上实测，M5 锁定的配置，即 R3 只输出 `A(a)`；R3 切换之前为 313 / 327 / 373，最初假设 250）；特征 **71** 个（最初 56 个，2026-11-17 增加 15 个，见 §8）。F、V、T 共 12 周的 query 数实测为 6.9–8.6 万，合计 **917,354**，平均 7.64 万。
+**How the rows candidate generation, ranker training, ranker inference and wide feature table were estimated** (recomputed on 2026-11-16 with the measured numbers of queries; recomputed on 2026-11-17 with the numbers of candidates measured at M4, and again the same day at the M5 lock with the 307 candidates after the switch of R3; 1 GB = 1024³ B). Common inputs: **82,000** queries per week on average (at most 120,000, in D3; 69,000–86,000 in the F, V and T weeks), about **3.4** labels per query on average (after deduplication; 3.2–3.6 in the F and V weeks); the quotas of the 6 channels add up to 100 + 30 + 50 + 100 + 100 + 100 = **480**; after merging and deduplication each query has **307** candidates on average, P50 320, P90 364 (measured at M4 on D1–D4, the configuration locked at M5, i.e. R3 outputs only `A(a)`; 313 / 327 / 373 before the switch of R3, and 250 assumed at first); **71** features (56 at first, 15 added on 2026-11-17, see §8). The measured queries of the 12 weeks F, V and T are 69,000–86,000 per week, **917,354** in total, 76,400 on average.
 
-- ① **候选生成**：合并前最多 8.2 万 × 480 ≈ 3,940 万行（D3：12.0 万 × 480 ≈ 5,760 万行）。每行约 20 B（`query_id`、`article_idx`、`rank` 各 int32 4 B，`score` float32 4 B，`channel` 用 Categorical 约 4 B）→ 3,940 万 × 20 B ≈ 0.73 GB（D3 ≈ 1.07 GB）。每个 channel 单独写盘，单个 channel 最多 8.2 万 × 100 × 20 B ≈ 0.15 GB。合并去重后 8.2 万 × 307 ≈ **2,520 万行**（R3 切换之前 2,570 万，最初估算 2,050 万；D3：12.0 万 × 305 ≈ 3,660 万行）。
-- ② **Ranker 训练**：每周正样本 ≈ 8.2 万 query × 3.4 label × 24%（G2 的 union recall 目标；M4 在 D1–D4 上实测 25.2%，正样本和下面的行数相应多约 5%）≈ 6.7 万。每个正样本配 r 个负样本：r = 40 时 6.7 万 × 41 ≈ 274 万行/周，4 周 ≈ **1,100 万行**；r = 80 时 6.7 万 × 81 ≈ 542 万行/周，4 周 ≈ **2,170 万行**（候选不够时负样本全取，所以这是上限）。原始特征 71 × 4 B = 284 B/行 → 1,100 万 × 284 B ≈ 2.9 GB，2,170 万 × 284 B ≈ 5.7 GB；分箱后每个值 1 B → 1,100 万 × 71 B ≈ 0.73 GB，2,170 万 × 71 B ≈ 1.4 GB。r = 80 时原始特征已经贴近 6 GB 上限，所以必须流式加载。（按 56 个特征时是 2.3 / 4.5 GB 和 0.57 / 1.1 GB。）
-- ③ **Ranker 推理**：每周 8.2 万 × 307 = 2,520 万行 × 284 B ≈ 7.16 × 10⁹ B ≈ **6.7 GB**（56 个特征时 5.3 GB，最初估算 4.3 GB；V、T 周最多 8.3 万 query，差不多）。按 1 万 query 分块：1 万 × 307 × 284 B ≈ 8.7 × 10⁸ B ≈ **0.81 GB/块**（56 个特征时 0.64 GB）；候选多的块按 P90 算：1 万 × 364 × 284 B ≈ 0.96 GB/块。
-- ④ **特征宽表**：每行 71 个特征按 float32 计 284 B，加上 `query_id`、`article_idx` 两个 int32 共 8 B → **292 B/行**（实际存储略小：8 个类别特征是 int16，每行 276 B）。一周 2,520 万行 × 292 B ≈ 7.36 × 10⁹ B ≈ 6.9 GB，超过 6 GB 上限，所以不能整周放进内存。按 1 万 query 分块：1 万 × 307 × 292 B ≈ 9.0 × 10⁸ B ≈ **0.83 GB/块**；按 P90：1 万 × 364 × 292 B ≈ 0.99 GB/块。（56 个特征时是 232 B/行、5.4 GB、0.66 / 0.79 GB。）
-- ⑤ **12 周特征 Parquet 的磁盘占用**：F1–F4、V1–V4、T1–T4 共 917,354 个 query × 307 ≈ **2.82 亿行**；未压缩 2.82 亿 × 292 B ≈ 8.23 × 10¹⁰ B ≈ **77 GB**（平均每周约 6.4 GB；56 个特征时 61 GB）。Parquet 压缩比现在只能估计：候选文件（ID、rank、score）压缩后约为原始大小的 18%（预检查 5 路 4 周 1.25 亿行 449 MB），浮点特征压缩得差一些，按 30%–60% 估计为 **约 23–46 GB**。M6 生成 F1 后先实测一周的大小再外推。当前磁盘可用空间约 520 GB，足够。**F1 实测（2026-11-18）**：26,373,844 行，Parquet 共 1.67 GB，即每行约 68 B，约为未压缩大小（26,373,844 × 276 B ≈ 6.8 GB）的 23%–25%，比上面 30%–60% 的估计压缩得更好。按 2.82 亿行外推，12 周约 **18 GB**。**12 周实测**：281,750,956 行，共 19,136,477,799 字节 ≈ **17.8 GB**，每行约 68 B，与外推一致。
-- 说明：307 是 R3 改为只输出 `A(a)` 之后重跑 union 检查的实测值（`results/m4_union_check_r3_active_pool.csv`，4 周合并 307.1）。切换之前是 313：R3 在 `A(a)` 外的候选约占 R3 行数的 23%（平均每个 query 约 7 行），切换后其中一部分名额由池内的同款商品补上，R3 平均每个 query 的行数从 29.8 降到 24.1，合并去重后平均少 5.8 个。
+- ① **Candidate generation**: before merging, at most 82,000 × 480 ≈ 39.4 million rows (D3: 120,000 × 480 ≈ 57.6 million rows). About 20 B per row (`query_id`, `article_idx`, `rank` as int32, 4 B each; `score` as float32, 4 B; `channel` as Categorical, about 4 B) → 39.4 million × 20 B ≈ 0.73 GB (D3 ≈ 1.07 GB). Each channel is written to disk separately, and a single channel has at most 82,000 × 100 × 20 B ≈ 0.15 GB. After merging and deduplication, 82,000 × 307 ≈ **25.2 million rows** (25.7 million before the switch of R3, 20.5 million in the first estimate; D3: 120,000 × 305 ≈ 36.6 million rows).
+- ② **Ranker training**: positives per week ≈ 82,000 queries × 3.4 labels × 24% (the union recall target of G2; M4 measured 25.2% on D1–D4, so the positives and the rows below are about 5% higher accordingly) ≈ 67,000. Each positive is paired with r negatives: at r = 40, 67,000 × 41 ≈ 2.74 million rows/week, 4 weeks ≈ **11 million rows**; at r = 80, 67,000 × 81 ≈ 5.42 million rows/week, 4 weeks ≈ **21.7 million rows** (when there are not enough candidates all negatives are taken, so this is an upper bound). Raw features 71 × 4 B = 284 B/row → 11 million × 284 B ≈ 2.9 GB and 21.7 million × 284 B ≈ 5.7 GB; after binning, 1 B per value → 11 million × 71 B ≈ 0.73 GB and 21.7 million × 71 B ≈ 1.4 GB. At r = 80 the raw features are already close to the 6 GB limit, so stream loading is a must. (With 56 features these were 2.3 / 4.5 GB and 0.57 / 1.1 GB.)
+- ③ **Ranker inference**: per week 82,000 × 307 = 25.2 million rows × 284 B ≈ 7.16 × 10⁹ B ≈ **6.7 GB** (5.3 GB with 56 features, 4.3 GB in the first estimate; the V and T weeks have at most 83,000 queries, about the same). In chunks of 10,000 queries: 10,000 × 307 × 284 B ≈ 8.7 × 10⁸ B ≈ **0.81 GB/chunk** (0.64 GB with 56 features); for a chunk with many candidates, taking P90: 10,000 × 364 × 284 B ≈ 0.96 GB/chunk.
+- ④ **Wide feature table**: each row has 71 features at 284 B as float32, plus the two int32 columns `query_id` and `article_idx`, 8 B together → **292 B/row** (slightly less as actually stored: the 8 categorical features are int16, 276 B per row). A week of 25.2 million rows × 292 B ≈ 7.36 × 10⁹ B ≈ 6.9 GB exceeds the 6 GB limit, so a whole week cannot be held in memory. In chunks of 10,000 queries: 10,000 × 307 × 292 B ≈ 9.0 × 10⁸ B ≈ **0.83 GB/chunk**; taking P90: 10,000 × 364 × 292 B ≈ 0.99 GB/chunk. (With 56 features: 232 B/row, 5.4 GB, 0.66 / 0.79 GB.)
+- ⑤ **Disk usage of the feature Parquet of 12 weeks**: F1–F4, V1–V4 and T1–T4 have 917,354 queries × 307 ≈ **282 million rows**; uncompressed, 282 million × 292 B ≈ 8.23 × 10¹⁰ B ≈ **77 GB** (about 6.4 GB per week on average; 61 GB with 56 features). The Parquet compression ratio can only be estimated for now: the candidate files (IDs, rank, score) compress to about 18% of the raw size (the 125 million rows of 5 channels and 4 weeks in the pre-check take 449 MB), and floating-point features compress worse; at 30%–60% the estimate is **about 23–46 GB**. After M6 generates F1, the size of one week is measured first and then extrapolated. The disk currently has about 520 GB free, which is enough. **Measured on F1 (2026-11-18)**: 26,373,844 rows and 1.67 GB of Parquet in total, i.e. about 68 B per row, about 23%–25% of the uncompressed size (26,373,844 × 276 B ≈ 6.8 GB), a better compression than the 30%–60% estimated above. Extrapolated to 282 million rows, the 12 weeks take about **18 GB**. **Measured on the 12 weeks**: 281,750,956 rows and 19,136,477,799 bytes ≈ **17.8 GB** in total, about 68 B per row, in line with the extrapolation.
+- Note: 307 is the value measured when the union check was re-run after R3 was changed to output only `A(a)` (`results/m4_union_check_r3_active_pool.csv`, 307.1 for the 4 weeks pooled). Before the switch it was 313: the candidates of R3 outside `A(a)` were about 23% of R3's rows (about 7 rows per query on average), and after the switch part of these slots are filled by same-style articles inside the pool, so the rows of R3 per query fall from 29.8 to 24.1 on average, and there are 5.8 fewer per query after merging and deduplication.
 
-以上除"实测"列外都是估算值，后续各阶段实测后继续填写"实测"列。M0 query / label 生成实测于 2026-11-16（`scripts/m0_build_queries.py`）。M0 预处理实测（2026-11-15）：常驻内存是读回 Parquet 后的 Polars `estimated_size()`；峰值是 `MemoryTracker` 的采样 RSS（间隔 0.5 秒，是下限，见下一段）。其他 M0 产物的常驻内存：customers 37 MB，articles 3 MB，customer ID 映射 89 MB，按 `article_idx` 对齐的图像 / 文本 embedding 206 MB / 155 MB。
+Everything above except the "measured" column is an estimate; the "measured" column continues to be filled in as each phase is measured. The M0 query / label generation was measured on 2026-11-16 (`scripts/m0_build_queries.py`). Measurements of the M0 preprocessing (2026-11-15): the memory held is the Polars `estimated_size()` after reading the Parquet back; the peak is the RSS sampled by `MemoryTracker` (interval 0.5 seconds; a lower bound, see the next paragraph). Memory held by the other M0 outputs: customers 37 MB, articles 3 MB, customer ID map 89 MB, the image / text embeddings aligned by `article_idx` 206 MB / 155 MB.
 
-**M5 锁定配置在 D1 上的单路实测**（2026-11-17，`scripts/m5_verify_locks.py`，HEAD `0ce824a`，工作区干净；每路一个进程；`results/m5_lock_check.csv`）。D1 有 78,193 个 query，活跃池 20,764 个商品。六路的分数都与记录逐位相同，候选文件与 D 阶段 / M4 生成的文件逐字节相同。
+**Single-channel measurements of the M5 locked configuration on D1** (2026-11-17, `scripts/m5_verify_locks.py`, HEAD `0ce824a`, clean working tree; one process per channel; `results/m5_lock_check.csv`). D1 has 78,193 queries and an active pool of 20,764 articles. The scores of the six channels are all bit-identical to the records, and the candidate files are byte-identical to the files generated in the D phase / M4.
 
-| Channel | 候选行数 | generate 耗时 | 整个进程耗时 | 真实峰值：到 generate 结束 | 真实峰值：整个进程 | 采样峰值（generate） |
+| Channel | Candidate rows | generate time | Whole process time | True peak: up to the end of generate | True peak: whole process | Sampled peak (generate) |
 |---|---|---|---|---|---|---|
-| R1 Popularity | 7,819,300 | 0.5 秒 | 3.8 秒 | 1.98 GB | **1.98 GB** | 1.05 GB |
-| R2 Repurchase | 1,292,785 | 0.3 秒 | 3.1 秒 | 0.99 GB | **0.99 GB** | 0.77 GB |
-| R3 Sibling | 1,860,095 | 0.4 秒 | 3.2 秒 | 1.06 GB | **1.06 GB** | 0.76 GB |
-| R4 ItemCF（`item_chunk_size` 1000） | 7,001,322 | 25.8 秒 | 29.1 秒 | 3.72 GB | **4.20 GB** | 3.72 GB |
-| R5 WALS（factors 128） | 6,398,300 | 169.6 秒 | 173.1 秒 | 2.72 GB | **3.78 GB** | 2.61 GB |
-| R6 Two-Tower（base epoch 4，现场预测，不训练） | 7,819,300 | 13.6 秒 | 17.4 秒 | 2.33 GB | **3.53 GB** | 2.33 GB |
+| R1 Popularity | 7,819,300 | 0.5 seconds | 3.8 seconds | 1.98 GB | **1.98 GB** | 1.05 GB |
+| R2 Repurchase | 1,292,785 | 0.3 seconds | 3.1 seconds | 0.99 GB | **0.99 GB** | 0.77 GB |
+| R3 Sibling | 1,860,095 | 0.4 seconds | 3.2 seconds | 1.06 GB | **1.06 GB** | 0.76 GB |
+| R4 ItemCF (`item_chunk_size` 1000) | 7,001,322 | 25.8 seconds | 29.1 seconds | 3.72 GB | **4.20 GB** | 3.72 GB |
+| R5 WALS (factors 128) | 6,398,300 | 169.6 seconds | 173.1 seconds | 2.72 GB | **3.78 GB** | 2.61 GB |
+| R6 Two-Tower (base epoch 4, predicting on the spot, no training) | 7,819,300 | 13.6 seconds | 17.4 seconds | 2.33 GB | **3.53 GB** | 2.33 GB |
 
-- "真实峰值"是 `ru_maxrss`（`process_max_rss_gb`）。"到 generate 结束"是从进程启动（含读 queries / labels、算活跃池、R6 加载模型）到 `generate` 返回时的峰值；"整个进程"还包括之后的校验、写 Parquet 和评估。六路的"整个进程"一栏与 `/usr/bin/time -l` 的 maximum resident set size **逐字节相等**。
-- 六路都在 6 GB 以内，最高是 R4 的 4.20 GB。
-- R4、R5、R6 在 `generate` 返回**之后**峰值又升高了 0.48 / 1.06 / 1.20 GB，来自候选的校验、写盘和评估（这次没有把三步分开测）。M6 每一路同样要校验和写盘，所以估算 M6 的单路峰值时应看"整个进程"一栏，而不是"到 generate 结束"。
-- 采样峰值会漏掉短任务的尖峰：R1 采样到 1.05 GB，真实值是 1.98 GB。
-- R4 没有同一配置、同一 fold、分块 2000 的真实峰值可以对比（此前 D1 的 2.95 GB 是默认配置，D 阶段的 3.9–4.8 GB 是四周在一个进程里的采样值），所以这里不给出"分块减半省了多少"的数字。
+- The "true peak" is `ru_maxrss` (`process_max_rss_gb`). "Up to the end of generate" is the peak from process start (including reading queries / labels, computing the active pool, and loading the model for R6) until `generate` returns; "whole process" also includes the validation, the Parquet write and the evaluation that follow. The "whole process" column of the six channels is **byte for byte equal** to the maximum resident set size of `/usr/bin/time -l`.
+- All six channels are within 6 GB; the highest is the 4.20 GB of R4.
+- For R4, R5 and R6 the peak rises by another 0.48 / 1.06 / 1.20 GB **after** `generate` returns, from validating, writing and evaluating the candidates (the three steps were not measured separately this time). In M6 every channel validates and writes in the same way, so the "whole process" column, not "up to the end of generate", should be used to estimate the single-channel peak of M6.
+- The sampled peak misses the spikes of short tasks: R1 is sampled at 1.05 GB while the true value is 1.98 GB.
+- R4 has no true peak of the same configuration and the same fold with a chunk size of 2000 to compare with (the earlier 2.95 GB of D1 is the default configuration, and the 3.9–4.8 GB of the D phase are sampled values with four weeks in one process), so no number for "how much halving the chunk saved" is given here.
 
-**内存峰值怎么测**：`src/hmrec/memory.py` 记录两种峰值，字段名不同，回答的问题也不同：
+**How memory peaks are measured**: `src/hmrec/memory.py` records two kinds of peak, with different field names, which answer different questions:
 
-- **采样峰值**（`MemoryTracker`，`peak_rss` / `sampled_peak_rss_gb`）：后台线程用 psutil 定时采样 RSS（间隔见 `configs/base.yaml` 的 `memory.sample_interval_seconds`），取所有采样值和开始、结束读数中的最大值。可以**分阶段**测（每个阶段一个 tracker），用来定位内存用在哪里；但比采样间隔还短的瞬时峰值测不到，所以只是**下限**。
-- **真实峰值**（`read_process_peak_memory`，`process_max_rss_gb`）：标准库 `resource.getrusage(RUSAGE_SELF).ru_maxrss`，操作系统记录的、进程启动以来的最大 RSS，不会漏掉瞬时峰值，与 `/usr/bin/time -l` 读的是同一个计数器。但它**只有整个进程的一个数**，不能清零，所以说不出峰值出在哪个阶段。单位随系统不同（macOS 是字节，Linux 是 KB），由 `ru_maxrss_to_bytes` 换算。子进程不计入本进程的 RSS，另外记录 `RUSAGE_CHILDREN`（已结束的子进程中最大的一个，不是总和）。
+- **Sampled peak** (`MemoryTracker`, `peak_rss` / `sampled_peak_rss_gb`): a background thread samples the RSS at intervals with psutil (interval in `memory.sample_interval_seconds` of `configs/base.yaml`) and takes the maximum of all samples and of the readings at the start and at the end. It can be measured **per stage** (one tracker per stage) and is used to locate where memory goes; but a transient peak shorter than the sampling interval is not seen, so it is only a **lower bound**.
+- **True peak** (`read_process_peak_memory`, `process_max_rss_gb`): the standard library's `resource.getrusage(RUSAGE_SELF).ru_maxrss`, the maximum RSS since the process started as recorded by the operating system; it does not miss transient peaks and reads the same counter as `/usr/bin/time -l`. But it is **one number for the whole process** and cannot be reset, so it cannot say in which stage the peak occurred. The unit depends on the system (bytes on macOS, KB on Linux) and is converted by `ru_maxrss_to_bytes`. Child processes do not count towards the RSS of the process itself; `RUSAGE_CHILDREN` is recorded separately (the largest finished child process, not the sum).
 
-是否超过上限（12 GB；2026-11-18 之前是 6 GB，当天先后改为 7 GB、8 GB、12 GB）**以真实峰值为准**；采样峰值用来找出是哪个阶段造成的。每个 `MemoryTracker` 结束时两种数字都写进日志（真实峰值在相邻两个阶段的日志之间变大，说明尖峰出在后一个阶段）；脚本在最后一步调用 `log_process_peak_memory`，并把真实峰值写进这次运行的结果记录（M5 的锁定核对写到 `results/m5_lock_check.csv`）。**2026-11-17（M5）之前的数字**：上表中标为"采样"或 MemoryTracker 的都是采样峰值（下限）；标为 `/usr/bin/time` 的是真实峰值，但只出现在终端输出里，没有写入运行日志。MPS 张量占用的统一内存不一定全部计入 RSS，两种峰值都受此影响。
+Whether the limit (12 GB; 6 GB before 2026-11-18, changed that day to 7 GB, 8 GB and 12 GB in turn) is exceeded is **judged by the true peak**; the sampled peak is used to find which stage caused it. Every `MemoryTracker` writes both numbers to the log when it ends (if the true peak grows between the logs of two adjacent stages, the spike occurred in the later stage); a script calls `log_process_peak_memory` as its last step and writes the true peak into the result record of the run (the lock check of M5 writes to `results/m5_lock_check.csv`). **Numbers from before 2026-11-17 (M5)**: those in the table above marked "sampled" or MemoryTracker are sampled peaks (lower bounds); those marked `/usr/bin/time` are true peaks, but they appear only in terminal output and were not written to the run log. The unified memory taken by MPS tensors is not necessarily all counted in RSS, which affects both kinds of peak.
 
-### 1.4 Two-Tower 速度估算（M1 Max）
+### 1.4 Speed estimate for Two-Tower (M1 Max)
 
-| 步骤 | 估算耗时 | 实测 |
+| Step | Estimated time | Measured |
 |---|---|---|
-| Base 1 个 epoch（26 周，约 700–800 万样本，batch 512） | 约 2–5 分钟 | 占位模型：MPS 约 9.2 分钟，CPU 约 7.5 分钟。**真实模型（2026-11-17，200 步）：CPU 每步 30.4 ms（P90 31.1）→ 约 6.1 分钟 / epoch，6 个 epoch 约 37 分钟；MPS 每步 45.2 ms（P90 54.4）→ 约 9.1 分钟 / epoch**（616 万个样本 = 12,033 步；去掉 1% 报警用户后实际约 1.19 万步）。选用 CPU |
-| 每周 fine-tune（约 30 万样本） | 约 10 秒 – 1 分钟 | **M6 实测（F1–T3 共 11 周，CPU，E_update 2，replay 50%）：52–71 秒**（每周新样本 23–31 万，加同样多的 replay，共 46–61 万行，1,792–2,396 步）。R6 整个进程（核对 sha256、加载模型、预测、保存向量、fine-tune）每周 74–95 秒，其中预测并保存向量 15–19 秒；T4 只预测，18 秒 |
-| 每周推理（平均约 8.2 万 query，最多 12.0 万（D3）× 约 10 万商品，取 Top-100） | 几秒到十几秒（分块矩阵乘法 + `torch.topk`） | **D1（2026-11-17，M5 锁定核对，CPU）：13.6 秒**（78,193 个 query × 20,764 个活跃商品，含用户历史、两塔编码和取 Top-100）；另加核对 sha256、加载模型和表 0.4 秒。真实峰值 generate 结束时 2.33 GB |
+| 1 epoch of the base (26 weeks, about 7–8 million samples, batch 512) | About 2–5 minutes | Placeholder model: about 9.2 minutes on MPS, about 7.5 minutes on CPU. **Real model (2026-11-17, 200 steps): CPU 30.4 ms per step (P90 31.1) → about 6.1 minutes / epoch, about 37 minutes for 6 epochs; MPS 45.2 ms per step (P90 54.4) → about 9.1 minutes / epoch** (6.16 million samples = 12,033 steps; about 11,900 steps in practice without the 1% alarm users). CPU is chosen |
+| Weekly fine-tuning (about 300,000 samples) | About 10 seconds – 1 minute | **Measured at M6 (the 11 weeks F1–T3, CPU, E_update 2, replay 50%): 52–71 seconds** (230,000–310,000 new samples per week, plus as many replay samples, 460,000–610,000 rows in total, 1,792–2,396 steps). The whole R6 process (checking the sha256, loading the model, predicting, saving the vectors, fine-tuning) takes 74–95 seconds per week, of which predicting and saving the vectors take 15–19 seconds; T4 only predicts, 18 seconds |
+| Weekly inference (about 82,000 queries on average, at most 120,000 (D3) × about 100,000 articles, taking the Top-100) | A few seconds to a dozen or so (chunked matrix multiplication + `torch.topk`) | **D1 (2026-11-17, M5 lock check, CPU): 13.6 seconds** (78,193 queries × 20,764 active articles, including user histories, encoding by both towers and taking the Top-100); plus 0.4 seconds for checking the sha256 and loading the model and tables. True peak 2.33 GB at the end of generate |
 
-**开工前的 benchmark**：在 `mps` 和 `cpu` 上各跑 200 步，分别记录取数据的时间和 forward + backward 的时间（计时前后调用 `torch.mps.synchronize()`）。如果取数据占一半以上时间，先优化数据管道。
+**Benchmark before starting**: run 200 steps each on `mps` and on `cpu`, recording the time for fetching data and the time for forward + backward separately (calling `torch.mps.synchronize()` before and after timing). If fetching data takes more than half of the time, optimize the data pipeline first.
 
-**Benchmark 实测（2026-11-17，`scripts/m0_benchmark_twotower.py`，torch 2.15.0）**：用占位模型（`src/hmrec/recall/twotower/benchmark.py`：图像 / 文本投影 + ID 和 7 个类目 embedding，用户塔对 20 件历史做 masked mean 加 profile embedding，multi-positive in-batch softmax，没有 LogQ；不是 R6 的正式模型），base 窗口的数组，batch 512，200 步，每个设备单独一个进程。
+**Measured benchmark (2026-11-17, `scripts/m0_benchmark_twotower.py`, torch 2.15.0)**: with a placeholder model (`src/hmrec/recall/twotower/benchmark.py`: image / text projections + ID and 7 category embeddings, a user tower with a masked mean over 20 history items plus profile embeddings, multi-positive in-batch softmax, no LogQ; not the real R6 model), the arrays of the base window, batch 512, 200 steps, a separate process per device.
 
-| 设备 | 取 batch（每步，去掉前 10 步） | forward + backward + 更新（每步） | 取 batch 占比 | 前 10 步合计 | 200 步合计 |
+| Device | Fetching a batch (per step, first 10 steps dropped) | forward + backward + update (per step) | Share of fetching a batch | First 10 steps in total | 200 steps in total |
 |---|---|---|---|---|---|
-| MPS | 0.80 ms | 45.0 ms（中位数 44.5，P90 47.8） | **1.7%** | 1.84 秒 | 10.5 秒 |
-| CPU（6 线程） | 0.26 ms | 37.1 ms（中位数 37.1，P90 37.8） | **0.7%** | 0.43 秒 | 7.5 秒 |
+| MPS | 0.80 ms | 45.0 ms (median 44.5, P90 47.8) | **1.7%** | 1.84 seconds | 10.5 seconds |
+| CPU (6 threads) | 0.26 ms | 37.1 ms (median 37.1, P90 37.8) | **0.7%** | 0.43 seconds | 7.5 seconds |
 
-- 取 batch 远低于一半，**数据管道不需要优化**。
-- 两个设备的 loss 逐步一致（7.860 → 6.388），说明计算相同。
-- 占位模型在 **MPS 上比 CPU 慢约 20%**。占位模型每步的矩阵很小，MPS 的 kernel 启动和 embedding 反向（scatter）开销占主要部分；真实模型更大时结论可能不同。正式训练前用真实模型重新比较了两个设备：**CPU 仍然更快**（真实模型每步 30.4 ms vs MPS 45.2 ms，取 batch 占比 0.9% / 1.2%），R6 用 CPU 训练（§1.2）。
+- Fetching a batch is far below half, so **the data pipeline needs no optimization**.
+- The loss of the two devices agrees step by step (7.860 → 6.388), which shows the computation is the same.
+- The placeholder model is **about 20% slower on MPS than on CPU**. Its matrices per step are small, and the kernel start-up and the backward pass of embeddings (scatter) on MPS dominate the cost; with a larger real model the conclusion could differ. Before the real training, the two devices were compared again with the real model: **CPU is still faster** (30.4 ms per step for the real model vs 45.2 ms on MPS, with fetching a batch at 0.9% / 1.2%), and R6 trains on CPU (§1.2).
 
 ---
 
-## 2. 数据与通用约定
+## 2. Data and general conventions
 
-### 2.1 原始数据
+### 2.1 Raw data
 
-| 文件 | 内容 |
+| File | Content |
 |---|---|
-| `transactions_train.csv` | `t_dat, customer_id, article_id, price, sales_channel_id`；2018-09-20 至 2020-09-22。完全相同的重复行表示多次购买，**保留** |
+| `transactions_train.csv` | `t_dat, customer_id, article_id, price, sales_channel_id`; 2018-09-20 to 2020-09-22. Fully identical duplicate rows mean several purchases and are **kept** |
 | `customers.csv` | `customer_id, FN, Active, club_member_status, fashion_news_frequency, age, postal_code` |
-| `articles.csv` | `article_id, product_code` 和各级类目、颜色、描述等元数据 |
-| 预计算 embedding | 每个商品的 CLIP ViT-B/32 图像向量（512 维）和 all-MiniLM-L6-v2 文本向量（384 维）。只读，不重新提取。详见下面的"预计算 embedding" |
+| `articles.csv` | `article_id, product_code` and metadata such as the category levels, colours and descriptions |
+| Precomputed embeddings | For every article, a CLIP ViT-B/32 image vector (512 dimensions) and an all-MiniLM-L6-v2 text vector (384 dimensions). Read-only; not extracted again. See "Precomputed embeddings" below |
 
-`article_id` 保留前导零，统一作为 10 位字符串处理，内部映射成 int32。
+`article_id` keeps its leading zeros, is handled throughout as a 10-character string, and is mapped internally to int32.
 
-**预计算 embedding**（2026-11-15 只读检查的结果，见 `docs/decisions.md`）：
+**Precomputed embeddings** (result of a read-only inspection on 2026-11-15, see `docs/decisions.md`):
 
-| | 图像 | 文本 |
+| | Image | Text |
 |---|---|---|
-| 模型 | CLIP ViT-B/32 | all-MiniLM-L6-v2 |
-| 向量文件 | `data/processed/image_features/image_embeddings.npy` | `data/processed/text_features/text_embeddings.npy` |
+| Model | CLIP ViT-B/32 | all-MiniLM-L6-v2 |
+| Vector file | `data/processed/image_features/image_embeddings.npy` | `data/processed/text_features/text_embeddings.npy` |
 | shape / dtype | `(105100, 512)` float32 | `(105542, 384)` float32 |
-| id 表 | `image_article_ids.parquet`（`embedding_row, article_id, image_path`） | `text_article_ids.parquet`（`embedding_row, article_id, text, token_count, was_truncated`） |
-| 覆盖 | 105,100 / 105,542 个商品，**442 个商品没有图像向量** | 全部 105,542 个商品 |
+| id table | `image_article_ids.parquet` (`embedding_row, article_id, image_path`) | `text_article_ids.parquet` (`embedding_row, article_id, text, token_count, was_truncated`) |
+| Coverage | 105,100 / 105,542 articles; **442 articles have no image vector** | All 105,542 articles |
 
-- **对应关系**：`.npy` 的第 `i` 行，对应 id 表中 `embedding_row = i` 的 `article_id`（10 位字符串）。M0 中再映射成 `article_idx`（int32）。不能假设 `.npy` 的行号等于 `article_idx`。
-- **已经 L2 归一化**：两个向量的点积就是 cosine 相似度，使用时不需要再归一化。
-- 目录中的 `*_faiss.index` 文件**不使用**（项目不依赖 faiss）。目录中的 manifest json 记录了模型版本和 sha256，只作参考。
+- **Correspondence**: row `i` of the `.npy` corresponds to the `article_id` (10-character string) with `embedding_row = i` in the id table. M0 then maps it to `article_idx` (int32). It may not be assumed that the row number of the `.npy` equals `article_idx`.
+- **Already L2-normalized**: the dot product of two vectors is their cosine similarity, and no further normalization is needed when using them.
+- The `*_faiss.index` files in the directory are **not used** (the project does not depend on faiss). The manifest json in the directory records the model version and sha256 and is for reference only.
 
-### 2.2 时间约定
+### 2.2 Time conventions
 
-- Anchor `a` 是预测周的第一天。**输入**：`t_dat < a`。**Label**：`t_dat ∈ [a, a+7d)`。
-- 事件年龄：`age_days = (a − t_dat).days`，所以 anchor 前一天的年龄是 1。
-- 所有指数衰减都写成 `exp(−age_days / τ)`，τ 是**时间常数**，不是半衰期（半衰期 = τ × ln2）。
-- **processed 数据中的日期列**：`data/processed/transactions.parquet` 不存日期，存 int16 列 **`t_dat_day`** = 距 `day_zero`（`configs/preprocess.yaml`，2018-09-20）的天数，范围 0..733。设 `anchor_day = date_to_day_index(a, day_zero)`，上面的 `t_dat < a` 在代码里写成 `t_dat_day < anchor_day`，`age_days` 写成 `anchor_day − t_dat_day`。日期与天数的换算**只能**调用 `src/hmrec/data/day_index.py`（`date_to_day_index` / `day_index_to_date`，以及对应的 Polars 表达式版本 `*_expr`），不能在别处自己写公式。
+- The anchor `a` is the first day of the predicted week. **Inputs**: `t_dat < a`. **Labels**: `t_dat ∈ [a, a+7d)`.
+- Event age: `age_days = (a − t_dat).days`, so the day before the anchor has age 1.
+- Every exponential decay is written as `exp(−age_days / τ)`, where τ is a **time constant**, not a half-life (half-life = τ × ln2).
+- **The date column of the processed data**: `data/processed/transactions.parquet` stores no date but the int16 column **`t_dat_day`** = the number of days since `day_zero` (`configs/preprocess.yaml`, 2018-09-20), in the range 0..733. With `anchor_day = date_to_day_index(a, day_zero)`, the `t_dat < a` above is written in code as `t_dat_day < anchor_day`, and `age_days` as `anchor_day − t_dat_day`. Conversion between dates and day numbers may **only** call `src/hmrec/data/day_index.py` (`date_to_day_index` / `day_index_to_date`, and the corresponding Polars expression versions `*_expr`); the formula may not be written anywhere else.
 
-### 2.3 Query 和 Label
+### 2.3 Queries and labels
 
-- **Query** = `(customer_id, anchor)`，前提是该用户在 label 周至少买了一件商品目录中的商品。每周 **6.9–12.0 万**个 query，平均 **8.2 万**（2026-11-16 在 16 个 fold 上实测，见 §1.3；D3、D4 偏多，见 §12）。
-- **query_id**（int32，全部 fold 内唯一）= `fold_ordinal × query_id_fold_offset + position`。`fold_ordinal` 是 fold 在 `fold_manifest.yaml` 中的位置（D1 = 0 … T4 = 15），`position` 是该 fold 的 query 按 `customer_idx` 升序的序号（从 0 开始），`query_id_fold_offset = 10,000,000`（`configs/queries.yaml`）。多个 fold 的表可以只按 `query_id` join，不会接错。反向解析用 `hmrec.data.queries.decode_query_id`。
-- **Label 集合 `G_q`** = 该用户在 label 周买过的**去重后**的 `article_id` 集合。
-- 某一路没有给某个 query 输出结果，算这一路的漏召回（miss），**query 不能从分母里删掉**。
+- **Query** = `(customer_id, anchor)`, provided the user bought at least one catalog article in the label week. There are **69,000–120,000** queries per week, **82,000** on average (measured on the 16 folds on 2026-11-16, see §1.3; D3 and D4 are larger, see §12).
+- **query_id** (int32, unique across all folds) = `fold_ordinal × query_id_fold_offset + position`. `fold_ordinal` is the position of the fold in `fold_manifest.yaml` (D1 = 0 … T4 = 15), `position` is the index of the query within the fold in ascending `customer_idx` (starting at 0), and `query_id_fold_offset = 10,000,000` (`configs/queries.yaml`). Tables of several folds can be joined on `query_id` alone without mismatching. The reverse lookup is `hmrec.data.queries.decode_query_id`.
+- **Label set `G_q`** = the **deduplicated** set of `article_id` the user bought in the label week.
+- If a channel outputs nothing for a query, this counts as a miss of that channel; **the query may not be removed from the denominator**.
 
-### 2.4 商品范围
+### 2.4 Article scope
 
-- **商品目录 `C`**：`articles.csv` 中所有商品。Label 不按任何商品池过滤。
-- **活跃池 `A(a)`**：在 `[a−28d, a)` 内至少有 3 条购买记录的商品。这是"近期在卖"的近似，不是真实库存。
-- **哪些 channel 用活跃池过滤**：R1、R3、R4、R5、R6 的输出限制在 `A(a)` 内；R2（复购）不过滤，因为它本来就基于用户自己的历史。**R3（同款不同色）原来也不过滤，2026-11-17 在 M4 按预先登记的规则改为只输出 `A(a)` 内的商品**（一次性修改，见下一句和 `docs/decisions.md`）：去掉 R3 在 `A(a)` 外的候选后，4 周合并的六路 union recall 只下降 0.045 个百分点（< 0.1 个百分点）。过滤放在取 Top-50 之前（与 R4 一致），空出的名额由活跃池内的同款商品补上；γ、τ 不重新调，沿用 D 阶段的选择（γ 1.0、τ 30）。D 阶段 R3 的 HPO 和 `results/d_phase.csv` 中的 R3 记录都是在不过滤的设置下得到的。这个设定在 M0 冻结，**不当作超参数调**。唯一的例外：R3 是否改为只输出 `A(a)` 内的商品，在 M4 按 §5.7 第 4 项预先登记的标准决定一次（系统层面的决定，不是 D 阶段 HPO）。
-- 用户以前买过的商品**允许再推荐**（复购在 H&M 很常见）。
+- **Catalog `C`**: all articles in `articles.csv`. Labels are not filtered by any article pool.
+- **Active pool `A(a)`**: the articles with at least 3 purchase records in `[a−28d, a)`. It approximates "currently on sale"; it is not real inventory.
+- **Which channels are filtered by the active pool**: the outputs of R1, R3, R4, R5 and R6 are limited to `A(a)`; R2 (repurchase) is not filtered, because it is based on the user's own history anyway. **R3 (same style, other colour) was not filtered at first either; on 2026-11-17, at M4, it was changed under a pre-registered rule to output only articles inside `A(a)`** (a one-off change, see the next sentence and `docs/decisions.md`): removing the R3 candidates outside `A(a)` lowers the 4-week pooled six-channel union recall by only 0.045 percentage points (< 0.1 percentage points). The filter comes before taking the Top-50 (as for R4), and the freed slots are filled by same-style articles inside the active pool; γ and τ are not re-tuned, and the D-phase selection (γ 1.0, τ 30) is kept. The D-phase HPO of R3 and the R3 records in `results/d_phase.csv` were all obtained without the filter. This setting was frozen at M0 and is **not tuned as a hyperparameter**. The only exception: whether R3 is changed to output only articles inside `A(a)` is decided once at M4 by the pre-registered criterion of §5.7 item 4 (a system-level decision, not D-phase HPO).
+- Articles a user has bought before **may be recommended again** (repurchase is common at H&M).
 
-### 2.5 指标
+### 2.5 Metrics
 
-全部是"先算每个 query 的分数，再取平均"（macro）。
+All are "the score of each query first, then the mean" (macro).
 
-| 指标 | 定义 |
+| Metric | Definition |
 |---|---|
-| Recall@K | `|Top-K ∩ G_q| / |G_q|`。分母是完整的 `|G_q|`，**不在 K 处截断**，所以 label 多于 K 个的 query，Recall@K 最高只有 `K / |G_q|` |
-| AP@K / MAP@12 | 设前 K 个位置中第 r 位命中，`P(r)` = 前 r 位的命中数 ÷ r。`AP@K = Σ P(r)`（对前 K 位中每个命中的位置 r 求和）`÷ min(K, |G_q|)`。K = 12 时和 Kaggle H&M 比赛的定义一致；MAP@12 是 AP@12 对 query 的平均 |
-| NDCG@K | 二值相关性。`DCG@K = Σ 1 / log2(r + 1)`，只对前 K 个位置中命中的位置 r 求和。**理想 DCG 的命中数是 `min(K, |G_q|)`**：`IDCG@K = Σ_{r=1..min(K, |G_q|)} 1 / log2(r + 1)`。`NDCG@K = DCG@K / IDCG@K`，完美排序（前 `min(K, |G_q|)` 位全部命中）得 1.0 |
-| Union recall | 6 路合并去重后，所有候选覆盖 `G_q` 的比例：`|候选 ∩ G_q| / |G_q|`，不截断；同一个商品被多路召回只算一次 |
+| Recall@K | `|Top-K ∩ G_q| / |G_q|`. The denominator is the complete `|G_q|`, **not cut off at K**, so for a query with more than K labels Recall@K is at most `K / |G_q|` |
+| AP@K / MAP@12 | Let position r among the first K be a hit, and `P(r)` = the number of hits in the first r positions ÷ r. `AP@K = Σ P(r)` (summed over every hit position r among the first K) `÷ min(K, |G_q|)`. With K = 12 it is the definition of the Kaggle H&M competition; MAP@12 is the mean of AP@12 over queries |
+| NDCG@K | Binary relevance. `DCG@K = Σ 1 / log2(r + 1)`, summed only over the hit positions r among the first K. **The number of hits of the ideal DCG is `min(K, |G_q|)`**: `IDCG@K = Σ_{r=1..min(K, |G_q|)} 1 / log2(r + 1)`. `NDCG@K = DCG@K / IDCG@K`, and a perfect ranking (all of the first `min(K, |G_q|)` positions are hits) scores 1.0 |
+| Union recall | The share of `G_q` covered by all candidates after the 6 channels are merged and deduplicated: `|candidates ∩ G_q| / |G_q|`, with no cut-off; an article recalled by several channels counts once |
 
-对这几个指标都成立的约定（`src/hmrec/eval/metrics.py`）：
+Conventions that hold for all of these metrics (`src/hmrec/eval/metrics.py`):
 
-- **`G_q` 是用户在 label 周实际购买的全部商品（去重，§2.3），不限于被召回的那部分。**没有被任何一路召回的 label 仍然计入 `|G_q|`，所以它压低 Recall、AP 的分母项和 NDCG 的理想 DCG。NDCG 一行原来写的是"理想 DCG 用完整的 `G_q` 计算"，本意就是这一条；截断由"@K"隐含。原来的写法可以被读成"理想 DCG 不在 K 处截断"，2026-11-18 改成了上面的写法（`docs/decisions.md`）；代码和此前记录的数值都没有变。
-- 参与平均的 query 是 label 表里的全部 query。某个 query 没有任何预测、或者没有命中，得 0 分，**留在分母里**（§2.3）。
-- 输出不足 K 个时，缺的位置按"没命中"计，不补齐。
-- 位置由 `rank` 决定（1 = 最好）：每个 query 的 `rank` 必须是 1, 2, …, n，同一个 query 内商品不重复；预测里出现 label 表中没有的 query 是错误。
-- 4 周合并分数是把 4 周的 query 放在一起平均（§4.1）。
+- **`G_q` is everything the user actually bought in the label week (deduplicated, §2.3), not only the recalled part.** A label that no channel recalled still counts in `|G_q|`, so it lowers Recall, the denominator term of AP and the ideal DCG of NDCG. The NDCG row used to say "the ideal DCG is computed from the complete `G_q`", which meant exactly this; the cut-off is implied by "@K". The former wording could be read as "the ideal DCG is not cut off at K" and was changed to the wording above on 2026-11-18 (`docs/decisions.md`); neither the code nor the values recorded before changed.
+- The queries averaged over are all queries of the label table. A query with no prediction, or with no hit, scores 0 and **stays in the denominator** (§2.3).
+- When fewer than K items are output, the missing positions count as "no hit" and are not padded.
+- The position is determined by `rank` (1 = best): the `rank` of each query must be 1, 2, …, n, with no repeated article within a query; a query in the predictions that is not in the label table is an error.
+- The 4-week pooled score is the mean over the queries of the 4 weeks together (§4.1).
 
 ---
 
-## 3. 日历（Fold manifest）
+## 3. Calendar (fold manifest)
 
-| 阶段 | Fold | Anchor | Label 日期（含首尾） |
+| Phase | Fold | Anchor | Label dates (inclusive) |
 |---|---|---|---|
 | Recall HPO | D1 | 2020-06-03 | 06-03 – 06-09 |
 | Recall HPO | D2 | 2020-06-10 | 06-10 – 06-16 |
@@ -246,197 +246,197 @@
 | Test | T3 | 2020-09-09 | 09-09 – 09-15 |
 | Test | T4 | 2020-09-16 | 09-16 – 09-22 |
 
-存成 `configs/fold_manifest.yaml`，用脚本校验：每周 7 天、相邻、不重叠、最后一天是 2020-09-22。
+Stored as `configs/fold_manifest.yaml` and validated by a script: 7 days per week, adjacent, non-overlapping, and the last day is 2020-09-22.
 
-**D1–D4 不进入 Ranker 训练**：这几周的候选是用"在这几周上选出来的配置"生成的，带有选择偏差（selection bias）。
+**D1–D4 are not used to train the ranker**: the candidates of these weeks are generated with "the configuration selected on these very weeks" and carry selection bias.
 
 ---
 
-## 4. 通用选择规则（所有 HPO 和 ablation）
+## 4. General selection rule (all HPO and ablations)
 
-### 4.1 4 周合成一个分数
+### 4.1 One score from 4 weeks
 
-- 主指标：**query-weighted**（把 4 周的 query 放在一起平均）。
-- 同时报告 equal-fold（4 个周分数直接平均）和每周分数。
-- **D 阶段分组诊断**：D 阶段的报告中，除 4 周合并分数外，再分别报告 **D1–D2** 和 **D3–D4** 的分数（各自两周的 query 放在一起平均，即 query-weighted）。**只作诊断，不参与选择**，选择规则仍是 §4.2 和 `configs/selection_rule.yaml`。原因：D3、D4 疑似促销周，在 4 周合并分数中约占 60% 权重（见 §12）；分组分数用来发现"只在促销周更好"或"只在普通周更好"的配置。
+- Main metric: **query-weighted** (the mean over the queries of the 4 weeks together).
+- The equal-fold score (the plain mean of the 4 weekly scores) and the weekly scores are reported as well.
+- **Grouped diagnostic of the D phase**: in the D-phase reports, besides the 4-week pooled score, the scores of **D1–D2** and of **D3–D4** are reported separately (the mean over the queries of the two weeks together, i.e. query-weighted). **A diagnostic only, not used for selection**; the selection rule is still §4.2 and `configs/selection_rule.yaml`. Reason: D3 and D4 look like promotion weeks and carry about 60% of the weight in the 4-week pooled score (see §12); the group scores serve to spot configurations that are "better only in promotion weeks" or "better only in ordinary weeks".
 
-各组件的选择指标：
+Selection metric of each component:
 
-| 组件 | 选择指标 |
+| Component | Selection metric |
 |---|---|
-| R1、R4、R5、R6 | Recall@100 |
+| R1, R4, R5, R6 | Recall@100 |
 | R2 | Recall@30 |
 | R3 | Recall@50 |
 | Ranker | MAP@12 |
 
-其他指标（Recall@12/20、NDCG@12/20、MAP@12）照常报告，但不用来做选择。
+Other metrics (Recall@12/20, NDCG@12/20, MAP@12) are reported as usual but not used for selection.
 
-### 4.2 什么时候接受一个改动
+### 4.2 When a change is accepted
 
-只有同时满足下面两条，才把默认值换成新的变体或超参数，否则**保留默认值**：
+The default is replaced by a new variant or hyperparameter only if both conditions below hold; otherwise **the default is kept**:
 
-1. 4 周合并分数**相对提升 ≥ 1%**；
-2. **4 周中至少 3 周**更好。这里的"更好"指**严格更好**（新分数 > 默认分数），**分数相同不算更好**。
+1. the 4-week pooled score **improves by ≥ 1% relative**;
+2. it is better in **at least 3 of the 4 weeks**. "Better" here means **strictly better** (new score > default score); **equal scores do not count as better**.
 
-两个候选差不多时，选**更简单、更便宜**的那个。这条规则写进 `configs/selection_rule.yaml`，**在看到任何分数之前提交**。
+When two candidates are about the same, the **simpler and cheaper** one is chosen. This rule is written into `configs/selection_rule.yaml` and **committed before any score is seen**.
 
-**一步有多个候选时**（如 R1 的 τ 有 6 个非默认值），实现在 `src/hmrec/hpo/selection.py`（`selection_rule.yaml` 不改）：
+**When a step has several candidates** (for example, the τ of R1 has 6 non-default values), the implementation is in `src/hmrec/hpo/selection.py` (`selection_rule.yaml` is not changed):
 
-1. 每个候选分别与**当前默认值**（上一步选出的配置）按上面两条比较，得到"通过 / 不通过"。
-2. 没有候选通过 → 保留默认值。
-3. 有候选通过 → 在通过的候选中，与最高合并分数的**相对差距 < 1%**（与第 1 条同一个阈值）的都视为"差不多"，从中选**优先顺序最靠前**的那个。所以最高分的候选如果没通过，而另一个候选通过了，选通过的那个。
-4. 优先顺序在运行前写在 `configs/hpo/d_phase.yaml` 中，运行后不得修改：
-   - 有简单 / 成本差别的（变体、窗口、开关、维度）：按列出的顺序，更简单 / 更便宜 / 更接近默认的在前。例如 G0 < A1、recency-only < decayed frequency、CF0 < CF3、W0 < W2、factors 64 < 128；R4 的 seed 网格为 (90, 关) [默认] < (90, 开) < (180, 关) < (180, 开) < (365, 关) < (365, 开)。
-   - 没有成本差别的纯数值参数（τ、γ、α、λ、α_conf）：按与**当前默认值**的距离排，距离相同时较小的值在前。也就是在"差不多"的候选中选离当前默认值最近的，而不是直接取最高分。
-5. **R5 的 iterations {10, 15, 25} 不用这条规则**，按 §5 R5 的收敛检查处理：只有 25 按第 1、2 条通过（相对 15）时才改为 25。如果 15 之后分数明显下降（25 相对 15 的合并分数下降 ≥ 1%，且至少 3 周严格更差），或者 10 按第 1、2 条通过（相对 15），说明 λ 可能太小：**不自动改 iterations，停下来汇报**，由人决定是否回到 λ 那一步。
-6. **网格边界**：网格**从不自动扩展**。R4、R5 的单个数值参数步骤（R4 的 α；R5 的 λ）如果选中值落在该步取值范围的最小或最大值上，runner 停下这一路（`stop_at_boundary`），由人决定是否扩大范围；报告中写明选中的是哪个值。其他数值步骤（R1、R2 的 τ，R3 的 γ、τ）选中边界值时照常继续，只在报告中注明。R5 的 α_conf 已经扩展过一次（{10, 20, 40} → {10, 20, 40, 60, 80}），**每个参数最多扩一次**，所以不再停下；R5 的 factors 只有 {64, 128} 两个值，128 通过就接受，不扩到 256，也不加这条检查（docs/decisions.md 2026-11-17）。`stop_at_boundary` 只在**切换到**边界值时触发，且不支持多参数步骤（如 R4 的 seed 窗口 × 衰减），这些情况每一路跑完后由人工检查。
+1. Each candidate is compared with the **current default** (the configuration selected by the previous step) under the two conditions above, giving "passes / does not pass".
+2. If no candidate passes → the default is kept.
+3. If some pass → among the passing candidates, those whose **relative gap** to the highest pooled score is **< 1%** (the same threshold as in condition 1) count as "about the same", and the one that comes **first in the priority order** is chosen. So if the highest-scoring candidate does not pass while another candidate does, the passing one is chosen.
+4. The priority order is written in `configs/hpo/d_phase.yaml` before the run and may not be modified after it:
+   - Where candidates differ in simplicity / cost (variants, windows, switches, dimensions): the listed order, simpler / cheaper / closer to the default first. For example G0 < A1, recency-only < decayed frequency, CF0 < CF3, W0 < W2, factors 64 < 128; the seed grid of R4 is (90, off) [default] < (90, on) < (180, off) < (180, on) < (365, off) < (365, on).
+   - Purely numeric parameters with no difference in cost (τ, γ, α, λ, α_conf): ordered by distance from the **current default**, the smaller value first at equal distance. That is, among the "about the same" candidates the one closest to the current default is chosen, not simply the one with the highest score.
+5. **The iterations {10, 15, 25} of R5 do not use this rule** and are handled by the convergence check of §5 R5: it changes to 25 only if 25 passes conditions 1 and 2 (against 15). If the score drops clearly after 15 (the pooled score of 25 is ≥ 1% below that of 15 and at least 3 weeks are strictly worse), or if 10 passes conditions 1 and 2 (against 15), λ may be too small: **iterations are not changed automatically; stop and report**, and a person decides whether to go back to the λ step.
+6. **Grid boundaries**: grids are **never extended automatically**. If, in a step of R4 or R5 with a single numeric parameter (the α of R4; the λ of R5), the selected value falls on the minimum or maximum of the step's range, the runner stops that channel (`stop_at_boundary`) and a person decides whether to widen the range; the report states which value was selected. Other numeric steps (the τ of R1 and R2; the γ and τ of R3) continue as usual when a boundary value is selected and only note it in the report. The α_conf of R5 has already been extended once ({10, 20, 40} → {10, 20, 40, 60, 80}), and **each parameter is extended at most once**, so it does not stop any more; the factors of R5 have only the two values {64, 128}, and if 128 passes it is accepted, without extending to 256 and without this check (docs/decisions.md 2026-11-17). `stop_at_boundary` triggers only when a step **switches to** a boundary value and does not support multi-parameter steps (such as the seed window × decay of R4); these cases are checked by hand after each channel's run.
 
-前一步选出的配置是下一步的默认值，所以 runner 按 §4.3 的顺序自动执行这条规则；最终选择在写入 `configs/locks/` 之前由人确认。每一步的报告列出所有候选：是否通过、4 周各自的分数、合并分数、D1–D2 / D3–D4 分组分数、最终选中哪个以及原因。
+The configuration selected by one step is the default of the next, so the runner applies this rule automatically in the order of §4.3; the final selection is confirmed by a person before it is written to `configs/locks/`. The report of every step lists all candidates: whether each passes, its score in each of the 4 weeks, the pooled score, the group scores D1–D2 / D3–D4, which one is finally selected and why.
 
-### 4.3 顺序
+### 4.3 Order
 
-每个组件都是先做 ablation（选变体），再在选中的变体上做 HPO。HPO 一次只动一个参数，其他参数保持当前最优值。
+Every component does the ablation first (selecting the variant) and then HPO on the selected variant. HPO changes one parameter at a time, with the other parameters kept at their current best values.
 
-### 4.4 记录
+### 4.4 Records
 
-每个 trial 记录：组件、变体、超参数、4 周各自分数、合并分数、query 数、运行时间、内存峰值、代码版本（git commit）。所有结果汇总到 `results/d_phase.csv` 和 `results/v_phase.csv`。
+Every trial records: component, variant, hyperparameters, the score of each of the 4 weeks, the pooled score, the number of queries, run time, memory peak, code version (git commit). All results are collected in `results/d_phase.csv` and `results/v_phase.csv`.
 
 ---
 
-## 5. 六路 Recall：定义、Ablation、HPO
+## 5. The six recall channels: definitions, ablations, HPO
 
-**每个 trial 都要在 D1–D4 每周重新计算**：用该周 anchor 之前的数据重新统计或重新 fit。不能 fit 一次然后评 4 周。
+**Every trial is recomputed in each week of D1–D4**: statistics are recomputed, or models refitted, from the data before that week's anchor. Fitting once and then evaluating 4 weeks is not allowed.
 
-**最终配置（M5，2026-11-17 锁定）**：六路的最终配置写在 `configs/locks/channels.lock.yaml`（R1–R5）和 `configs/locks/twotower.lock.yaml`（R6），下面每一路表格的最后一行（"M5 锁定"）给出。表中的分数是该 trial 在 D1–D4 上的 4 周合并分数，**只作记录**，偏乐观（§12 第 4 条）。**M6 之后只能通过 `src/hmrec/recall/locked.py` 从锁定文件构建六路**，不再读取 `configs/recall/` 的默认值或 `results/d_phase.csv`（有测试扫描 M6 之后的代码）。
+**Final configuration (M5, locked on 2026-11-17)**: the final configurations of the six channels are written in `configs/locks/channels.lock.yaml` (R1–R5) and `configs/locks/twotower.lock.yaml` (R6), and given in the last row ("locked at M5") of each channel's table below. The scores in the tables are the 4-week pooled score of that trial on D1–D4, **for the record only**, and optimistically biased (§12 item 4). **From M6 on, the six channels may be built only from the lock files through `src/hmrec/recall/locked.py`**; the defaults of `configs/recall/` and `results/d_phase.csv` are no longer read (a test scans the code of M6 and later).
 
-统一输出格式（每路一张表）：`query_id, article_idx, channel, rank, score`。每个 query 内 `article_idx` 不重复；按 `score DESC, article_idx ASC` 排序；`rank` 从 1 开始连续编号；不足 quota 时不补齐。
+Unified output format (one table per channel): `query_id, article_idx, channel, rank, score`. Within a query `article_idx` does not repeat; rows are ordered by `score DESC, article_idx ASC`; `rank` is numbered consecutively from 1; nothing is padded when the quota is not reached.
 
-**每路的输出规格**（`src/hmrec/recall/base.py` 的 `OutputSpec`）：每一路声明自己的额外列（列名必须以该路前缀开头，如 `pop_`，不允许 null）和排序键（默认 `score DESC, article_idx ASC`）。写盘前的校验是双向的：多了未声明的列、缺少已声明的列、dtype 不一致都报错；并检查 `rank` 与声明的排序键一致。
+**Output spec of each channel** (`OutputSpec` in `src/hmrec/recall/base.py`): each channel declares its extra columns (their names must start with the channel's prefix, such as `pop_`, and nulls are not allowed) and its sort key (default `score DESC, article_idx ASC`). The validation before writing to disk goes both ways: an undeclared extra column, a missing declared column and a dtype mismatch all raise an error; and `rank` is checked against the declared sort key.
 
-**R1 的排序例外**：R1 有额外列 `pop_is_fallback`（int8），排序键为 `pop_is_fallback ASC, score DESC, article_idx ASC`。原因：年龄桶内的行用桶内分数 `S(g, i)`，补齐行用全局分数 `S(i)`，两者量级不同，补齐行的分数可能比桶内行大；按 `score DESC` 排会把补齐行排到桶内行前面。所以 R1 的 `score`（即 `pop_score` 特征）混合两种量级，由 `pop_is_fallback` 区分；B 组的 `pop_bucket_score`（§8.3）为所有候选提供统一的 `S(g, i)` 量级。
+**The ordering exception of R1**: R1 has the extra column `pop_is_fallback` (int8), and its sort key is `pop_is_fallback ASC, score DESC, article_idx ASC`. Reason: rows from the age bucket use the bucket score `S(g, i)` and fallback rows use the global score `S(i)`; the two are on different scales, and the score of a fallback row may be larger than that of a bucket row; ordering by `score DESC` would put fallback rows before bucket rows. So the `score` of R1 (i.e. the `pop_score` feature) mixes two scales, told apart by `pop_is_fallback`; `pop_bucket_score` of group B (§8.3) gives every candidate the single scale `S(g, i)`.
 
-`article_idx`（int32）是把 `articles.csv` 中全部 `article_id` 按字符串排序后的编号（0..N−1，见 `src/hmrec/data/id_maps.py`），所以按 `article_idx ASC` 排序与按 `article_id ASC` 排序完全等价，tie-break 的结果不变。
+`article_idx` (int32) is the number of each `article_id` after all `article_id` of `articles.csv` are sorted as strings (0..N−1, see `src/hmrec/data/id_maps.py`), so ordering by `article_idx ASC` is exactly equivalent to ordering by `article_id ASC`, and the result of the tie-break is unchanged.
 
-### R1 — 分年龄桶的时间衰减热度（Age-Bucketed Decayed Popularity）
+### R1 — Age-Bucketed Decayed Popularity
 
-**定义**：取 `[a−7d, a)` 内的所有购买行。对年龄桶 `g` 和商品 `i`：
+**Definition**: take all purchase lines in `[a−7d, a)`. For an age bucket `g` and an article `i`:
 
-`S(g, i) = Σ exp(−age_days / τ)`，求和范围是年龄桶 `g` 的用户买 `i` 的每一条购买行。
+`S(g, i) = Σ exp(−age_days / τ)`, summed over every purchase line in which a user of age bucket `g` buys `i`.
 
-- 年龄桶（已冻结，**不是超参数**）：
+- Age buckets (frozen; **not a hyperparameter**):
 
-| 桶 | 规则 |
+| Bucket | Rule |
 |---|---|
-| `AGE_18_24` … `AGE_45_54` | 18–24、25–34、35–44、45–54 |
+| `AGE_18_24` … `AGE_45_54` | 18–24, 25–34, 35–44, 45–54 |
 | `AGE_55_PLUS` | 55–99 |
-| `AGE_INVALID` | 年龄 < 18 或 > 99（18 岁以下和异常值单独一个桶） |
-| `AGE_UNKNOWN` | 年龄缺失 |
+| `AGE_INVALID` | age < 18 or > 99 (under 18 and outliers in one bucket of their own) |
+| `AGE_UNKNOWN` | age missing |
 
-- 每个用户拿自己年龄桶的 Top-100；不足 100 时，用全局衰减热度按顺序补齐，跳过已选商品，并标记 `pop_is_fallback=1`。全局衰减热度 `S(i) = Σ exp(−age_days / τ)`，对 `[a−7d, a)` 内**所有**用户买 `i` 的购买行求和，τ 与桶内相同；补齐行排在桶内行之后（见本节开头的排序例外）。每个 fold、每个年龄桶的补齐行数作为诊断写进日志和结果。
-- **G0**：所有用户同一个全局列表，分数是 `[a−7d, a)` 内的原始购买行数（不衰减、不分桶），没有补齐行。
-- 默认：τ = 3 天，quota 100，限制在活跃池 `A(a)` 内。
+- Each user gets the Top-100 of their own age bucket; when there are fewer than 100, the list is filled in order from the global decayed popularity, skipping the articles already chosen, with `pop_is_fallback=1`. The global decayed popularity is `S(i) = Σ exp(−age_days / τ)`, summed over the purchase lines of **all** users buying `i` in `[a−7d, a)`, with the same τ as in the buckets; fallback rows come after bucket rows (see the ordering exception at the start of this section). The number of fallback rows per fold and per age bucket is written to the log and the results as a diagnostic.
+- **G0**: one global list for all users, scored by the raw number of purchase lines in `[a−7d, a)` (no decay, no buckets), with no fallback rows.
+- Default: τ = 3 days, quota 100, limited to the active pool `A(a)`.
 
-| 类型 | 内容 | 配置数 |
+| Type | Content | Configurations |
 |---|---|---|
-| Ablation | **G0**（全局、不分桶、7 天原始计数）vs **A1**（τ=3） | 2 |
+| Ablation | **G0** (global, no buckets, raw 7-day count) vs **A1** (τ=3) | 2 |
 | HPO | `τ ∈ {1, 2, 3, 4, 5, 6, 7}` | +6 |
-| **M5 锁定** | **A1，τ = 3**（没有候选通过规则，保留默认配置），窗口 7 天，quota 100。规则选择；trial `d2094d455698`；Recall@100 = 7.388% | — |
+| **Locked at M5** | **A1, τ = 3** (no candidate passed the rule, the default configuration is kept), window 7 days, quota 100. Selected by the rule; trial `d2094d455698`; Recall@100 = 7.388% | — |
 
-**合计 8 个配置，分钟级。**
+**8 configurations in total, a matter of minutes.**
 
-### R2 — 时间衰减复购（Decayed-Frequency Repurchase）
+### R2 — Decayed-Frequency Repurchase
 
-**定义**：只推荐用户在 `[a−180d, a)` 内买过的同一个 `article_id`：
+**Definition**: recommend only the same `article_id` the user bought in `[a−180d, a)`:
 
-`S(u, i) = Σ exp(−age_days / τ)`，对用户 `u` 买 `i` 的每一条购买行求和（重复行各算一次）。
+`S(u, i) = Σ exp(−age_days / τ)`, summed over every purchase line in which user `u` buys `i` (duplicate lines each count once).
 
-- 默认：τ = 30 天，quota 最多 30（soft，不补齐）。没有购买历史的用户输出为空。
+- Default: τ = 30 days, quota at most 30 (soft, not padded). The output is empty for users without purchase history.
 
-| 类型 | 内容 | 配置数 |
+| Type | Content | Configurations |
 |---|---|---|
-| Ablation | **Recency-only**（按最近一次购买时间排序）vs **Decayed frequency**（τ=30） | 2 |
-| HPO 第 1 步 | `τ ∈ {14, 30, 60}` | +2 |
-| HPO 第 2 步 | 历史窗口 `lookback_days ∈ {180, 365}`（默认 180；优先顺序 180 < 365，短的更简单）。**在看到 D 阶段 R1–R3 结果之后加入**，见 `docs/decisions.md` | +1 |
-| **M5 锁定** | **Decayed frequency，τ = 30，历史窗口 365 天**，quota 30。规则选择；trial `f562d598b0d6`；Recall@30 = 4.266% | — |
+| Ablation | **Recency-only** (ordered by the time of the most recent purchase) vs **Decayed frequency** (τ=30) | 2 |
+| HPO step 1 | `τ ∈ {14, 30, 60}` | +2 |
+| HPO step 2 | History window `lookback_days ∈ {180, 365}` (default 180; priority order 180 < 365, shorter is simpler). **Added after seeing the D-phase results of R1–R3**, see `docs/decisions.md` | +1 |
+| **Locked at M5** | **Decayed frequency, τ = 30, history window 365 days**, quota 30. Selected by the rule; trial `f562d598b0d6`; Recall@30 = 4.266% | — |
 
-Recency-only 的分数 = `1 / age_days`，`age_days` 取用户最近一次购买该商品的年龄（昨天 = 1.0，前天 = 0.5）；更早的购买和购买次数都不参与。同一天买的多件商品同分，只按 `article_idx ASC` 排序，不用其他信息打破平局，保持它是纯粹的对照组。
+The score of Recency-only = `1 / age_days`, where `age_days` is the age of the user's most recent purchase of the article (yesterday = 1.0, the day before = 0.5); earlier purchases and the number of purchases take no part. Several articles bought on the same day score the same and are ordered only by `article_idx ASC`, with no other information used to break ties, so that it stays a pure control.
 
-**合计 5 个配置。**
+**5 configurations in total.**
 
-### R3 — 同款不同色（Sibling，S2）
+### R3 — Sibling (same style, other colour; S2)
 
-**定义**：
-- 风格偏好：`P(u, c) = Σ exp(−age_days / τ)`，对用户 `u` 在 `[a−180d, a)` 内买过的、`product_code = c` 的每一条购买行求和。
-- 市场热度：`M(j)` = 商品 `j` 在 `[a−7d, a)` 内的全站购买行数。
-- 分数：`S(u, j) = P(u, c(j)) × (1 + M(j))^γ`。
-- 候选：与用户 180 天内买过的商品同 `product_code`，但**排除**用户 180 天内买过的同一个 `article_id`。
-- 默认：τ = 30，γ = 0.5，quota 最多 50（不补齐）。
+**Definition**:
+- Style preference: `P(u, c) = Σ exp(−age_days / τ)`, summed over every purchase line of user `u` in `[a−180d, a)` with `product_code = c`.
+- Market popularity: `M(j)` = the number of site-wide purchase lines of article `j` in `[a−7d, a)`.
+- Score: `S(u, j) = P(u, c(j)) × (1 + M(j))^γ`.
+- Candidates: the same `product_code` as an article the user bought within 180 days, **excluding** the very `article_id` the user bought within 180 days.
+- Default: τ = 30, γ = 0.5, quota at most 50 (not padded).
 
-| 类型 | 内容 | 配置数 |
+| Type | Content | Configurations |
 |---|---|---|
-| Ablation | `γ ∈ {0, 0.5, 1.0, 1.5, 2.0}`（γ=0 表示只看风格偏好，用来检验市场热度有没有用；1.5、2.0 **在看到 D 阶段 R1–R3 结果之后加入**，见 `docs/decisions.md`；优先顺序按与默认值 0.5 的距离） | 5 |
-| HPO | 在最佳 γ 上调 `τ ∈ {14, 30, 60}` | +2 |
-| **M5 锁定** | **γ = 1.0，τ = 30，只输出 `A(a)` 内的商品**（`active_pool_only: true`），风格窗口 180 天，市场窗口 7 天，quota 50。规则执行：D 阶段规则选中 γ = 1.0、τ = 30（trial `3188358fa459`，Recall@50 = 3.257%），M4 预先登记的规则再把它改为只输出 `A(a)`；锁定的是切换后的 trial `06025cc3d129`（`results/m4_trials.csv`），Recall@50 = 3.240% | — |
+| Ablation | `γ ∈ {0, 0.5, 1.0, 1.5, 2.0}` (γ=0 means style preference only, to test whether market popularity helps; 1.5 and 2.0 were **added after seeing the D-phase results of R1–R3**, see `docs/decisions.md`; the priority order is by distance from the default 0.5) | 5 |
+| HPO | With the best γ, tune `τ ∈ {14, 30, 60}` | +2 |
+| **Locked at M5** | **γ = 1.0, τ = 30, outputs only articles inside `A(a)`** (`active_pool_only: true`), style window 180 days, market window 7 days, quota 50. Execution of a rule: the D-phase rule selected γ = 1.0, τ = 30 (trial `3188358fa459`, Recall@50 = 3.257%), and the pre-registered M4 rule then changed it to output only `A(a)`; what is locked is the trial after the switch, `06025cc3d129` (`results/m4_trials.csv`), Recall@50 = 3.240% | — |
 
-**合计 7 个配置。** 如果选中 γ = 2.0（新网格的边界），不再继续扩展，只在报告中说明。
+**7 configurations in total.** If γ = 2.0 (the boundary of the new grid) is selected, the grid is not extended further and this is only noted in the report.
 
-**活跃池**（2026-11-17，M4）：R3 只输出 `A(a)` 内的商品（`configs/recall/r3_sibling.yaml` 的 `active_pool_only`，在 `configs/m4_union_check.yaml` 的 `variants.r3_active_pool` 中打开；M5 在 `configs/locks/channels.lock.yaml` 中锁定为 `true`）。过滤放在取 Top-50 之前，空出的名额由池内的同款商品补上；`P(u, c)`、`M(j)` 和已购买商品的排除仍用全部商品。本节的 ablation 和 HPO 都是在不过滤的设置下做的，γ、τ 不重新调（§2.4、§5.7 第 4 项）。
+**Active pool** (2026-11-17, M4): R3 outputs only articles inside `A(a)` (`active_pool_only` in `configs/recall/r3_sibling.yaml`, turned on in `variants.r3_active_pool` of `configs/m4_union_check.yaml`; M5 locks it as `true` in `configs/locks/channels.lock.yaml`). The filter comes before taking the Top-50, and the freed slots are filled by same-style articles inside the pool; `P(u, c)`, `M(j)` and the exclusion of bought articles still use all articles. The ablation and the HPO of this section were all done without the filter, and γ and τ are not re-tuned (§2.4, §5.7 item 4).
 
 ### R4 — ItemCF
 
-**定义**（拟合窗口 `[a−365d, a)`，用户和商品的交互只记 0/1）：
-- 用户权重（IUF）：`w_u = 1 / ln(1 + d_u)`，`d_u` = 用户在窗口内买过的不同商品数。
-- 加权共现：`C_w(i, j) = Σ_u w_u · R_ui · R_uj`；加权边际：`n_w(i) = Σ_u w_u · R_ui`。
-- 相似度（从 seed `i` 到候选 `j`）：`s(i→j) = C_w(i, j) / (n_w(i)^α · n_w(j)^(1−α))`。去掉 `i = j`。
-- 每个 seed 只保留 Top-`K_n`（=100）个邻居。**邻居 `j` 限定在 `A(a)` 内，过滤在取 Top-`K_n` 之前**：每个 seed 保留的是它最好的 `K_n` 个**活跃**邻居。`C_w`、`n_w`、`d_u` 用拟合窗口内的全部商品计算，不受 `A(a)` 影响；seed 本身不要求在 `A(a)` 内（不活跃的 seed 照样贡献分数）。原因：D1 上拟合窗口的图有 71,713 个商品，其中只有 20,764 个（29%）在 `A(a)` 内；如果先取 Top-100 再过滤，实测 **45.4%** 的邻居名额会落在不活跃商品上被浪费（D1，CF3，α=0.7）。
-- 用户分数：`S(u, j) = Σ_i q_ui · s(i→j)`，对用户在 seed 窗口 `[a−L_seed, a)` 内买过的每个不同 seed `i` 求和。
-- **Seed 权重** `q_ui`：衰减关闭时 `q_ui = 1`；打开时 `q_ui = exp(−age_ui / τ_seed)`，`age_ui` 是用户**最近一次**购买 seed `i` 距 anchor 的天数（昨天 = 1；同一个 seed 买多次只取最近一次，不累加）。`τ_seed` 固定为 30 天（与 R2、R3 的 τ 默认值一致），**不调**。建图（`C_w`、`n_w`、`d_u`）保持不衰减。
-- 默认：CF3（IUF + α=0.7），`L_seed` = 90 天，seed 衰减关闭，quota 100，不排除用户已买的商品。
+**Definition** (fit window `[a−365d, a)`; interactions between users and articles count only as 0/1):
+- User weight (IUF): `w_u = 1 / ln(1 + d_u)`, where `d_u` = the number of distinct articles the user bought in the window.
+- Weighted co-occurrence: `C_w(i, j) = Σ_u w_u · R_ui · R_uj`; weighted marginal: `n_w(i) = Σ_u w_u · R_ui`.
+- Similarity (from seed `i` to candidate `j`): `s(i→j) = C_w(i, j) / (n_w(i)^α · n_w(j)^(1−α))`. `i = j` is removed.
+- Each seed keeps only its Top-`K_n` (=100) neighbours. **The neighbours `j` are restricted to `A(a)`, and the filter comes before taking the Top-`K_n`**: what each seed keeps are its best `K_n` **active** neighbours. `C_w`, `n_w` and `d_u` are computed from all articles of the fit window and are not affected by `A(a)`; the seed itself need not be in `A(a)` (inactive seeds contribute to the score all the same). Reason: on D1 the graph of the fit window has 71,713 articles, of which only 20,764 (29%) are in `A(a)`; if the Top-100 were taken first and filtered afterwards, a measured **45.4%** of the neighbour slots would fall on inactive articles and be wasted (D1, CF3, α=0.7).
+- User score: `S(u, j) = Σ_i q_ui · s(i→j)`, summed over every distinct seed `i` the user bought in the seed window `[a−L_seed, a)`.
+- **Seed weight** `q_ui`: with decay off, `q_ui = 1`; with it on, `q_ui = exp(−age_ui / τ_seed)`, where `age_ui` is the number of days from the user's **most recent** purchase of seed `i` to the anchor (yesterday = 1; a seed bought several times takes only the most recent purchase, with no accumulation). `τ_seed` is fixed at 30 days (the same as the default τ of R2 and R3) and **not tuned**. Building the graph (`C_w`, `n_w`, `d_u`) stays without decay.
+- Default: CF3 (IUF + α=0.7), `L_seed` = 90 days, seed decay off, quota 100, articles the user already bought are not excluded.
 
-| 类型 | 内容 | 配置数 |
+| Type | Content | Configurations |
 |---|---|---|
-| Ablation | **CF0**（不加权，α = 0.5，即普通 cosine `s = C / sqrt(n(i)·n(j))`）vs **CF3** | 2 |
-| HPO 第 1 步 | `α ∈ {0.5, 0.7, 0.9}` | +2 |
-| HPO 第 2 步 | 3×2 小网格：`L_seed ∈ {90, 180, 365}` × seed 衰减 {关, 开（τ_seed = 30）}；(90, 关) 就是当前配置 | +5 |
-| **M5 锁定** | **CF3，α = 0.7，`L_seed` = 365 天，seed 衰减开**（τ_seed = 30），建图窗口 365 天，`K_n` = 100，quota 100。规则选择；trial `df281d91d7c1`；Recall@100 = 9.332% | — |
+| Ablation | **CF0** (unweighted, α = 0.5, i.e. plain cosine `s = C / sqrt(n(i)·n(j))`) vs **CF3** | 2 |
+| HPO step 1 | `α ∈ {0.5, 0.7, 0.9}` | +2 |
+| HPO step 2 | A small 3×2 grid: `L_seed ∈ {90, 180, 365}` × seed decay {off, on (τ_seed = 30)}; (90, off) is the current configuration | +5 |
+| **Locked at M5** | **CF3, α = 0.7, `L_seed` = 365 days, seed decay on** (τ_seed = 30), graph window 365 days, `K_n` = 100, quota 100. Selected by the rule; trial `df281d91d7c1`; Recall@100 = 9.332% | — |
 
-**HPO 第 2 步为什么用网格，而不是"一次只改一个因素"**：两个因素明显相互影响。seed 窗口越长，覆盖的用户越多（D1 上 32.2% 的 query 因 90 天内没有购买而输出为空），但不衰减时，几个月前的旧购买和昨天的购买权重相同，噪声随窗口变长而变大；衰减正是用来抵消这部分噪声的。单独调窗口（衰减关）会低估长窗口，单独调衰减（90 天）又看不到它在长窗口上的作用。网格只有 6 格，每格在 D1 上只需十几秒（§1.3），成本可以忽略。
+**Why HPO step 2 uses a grid instead of "one factor at a time"**: the two factors clearly interact. The longer the seed window, the more users are covered (on D1, 32.2% of the queries get an empty output because they have no purchase within 90 days), but without decay an old purchase from months ago weighs the same as yesterday's, and the noise grows with the window; decay is exactly what offsets this noise. Tuning the window alone (decay off) would underrate long windows, and tuning decay alone (90 days) would not show its effect on long windows. The grid has only 6 cells, each taking only a dozen seconds or so on D1 (§1.3), so the cost is negligible.
 
-不同 α 可以复用同一周的 `C_w` 和 `n_w`，只需重新归一化、重新取 Top-`K_n`。**内存**：按 seed 分块计算（见 §1.3）。
+Different α can reuse the `C_w` and `n_w` of the same week; only the normalization and the Top-`K_n` have to be redone. **Memory**: computed in chunks of seeds (see §1.3).
 
-**实现**（`src/hmrec/recall/r4_itemcf.py`）：`C_w` 不整块存储。每块 seed（`chunking.item_chunk_size`）的 `C_w(i, ·)` 用 scipy 稀疏矩阵乘法算出，对每个 α 各做一次归一化和 Top-`K_n`，然后释放；所以一次扫描同时得到多个 α 的邻居表（`generate_for_alphas`）。每个 `C_w` 元素按同样的用户顺序求和，分块和不分块的结果逐位相同（有测试）。只计算本周 query 用到的 seed 的邻居。用户打分同样是稀疏矩阵乘法（seed 0/1 矩阵 × 邻居相似度矩阵），按 `chunking.query_chunk_size` 分块。CF0 和 CF3 只在用户权重上不同，α 是独立的配置项；CF0 的 ablation 用 α=0.5（即上表的 `C / sqrt(n(i)·n(j))`）。Seed 窗口和 seed 衰减只影响用户打分，不影响建图；`L_seed` 不能超过拟合窗口（365 天），保证每个 seed 都在图里。
+**Implementation** (`src/hmrec/recall/r4_itemcf.py`): `C_w` is not stored as a whole. The `C_w(i, ·)` of each chunk of seeds (`chunking.item_chunk_size`) is computed by scipy sparse matrix multiplication, normalized and cut to the Top-`K_n` once per α, and then released; so one pass gives the neighbour tables of several α at once (`generate_for_alphas`). Every element of `C_w` is summed in the same order of users, so the chunked and the unchunked results are bit-identical (tested). Only the neighbours of the seeds used by this week's queries are computed. User scoring is a sparse matrix multiplication as well (the seed 0/1 matrix × the neighbour similarity matrix), chunked by `chunking.query_chunk_size`. CF0 and CF3 differ only in the user weights, and α is a separate config item; the CF0 ablation uses α=0.5 (i.e. the `C / sqrt(n(i)·n(j))` of the table above). The seed window and the seed decay affect only user scoring, not the graph; `L_seed` may not exceed the fit window (365 days), which guarantees that every seed is in the graph.
 
-**合计 9 个配置。**
+**9 configurations in total.**
 
-### R5 — WALS（时间衰减的隐式 ALS）
+### R5 — WALS (implicit ALS with time decay)
 
-**定义**（拟合窗口 `[a−180d, a)`）：
-- 交互强度：`r_ui = Σ exp(−age_days / 60)`，对每条购买行求和。
-- 置信度：`c_ui = 1 + α_conf · r_ui`，作为 CSR 矩阵的值传入 `implicit`，并设置库参数 `alpha=1.0`，避免重复放大。
-- 默认：W2，`α_conf=20`，`factors=64`，`λ=0.1`，`iterations=15`，固定 seed。
-- 推理：拟合得到的用户向量点乘商品向量，取活跃池内 Top-100。不排除已购商品。窗口内没有交互的用户输出为空。
-- **实现**（`src/hmrec/recall/r5_wals.py`）：只有窗口内有购买的用户和商品才有行 / 列（才有向量）。先用 float32 矩阵乘法（按 `chunking.query_chunk_size` 个 query 分块）找出每个用户得分不低于第 100 名的商品，再用 `hmrec.vectors.dot_pairs` 重新计算这些候选的分数并排序，保证 `score` 与 §8.3 的 `wals_dot` 逐位相同。两种计算在最后一位可能不同，所以在第 100 名附近几乎同分时，保留的集合可能与精确排序差最后一个商品；保存的分数和顺序总是精确的。`implicit` 用 CPU 版，`num_threads` 取自 `configs/base.yaml`，`random_seed` 在 `configs/recall/r5_wals.yaml` 中固定。
+**Definition** (fit window `[a−180d, a)`):
+- Interaction strength: `r_ui = Σ exp(−age_days / 60)`, summed over every purchase line.
+- Confidence: `c_ui = 1 + α_conf · r_ui`, passed to `implicit` as the values of the CSR matrix, with the library parameter `alpha=1.0` to avoid amplifying twice.
+- Default: W2, `α_conf=20`, `factors=64`, `λ=0.1`, `iterations=15`, fixed seed.
+- Inference: the fitted user vector is dotted with the item vectors, and the Top-100 inside the active pool are taken. Bought articles are not excluded. The output is empty for users with no interaction in the window.
+- **Implementation** (`src/hmrec/recall/r5_wals.py`): only users and articles with a purchase in the window have a row / column (and hence a vector). First a float32 matrix multiplication (chunked by `chunking.query_chunk_size` queries) finds, for each user, the articles scoring no lower than the 100th; then `hmrec.vectors.dot_pairs` recomputes the scores of these candidates and orders them, which guarantees that `score` is bit-identical to the `wals_dot` of §8.3. The two computations may differ in the last digit, so when scores are nearly tied around the 100th place, the set kept may differ from the exact ordering by its last article; the saved scores and order are always exact. `implicit` uses the CPU version, `num_threads` comes from `configs/base.yaml`, and `random_seed` is fixed in `configs/recall/r5_wals.yaml`.
 
-| 类型 | 内容 | 配置数 |
+| Type | Content | Configurations |
 |---|---|---|
-| Ablation | **W0**（`r_ui = 1`，只看有没有买过）vs **W2** | 2 |
-| HPO 第 1 步 | `α_conf ∈ {10, 20, 40, 60, 80}`（60、80 是看到 D 阶段结果后扩展的，见 docs/decisions.md 2026-11-17） | +4 |
-| HPO 第 2 步 | `λ ∈ {0.01, 0.1, 1.0}` | +2 |
-| HPO 第 3 步 | `factors ∈ {64, 128}` | +1 |
-| 收敛检查 | 在最终配置上跑 `iterations ∈ {10, 15, 25}`，只确认 15 次时已经进入平台期 | +2 |
-| **M5 锁定** | **W2，`α_conf` = 60，`λ` = 0.1，`factors` = 128，`iterations` = 15**，窗口 180 天，衰减 τ = 60，seed 42，quota 100。规则选择；trial `3261309f8e8f`；Recall@100 = 10.807% | — |
+| Ablation | **W0** (`r_ui = 1`, only whether there was a purchase) vs **W2** | 2 |
+| HPO step 1 | `α_conf ∈ {10, 20, 40, 60, 80}` (60 and 80 were added after seeing D-phase results, see docs/decisions.md 2026-11-17) | +4 |
+| HPO step 2 | `λ ∈ {0.01, 0.1, 1.0}` | +2 |
+| HPO step 3 | `factors ∈ {64, 128}` | +1 |
+| Convergence check | Run `iterations ∈ {10, 15, 25}` on the final configuration, only to confirm that 15 iterations are already on the plateau | +2 |
+| **Locked at M5** | **W2, `α_conf` = 60, `λ` = 0.1, `factors` = 128, `iterations` = 15**, window 180 days, decay τ = 60, seed 42, quota 100. Selected by the rule; trial `3261309f8e8f`; Recall@100 = 10.807% | — |
 
-**Iterations 不做 early stopping**：ALS 每一轮都是闭式解（closed-form），很快收敛；过拟合由 λ 和 factors 控制。如果 25 次明显比 15 次好，就改成 25；如果 15 次之后分数明显下降，说明 λ 太小，回到第 2 步加大 λ，而不是减少 iterations。
+**No early stopping on iterations**: every round of ALS is a closed-form solution and converges quickly; overfitting is controlled by λ and factors. If 25 iterations are clearly better than 15, change to 25; if the score drops clearly after 15 iterations, λ is too small, and the remedy is to go back to step 2 and increase λ, not to reduce iterations.
 
-**合计约 11 个配置 × 4 周 ≈ 44 次 ALS 拟合。**
+**About 11 configurations × 4 weeks ≈ 44 ALS fits in total.**
 
-### R6 — Two-Tower（训练方式详见 §6）
+### R6 — Two-Tower (training described in §6)
 
-**模型**（全部数值固定、不调；写在 `configs/recall/r6_twotower.yaml`，实现在 `src/hmrec/recall/twotower/`；理由见 `docs/decisions.md` 2026-11-17 "Two-Tower 模型结构"）：
+**Model** (all values fixed and not tuned; written in `configs/recall/r6_twotower.yaml`, implemented in `src/hmrec/recall/twotower/`; for the reasons see `docs/decisions.md` 2026-11-17 "Two-Tower model structure"):
 
-**类别特征的编码规则**（两个塔都适用）：取值数（含缺失编码 0）≤ 20 的字段用 one-hot；> 20 的字段用 embedding，维度 16，`padding_idx = 0`，初始化 N(0, 0.02²)。article ID 和 product_code 例外（见下表）。按实际数据的取值数：
+**Encoding rule for categorical features** (for both towers): a field with ≤ 20 values (including the missing code 0) is one-hot; a field with > 20 values uses an embedding of dimension 16, `padding_idx = 0`, initialized N(0, 0.02²). Article ID and product_code are exceptions (see the table below). With the value counts of the actual data:
 
-| 字段 | 取值数（含 0） | 编码 | 维度 |
+| Field | Values (including 0) | Encoding | Dimension |
 |---|---|---|---|
 | product_type_no | 133 | embedding | 16 |
 | product_group_name | 20 | one-hot | 20 |
@@ -448,341 +448,341 @@ Recency-only 的分数 = `1 / age_days`，`age_days` 取用户最近一次购买
 | club_member_status | 4 | one-hot | 4 |
 | fashion_news_frequency | 4 | one-hot | 4 |
 
-- **Item tower**（历史商品和目标商品共用同一个 item tower，参数完全共享）：下列各部分**拼接**：
+- **Item tower** (history items and target items share the same item tower, with fully shared parameters): the parts below are **concatenated**:
 
-  | 部分 | 结构 | 维度 |
+  | Part | Structure | Dimension |
   |---|---|---|
-  | 图像 | `Linear(512 → 128)`，输出乘以 `image_mask`（没有图像时这一部分包括 bias 全为 0） | 128 |
-  | 文本 | `Linear(384 → 128)`，输出乘以 `text_mask` | 128 |
-  | article ID | `Embedding(n_articles + 1, 64, padding_idx = n_articles)`，初始化为 0 | 64 |
-  | product_code | `Embedding(47,225, 32, padding_idx = 0)`，初始化为 0 | 32 |
-  | 6 个类目字段 | 按上面的规则：16 + 20 + 16 + 6 + 16 + 16 | 90 |
-  | **合计** | | **442** |
+  | Image | `Linear(512 → 128)`, with the output multiplied by `image_mask` (without an image this part is all 0, bias included) | 128 |
+  | Text | `Linear(384 → 128)`, with the output multiplied by `text_mask` | 128 |
+  | Article ID | `Embedding(n_articles + 1, 64, padding_idx = n_articles)`, initialized to 0 | 64 |
+  | product_code | `Embedding(47,225, 32, padding_idx = 0)`, initialized to 0 | 32 |
+  | The 6 category fields | By the rule above: 16 + 20 + 16 + 6 + 16 + 16 | 90 |
+  | **Total** | | **442** |
 
-  拼接后 → `Linear(442 → 256)` → ReLU → `Linear(256 → 128)` → L2 归一化。
-  - 没有图像向量的 442 个商品（见 §2.1）：图像部分乘以 mask 后为 0（不填 0 向量当作真实输入），商品向量由文本、ID 和类目部分得到。这些商品**照常参与训练和召回**，不从商品目录或活跃池中删除。
-  - article ID 和 product_code 初始化为 0：训练中没出现过的商品（或款式），这一部分保持 0，向量只由内容和类目决定，不引入随机噪声。
-- **User tower**：用户在 anchor（训练时为购买日）之前**最近 20 件购买**（不限时间窗口；去重、排序、padding 规则见 §6.1）经过同一个 item tower 编码（padding 位置不参与编码）。**按位置加权 pooling**：为 20 个位置各学一个标量 `w_j`（初始为 0，即开始时等于 masked mean），`pooled = Σ_j a_j · h_j`，`a = softmax(w)` 只在 mask 为 True 的位置上计算；历史为空时 `pooled = 0`。Profile：三个字段都是 one-hot，共 16 维。`[pooled 128 ; profile 16]`（144 维）→ `Linear(144 → 256)` → ReLU → `Linear(256 → 128)` → L2 归一化。
-- **Loss**：multi-positive、duplicate-aware 的 in-batch softmax 加 LogQ 修正：
-  - 列 = batch 中**去重后**的目标商品（同一商品在 batch 中出现多次只算一列，不会被当成两个负样本）；
-  - `logit[i, k] = u_i · v_k / τ − log Q(k)`，**τ = 0.05**，对所有列（包括目标列）都做 LogQ 修正；
-  - `Q(k)` = 当前训练集中以 k 为目标的样本占比：base 用全部 base 训练样本（不含报警用户）统计，每周 fine-tune 用该次的训练集（新一周 + replay）统计；
-  - 同一 group（同一用户同一天）的其他正样本所在的列，在该行置为 −∞（既不是目标也不是负样本）；loss = 每行对其目标列的交叉熵的平均。
-- **训练**：batch 512；每个 epoch 用 `(seed, epoch)` 在 CPU 上生成随机打乱顺序，保留最后一个不满的 batch；Adam（β = 0.9, 0.999；ε = 1e-8），lr **1e-3 固定不衰减**（fine-tune 1e-4），weight decay 0，不做梯度裁剪；训练 **6 个 epoch**，每个 epoch 存一个 checkpoint（`artifacts/models/twotower/base/epoch_{k}.pt`）；seed 42；留出 1% 的用户只记录 loss 作为报警，不用于任何选择。每一步只对 batch 中出现的不同商品（目标 + 历史，去掉 padding）编码一次，再按下标取回。
-- **设备**：真实模型在 mps 和 cpu 上各跑 200 步（各自一个进程，前 10 步不计时），只有 MPS 的平均每步时间比 CPU 快 1.3 倍以上时才用 MPS，否则用 CPU（MPS 上 embedding 反向传播不是确定性的，结果无法精确复现）。结果记入 `docs/decisions.md`。
-- **推理**：R6 是普通的 `RecallChannel`（`recall/twotower/infer.py`）。历史为 anchor 之前最近 20 件（规则与训练相同，数据先裁剪到当周 query 用户）；没有历史的用户使用只含 profile 的向量。只对活跃池 `A(a)` 中的商品计算向量，按 `chunking.dense_score_query_chunk_size` 分块取 Top-100（与 R5 共用 `recall/vector_scoring.py`）；`score` 用 `vectors.dot_pairs` 重新计算，保证与 §8.3 的 `tt_dot` 逐位相同；排序 `score DESC, article_idx ASC`。
-- **E_base 的选择**：默认 epoch 1，候选 epoch 2–6，epoch 少的优先（`configs/hpo/d_phase.yaml` 的 `r6_twotower.base_epoch` 步骤），按 §4.2 的多候选规则选择；每个 checkpoint 不做任何更新，直接预测 D1–D4，结果写入 `results/d_phase.csv` 和 `results/d_phase_steps/r6_twotower.csv`。选中 epoch 6 时停下，由人决定。
-- 固定（不调）：以上全部，包括 batch 512、输出 128、温度 0.05、LR、history 长度 20、epoch 数 6。
+  After concatenation → `Linear(442 → 256)` → ReLU → `Linear(256 → 128)` → L2 normalization.
+  - The 442 articles without an image vector (see §2.1): the image part is 0 after multiplication by the mask (a 0 vector is not fed in as if it were a real input), and the item vector comes from the text, ID and category parts. These articles **take part in training and recall as usual** and are not removed from the catalog or the active pool.
+  - Article ID and product_code are initialized to 0: for an article (or a style) not seen in training, this part stays 0, and the vector is determined by content and categories only, with no random noise added.
+- **User tower**: the user's **20 most recent purchases** before the anchor (before the purchase date in training), with no time window (for deduplication, order and padding rules see §6.1), are encoded by the same item tower (padding positions are not encoded). **Position-weighted pooling**: one scalar `w_j` is learned for each of the 20 positions (starting at 0, i.e. equal to a masked mean at the start), `pooled = Σ_j a_j · h_j`, with `a = softmax(w)` computed only over positions where the mask is True; with an empty history, `pooled = 0`. Profile: the three fields are all one-hot, 16 dimensions together. `[pooled 128 ; profile 16]` (144 dimensions) → `Linear(144 → 256)` → ReLU → `Linear(256 → 128)` → L2 normalization.
+- **Loss**: a multi-positive, duplicate-aware in-batch softmax with LogQ correction:
+  - columns = the **deduplicated** target articles of the batch (an article that appears several times in the batch is one column and is not treated as two negatives);
+  - `logit[i, k] = u_i · v_k / τ − log Q(k)`, **τ = 0.05**, with the LogQ correction applied to all columns (including the target column);
+  - `Q(k)` = the share of the samples of the current training set whose target is k: for the base it is computed over all base training samples (excluding the alarm users), and for each weekly fine-tuning over the training set of that run (the new week + replay);
+  - the columns of the other positives of the same group (the same user on the same day) are set to −∞ in that row (neither target nor negative); loss = the mean over rows of the cross-entropy with respect to the row's target column.
+- **Training**: batch 512; for every epoch a shuffled order is generated on CPU from `(seed, epoch)`, and the last incomplete batch is kept; Adam (β = 0.9, 0.999; ε = 1e-8), lr **1e-3 fixed with no decay** (1e-4 for fine-tuning), weight decay 0, no gradient clipping; **6 epochs** of training, with a checkpoint saved after each epoch (`artifacts/models/twotower/base/epoch_{k}.pt`); seed 42; 1% of the users are held out and only their loss is recorded as an alarm, used for no selection. In every step each distinct article of the batch (targets + histories, padding removed) is encoded once and then fetched by index.
+- **Device**: the real model runs 200 steps each on mps and on cpu (one process each, the first 10 steps not timed); MPS is used only if its mean time per step is more than 1.3 times faster than CPU, otherwise CPU (the backward pass of embeddings on MPS is not deterministic, so the result cannot be reproduced exactly). The result is recorded in `docs/decisions.md`.
+- **Inference**: R6 is an ordinary `RecallChannel` (`recall/twotower/infer.py`). The history is the 20 most recent items before the anchor (the same rule as in training; the data are first cut down to the query users of the week); a user without history uses a vector from the profile alone. Vectors are computed only for the articles of the active pool `A(a)`, and the Top-100 is taken in chunks of `chunking.dense_score_query_chunk_size` (sharing `recall/vector_scoring.py` with R5); `score` is recomputed with `vectors.dot_pairs`, which guarantees it is bit-identical to the `tt_dot` of §8.3; ordering `score DESC, article_idx ASC`.
+- **Selection of E_base**: default epoch 1, candidates epoch 2–6, fewer epochs first (the `r6_twotower.base_epoch` step of `configs/hpo/d_phase.yaml`), selected by the multi-candidate rule of §4.2; each checkpoint predicts D1–D4 directly with no update, and the results are written to `results/d_phase.csv` and `results/d_phase_steps/r6_twotower.csv`. If epoch 6 is selected, the run stops for a person to decide.
+- Fixed (not tuned): all of the above, including batch 512, output 128, temperature 0.05, the LR, history length 20, and 6 epochs.
 
-| 类型 | 内容 | 成本 |
+| Type | Content | Cost |
 |---|---|---|
-| HPO 第 1 步 | **E_base**：base model 每个 epoch 存一个 checkpoint（1–6），每个 checkpoint **不做更新**直接预测 D1–D4 | 1 次 base 训练 |
-| Ablation | **Frozen base**（之后不更新）vs **每周 fine-tune** | 包含在第 2 步 |
-| HPO 第 2 步 | `E_update ∈ {1, 2}` × `replay ∈ {0, 50%}`，共 4 条滚动链 | 4 条链 × 4 周 |
-| 稳健性 | 前 2 名的配置各再跑 2 个 seed | 约 4 条链 |
-| 可选 | ① 只用 ID、不用 CLIP / MiniLM 的 content ablation；② base 长度改为 52 周 | 时间允许再做 |
-| 不做 | 每周从零重训（full retrain）的对照 | — |
-| **M5 锁定** | **E_base = 4，E_update = 2，replay = 50%**，fine-tune lr 1e-4，chain seed 42，其余为上面的固定值。**人工决定**：规则选中的是 (E_update = 2, replay = 0)（trial `ef62019e6c73`，14.576%），人工采用 (2, 50%)（trial `835ef201ee4d`，Recall@100 = 14.634%），理由见 `docs/decisions.md`。模型文件和 sha256 见 §6.5 | — |
+| HPO step 1 | **E_base**: the base model saves a checkpoint after each epoch (1–6), and each checkpoint predicts D1–D4 directly **with no update** | 1 base training |
+| Ablation | **Frozen base** (no update afterwards) vs **weekly fine-tuning** | included in step 2 |
+| HPO step 2 | `E_update ∈ {1, 2}` × `replay ∈ {0, 50%}`, 4 rolling chains in total | 4 chains × 4 weeks |
+| Robustness | The top 2 configurations are each run with 2 more seeds | about 4 chains |
+| Optional | ① a content ablation with IDs only, without CLIP / MiniLM; ② a base length of 52 weeks | if time allows |
+| Not done | A control retrained from scratch every week (full retrain) | — |
+| **Locked at M5** | **E_base = 4, E_update = 2, replay = 50%**, fine-tune lr 1e-4, chain seed 42, the rest at the fixed values above. **A manual decision**: the rule selected (E_update = 2, replay = 0) (trial `ef62019e6c73`, 14.576%), and (2, 50%) was adopted by hand (trial `835ef201ee4d`, Recall@100 = 14.634%); for the reasons see `docs/decisions.md`. Model files and sha256 in §6.5 | — |
 
-### 5.7 D 阶段的收尾：Union 检查
+### 5.7 Closing the D phase: the union check
 
-用 6 路各自的最终配置，在 D1–D4 上计算：
+With the final configuration of each of the 6 channels, compute on D1–D4:
 
-1. **Union recall**（目标 ≥ 24%，即 G2）；
-2. **Leave-one-out union recall**：去掉每一路后，union recall 下降多少，用来判断这一路有没有带来其他路没有的候选；
-3. 每个 query 的候选数分布（平均值、P50、P90）；
-4. **R3 活跃池诊断**：在 D1–D4 上统计 R3 候选中不在 `A(a)` 内的比例和命中率（与 `A(a)` 内的候选对比），以及去掉其中"没有被其他任何一路召回"的候选后 union recall 的变化。**预先登记的决策标准**：如果 union recall 下降 **< 0.1 个百分点**（绝对值），则把 R3 改为只输出 `A(a)` 内的商品；否则保持不变（§2.4）。R2 做同样的统计，**只做诊断，不改动**。该标准在看过 D1 的 R3 结果之后制定，见 `docs/decisions.md`（2026-11-16 "R3 活跃池外候选"）。
+1. **Union recall** (target ≥ 24%, i.e. G2);
+2. **Leave-one-out union recall**: how much union recall drops when each channel is removed, to judge whether the channel brings candidates the other channels do not have;
+3. the distribution of candidates per query (mean, P50, P90);
+4. **Active-pool diagnostic of R3**: on D1–D4, the share of R3 candidates that are not inside `A(a)` and their hit rate (compared with the candidates inside `A(a)`), and the change in union recall when those of them "not recalled by any other channel" are removed. **Pre-registered decision criterion**: if union recall drops by **< 0.1 percentage points** (absolute), R3 is changed to output only articles inside `A(a)`; otherwise it stays as it is (§2.4). The same statistics are computed for R2, **as a diagnostic only, with no change**. The criterion was set after seeing R3's results on D1, see `docs/decisions.md` (2026-11-16 "R3 candidates outside the active pool").
 
-如果 union recall 明显低于 24%，**先改 recall，不进入 F 阶段**。是否删掉某一路，由 V 阶段的系统级 ablation（MAP@12）决定，不在这里决定。
+If union recall is clearly below 24%, **recall is changed first, and the F phase is not entered**. Whether a channel is dropped is decided by the system-level ablation of the V phase (MAP@12), not here.
 
-**实现**（`src/hmrec/hpo/union_check.py`、`scripts/m4_union_check.py`，设置在 `configs/m4_union_check.yaml`）：
-- 六路使用 D 阶段的选择（从 `results/d_phase.csv` 重放规则，不运行新的 trial），加上 `manual_selection` 中的人工选择（R6 采用 (E_update = 2, replay = 50%)，见 `docs/decisions.md`）。
-- R1–R5 的候选优先复用预检查的文件（`artifacts/hpo/D/union_precheck/`，trial_id 相同即配置相同）；R6 **不重新训练**，每一周用训练链在这一周 fine-tune **之前**保存的模型预测（D1 用 base 的 E_base checkpoint，D2 用 `chain/{trial_id}/D1.pt`，依此类推）。候选写到 `artifacts/m4/candidates/`，结果写到 `results/m4_union_check.csv`。
-- 每一路每一周的选择指标必须与 `results/d_phase.csv` 中的记录**逐位相同**，否则报错停下。
-- 内存：union 只用**命中 label 的候选**计算（先把每一路的候选与 label 做一次 semi join，命中的行约占 1/400），union recall 和 leave-one-out 都在这些小表上做；每个 query 的候选数按 query 分块统计。结果与直接在全部候选上计算完全一致（有测试）。
-- 第 4 项的决策标准用 **4 周合并（query-weighted）的 union recall**，阈值 0.001（0.1 个百分点）写在 `configs/m4_union_check.yaml`，严格小于才改。M4 的运行只计算并报告规则的结论；如果结论是"改"，R3 的配置修改和候选重新生成在锁定（M5）之前另行完成。
+**Implementation** (`src/hmrec/hpo/union_check.py`, `scripts/m4_union_check.py`, settings in `configs/m4_union_check.yaml`):
+- The six channels use the D-phase selections (replaying the rule over `results/d_phase.csv`, with no new trial run), plus the manual selection in `manual_selection` (R6 adopts (E_update = 2, replay = 50%), see `docs/decisions.md`).
+- The candidates of R1–R5 preferably reuse the files of the pre-check (`artifacts/hpo/D/union_precheck/`; the same trial_id means the same configuration); R6 is **not retrained**, and each week is predicted with the model the training chain saved **before** fine-tuning on that week (D1 with the E_base checkpoint of the base, D2 with `chain/{trial_id}/D1.pt`, and so on). Candidates are written to `artifacts/m4/candidates/` and results to `results/m4_union_check.csv`.
+- The selection metric of every channel in every week must be **bit-identical** to the record in `results/d_phase.csv`, otherwise an error is raised and the run stops.
+- Memory: the union is computed from **the candidates that hit a label** only (each channel's candidates are first semi-joined with the labels, and the hit rows are about 1/400); union recall and leave-one-out are both computed on these small tables; the candidates per query are counted in chunks of queries. The result is exactly the same as computing directly on all candidates (tested).
+- The decision criterion of item 4 uses the **4-week pooled (query-weighted) union recall**, with the threshold 0.001 (0.1 percentage points) written in `configs/m4_union_check.yaml`; the change is made only if the drop is strictly smaller. The M4 run only computes and reports the conclusion of the rule; if the conclusion is "change", the configuration change of R3 and the regeneration of its candidates are done separately before the lock (M5).
 
-### 5.8 D 阶段工作量汇总
+### 5.8 Summary of the D-phase workload
 
-| Channel | 配置数 | 成本 |
+| Channel | Configurations | Cost |
 |---|---|---|
-| R1 | 8 | 极低 |
-| R2 | 5 | 极低 |
-| R3 | 7 | 低 |
-| R4 | 9 | 中（每周建图，需要分块） |
-| R5 | ~11 | 中（约 44 次 ALS） |
-| R6 | 1 次 base + 约 8 条链 | 高（GPU） |
+| R1 | 8 | very low |
+| R2 | 5 | very low |
+| R3 | 7 | low |
+| R4 | 9 | medium (the graph is built every week and needs chunking) |
+| R5 | ~11 | medium (about 44 ALS fits) |
+| R6 | 1 base + about 8 chains | high (GPU) |
 
 ---
 
-## 6. Two-Tower 训练链（全项目只有一条）
+## 6. The Two-Tower training chain (the project has exactly one)
 
-### 6.1 训练样本
+### 6.1 Training samples
 
-每个 (用户, 购买日, 商品) 对应一条正样本：`(用户在购买当天之前最近 20 件购买 + 用户 profile) → 买的商品`。同一用户同一天重复购买同一商品只算一条；同一用户同一天的多个正样本共用一个 group_id（multi-positive loss 用）。历史只取购买日**之前**（不含当天）的购买，按同样的 (用户, 日, 商品) 去重，从近到远排列，同一天按 `article_idx` 升序；不足 20 件在末尾补 padding 并带 mask；**padding 编号为 `n_articles`**（不对应任何真实商品）。商品特征表（图像、文本向量及 mask、product_code 和类目编码）末尾有一行 padding 专用行（向量全 0、mask 为 False、编码全 0），模型的 ID / 类目 embedding 用 `padding_idx` 指向它。用户历史预先算好，存成 int32 数组 `[N, 20]`（实现：`src/hmrec/recall/twotower/data.py`）。
+Each (user, purchase date, article) is one positive sample: `(the user's 20 most recent purchases before the purchase date + the user profile) → the article bought`. The same user buying the same article several times on the same day counts as one sample; the positives of the same user on the same day share one group_id (for the multi-positive loss). The history takes only purchases **before** the purchase date (the day itself excluded), deduplicated by the same (user, day, article), ordered from most recent to oldest, and in ascending `article_idx` within a day; histories shorter than 20 are padded at the end and carry a mask; **the padding index is `n_articles`** (it corresponds to no real article). The item feature table (image and text vectors with their masks, product_code and category codes) has a dedicated padding row at the end (vectors all 0, masks False, codes all 0), and the ID / category embeddings of the model point to it with `padding_idx`. User histories are computed in advance and stored as an int32 array `[N, 20]` (implementation: `src/hmrec/recall/twotower/data.py`).
 
-### 6.2 第 0 步：Base model
+### 6.2 Step 0: the base model
 
-- 训练样本：label 日期在 **2019-12-03 – 2020-06-02**（26 周）内的所有购买。
-- 使用**固定 learning rate**（不做 decay），每个 epoch 存一个 checkpoint。这样第 k 个 checkpoint 就等于"训了 k 个 epoch"的模型，一次训练就覆盖 E_base = 1–6。
-- **不留 validation 集，不做 early stopping。** 可以随机留出 1% 的用户不参与训练，只当报警器（检查 loss 有没有爆、有没有 bug），**不用它做任何选择**。
+- Training samples: all purchases with a label date in **2019-12-03 – 2020-06-02** (26 weeks).
+- A **fixed learning rate** is used (no decay), and a checkpoint is saved after each epoch. The k-th checkpoint is thus the model "trained for k epochs", and one training run covers E_base = 1–6.
+- **No validation set is held out and there is no early stopping.** 1% of the users may be held out at random as an alarm only (to check whether the loss blows up or there is a bug); **it is used for no selection**.
 
-### 6.3 第 1 步：选 E_base
+### 6.3 Step 1: selecting E_base
 
-每个 checkpoint **不做任何更新**，直接预测 D1、D2、D3、D4。这几周模型都没见过，所以是合法的验证。按 §4 规则选 E_base。
+Each checkpoint predicts D1, D2, D3 and D4 directly, **with no update at all**. The model has seen none of these weeks, so this is a legitimate validation. E_base is selected by the rule of §4.
 
-### 6.4 第 2 步：选更新方式（D1–D4 滚动链）
+### 6.4 Step 2: selecting the update scheme (rolling chain over D1–D4)
 
-从选中的 base 出发，每个更新配置跑一条链：
+Starting from the selected base, each update configuration runs one chain:
 
-| 时间 | 操作 |
+| Time | Operation |
 |---|---|
-| 06-03 | base 预测 D1 → 记分 → 用 D1 这周的购买 fine-tune `E_update` 个 epoch（加 replay）→ M1 |
-| 06-10 | M1 预测 D2 → 记分 → 用 D2 fine-tune → M2 |
-| 06-17 | M2 预测 D3 → 记分 → 用 D3 fine-tune → M3 |
-| 06-24 | M3 预测 D4 → 记分 → 用 D4 fine-tune → **M4** |
+| 06-03 | The base predicts D1 → scored → fine-tuned for `E_update` epochs on the purchases of week D1 (plus replay) → M1 |
+| 06-10 | M1 predicts D2 → scored → fine-tuned on D2 → M2 |
+| 06-17 | M2 predicts D3 → scored → fine-tuned on D3 → M3 |
+| 06-24 | M3 predicts D4 → scored → fine-tuned on D4 → **M4** |
 
-- **每个分数都是"先预测、后训练"得到的**（progressive validation）：被预测的那一周，模型还没见过。实现上（`src/hmrec/recall/twotower/chain.py`）每一周先用当前模型生成候选，再 fine-tune；各 fold 必须按时间顺序处理，否则报错。
-- **新数据**：anchor 为 `a` 的这一周，购买日在 `[a, a + 7)` 的购买；样本、历史、去重规则与 base 训练完全一致（§6.1）。
-- **Replay 的定义**：`replay` 是 fine-tune 集中旧数据所占的比例。旧数据从**这一周开始之前 4 周**（购买日 `[a − 28, a)`）的样本中不放回随机抽取，数量 `n_replay = round(n_new × replay / (1 − replay))`：`replay = 50%` 时 `n_replay = n_new`（新 : 旧 = 1 : 1），`replay = 0` 时只用新数据。抽样用固定 seed（`chain_seed` 和这一周的 anchor）。
-- **报警用户**：继续排除 base 训练中那 1% 的报警用户（用 base 的数组和 seed 重新抽出同一批用户），新数据和 replay 中都不含他们；每周 fine-tune 后记录他们在这一周的 loss，只作报警，不用于选择。
-- **优化器**：每周 fine-tune 都**重新初始化 Adam**（lr 1e-4 = base LR 的 0.1 倍，其余设置同 base），不继承上一周的优化器状态。每个 epoch 用 `(chain_seed, anchor, epoch)` 打乱顺序。LogQ 的 `Q` 用这一次的 fine-tune 集（新数据 + replay）统计。
-- **保存**：每一周 fine-tune 后的模型存到 `artifacts/models/twotower/chain/{trial_id}/{fold}.pt`（不覆盖已有文件）；D4 预测完之后也用 D4 fine-tune 一次，得到 **M4**（`D4.pt`），F1 从它开始。
-- **默认配置和候选**（`configs/hpo/d_phase.yaml` 的 `r6_twotower.update` 步骤）：默认是 **frozen**（`e_update = 0`：base 不更新，直接预测 D1–D4，就是第 1 步选中的 E_base 的结果，直接复用）。候选按优先顺序：`(E_update = 1, replay = 0) < (1, 50%) < (2, 0) < (2, 50%)`（epoch 少、不加 replay 的更便宜，排在前面），按 §4.2 的多候选规则选择。
-- 所有链在 D1 上的分数相同（都是 base 的预测），真正区分配置的是 D2–D4：§4.2 的"4 周中至少 3 周严格更好"实际要求 D2、D3、D4 都更好，这是预期的行为。
-- **稳健性**：按 §4.2 规则排名前 2 的配置（第 1 名是规则选中的；第 2 名是去掉第 1 名后规则会选中的；没有候选通过时按合并分数排）各再用 seed 43、44 跑一遍（只影响 fine-tune 的打乱顺序和 replay 抽样），汇报均值和波动（`results/d_phase_steps/r6_twotower_seeds.csv`）。**选择仍以 seed 42 的结果为准**，额外的 seed 只用于汇报。
-- 内存：训练链按 fold 逐个处理，每周的 fine-tune 数组用完就释放；历史只读取涉及的用户的购买。
-- **D 阶段结果**（2026-11-17）：规则选中 (E_update = 2, replay = 0)（合并 Recall@100 14.576%，frozen 为 11.843%）；**人工采用 (2, 50%)**（14.634%），这是偏离规则的决定，理由见 `docs/decisions.md`。
+- **Every score is obtained "predict first, train afterwards"** (progressive validation): the model has not yet seen the week it predicts. In the implementation (`src/hmrec/recall/twotower/chain.py`), each week the current model first generates the candidates and is then fine-tuned; the folds must be processed in time order, otherwise an error is raised.
+- **New data**: for the week with anchor `a`, the purchases with a purchase date in `[a, a + 7)`; the samples, histories and deduplication rules are exactly as in base training (§6.1).
+- **Definition of replay**: `replay` is the share of old data in the fine-tuning set. The old data are drawn at random without replacement from the samples of **the 4 weeks before the week begins** (purchase dates `[a − 28, a)`), in the number `n_replay = round(n_new × replay / (1 − replay))`: with `replay = 50%`, `n_replay = n_new` (new : old = 1 : 1), and with `replay = 0` only the new data are used. Sampling uses a fixed seed (`chain_seed` and the anchor of the week).
+- **Alarm users**: the 1% of alarm users of base training remain excluded (the same users are drawn again from the base arrays and seed), from both the new data and the replay; after each weekly fine-tuning their loss on that week is recorded, as an alarm only, used for no selection.
+- **Optimizer**: **Adam is re-initialized** for every weekly fine-tuning (lr 1e-4 = 0.1 times the base LR, other settings as for the base), without inheriting the optimizer state of the previous week. Every epoch is shuffled with `(chain_seed, anchor, epoch)`. The `Q` of LogQ is computed from the fine-tuning set of that run (new data + replay).
+- **Saving**: the model after each week's fine-tuning is saved to `artifacts/models/twotower/chain/{trial_id}/{fold}.pt` (existing files are never overwritten); after D4 has been predicted, the model is also fine-tuned once on D4, giving **M4** (`D4.pt`), from which F1 starts.
+- **Default configuration and candidates** (the `r6_twotower.update` step of `configs/hpo/d_phase.yaml`): the default is **frozen** (`e_update = 0`: the base is not updated and predicts D1–D4 directly, which is the result of the E_base selected in step 1, reused as it is). Candidates in priority order: `(E_update = 1, replay = 0) < (1, 50%) < (2, 0) < (2, 50%)` (fewer epochs and no replay are cheaper and come first), selected by the multi-candidate rule of §4.2.
+- All chains score the same on D1 (all are predictions of the base), and what really separates the configurations is D2–D4: "strictly better in at least 3 of the 4 weeks" of §4.2 in effect requires D2, D3 and D4 all to be better, which is the intended behaviour.
+- **Robustness**: the top 2 configurations by the rule of §4.2 (the 1st is the one the rule selects; the 2nd is the one the rule would select if the 1st were removed; ordered by pooled score if no candidate passes) are each run again with seeds 43 and 44 (which affect only the shuffling order of fine-tuning and the replay sampling), and the mean and the variation are reported (`results/d_phase_steps/r6_twotower_seeds.csv`). **The selection is still based on the result of seed 42**; the extra seeds are for reporting only.
+- Memory: the chain processes one fold at a time, and each week's fine-tuning arrays are released once used; the history reads only the purchases of the users involved.
+- **D-phase result** (2026-11-17): the rule selected (E_update = 2, replay = 0) (pooled Recall@100 14.576%, against 11.843% for frozen); **(2, 50%) was adopted by hand** (14.634%), which is a decision that deviates from the rule; for the reasons see `docs/decisions.md`.
 
-### 6.5 第 3 步：锁定
+### 6.5 Step 3: the lock
 
-在 2020-07-01 之前，把 `base_window, E_base, E_update, replay, fine_tune_lr, seed` 写进 `configs/locks/twotower.lock.yaml`。**选中配置跑出来的 M4 就是之后使用的模型，不重新训练 base。**
+Before 2020-07-01, `base_window, E_base, E_update, replay, fine_tune_lr, seed` are written into `configs/locks/twotower.lock.yaml`. **The M4 produced by the selected configuration is the model used from then on; the base is not retrained.**
 
-**锁定内容（M5，2026-11-17）**：`configs/locks/twotower.lock.yaml` 记录：
+**What is locked (M5, 2026-11-17)**: `configs/locks/twotower.lock.yaml` records:
 
-- 完整的 R6 配置：base 窗口（购买日 2019-12-03 – 2020-06-02）、模型结构和训练设置的全部数值、`E_base = 4`、`E_update = 2`、`replay = 0.5`、fine-tune lr 1e-4、chain seed 42；
-- 选择依据：**人工决定**。规则选中的是 (2, 0)（trial `ef62019e6c73`），锁定的是 (2, 50%)（trial `835ef201ee4d`），并指向 `docs/decisions.md` 的记录；
-- 报警用户的设置：比例 1%、seed 42，以及抽样来源（base 训练数组的 `customer_idx.npy`）的 sha256 和抽出的人数（7,141）；
-- 两个模型文件的路径和 **sha256**：`base`（`artifacts/models/twotower/base/epoch_4.pt`，在训练链中预测了 D1）和 `f1_start`（`artifacts/models/twotower/chain/835ef201ee4d/D4.pt`，即 M4，用来预测 F1）。
+- the full configuration of R6: the base window (purchase dates 2019-12-03 – 2020-06-02), all values of the model structure and the training settings, `E_base = 4`, `E_update = 2`, `replay = 0.5`, fine-tune lr 1e-4, chain seed 42;
+- the basis of the selection: **a manual decision**. The rule selected (2, 0) (trial `ef62019e6c73`), what is locked is (2, 50%) (trial `835ef201ee4d`), with a pointer to the entry in `docs/decisions.md`;
+- the settings of the alarm users: share 1%, seed 42, and the sha256 of the source of the draw (`customer_idx.npy` of the base training arrays) with the number of people drawn (7,141);
+- the paths and **sha256** of two model files: `base` (`artifacts/models/twotower/base/epoch_4.pt`, which predicted D1 in the training chain) and `f1_start` (`artifacts/models/twotower/chain/835ef201ee4d/D4.pt`, i.e. M4, which predicts F1).
 
-`artifacts/` 不进 git，所以用 sha256 确认以后用的是同一个文件：`src/hmrec/recall/locked.py` 在加载模型权重**之前**先核对 sha256，不一致就报错，不加载。
+`artifacts/` is not in git, so sha256 confirms that the same file is used later: `src/hmrec/recall/locked.py` checks the sha256 **before** loading the model weights and, on a mismatch, raises an error and does not load.
 
-### 6.6 第 4 步：F → V → T，每周照做
+### 6.6 Step 4: F → V → T, the same every week
 
-| 时间 | 操作 |
+| Time | Operation |
 |---|---|
-| 07-01 | M4 预测 F1 → 输出候选 → 用 F1 fine-tune → M5 |
-| 07-08 | M5 预测 F2 → 输出候选 → 用 F2 fine-tune → M6 |
-| … | 每周相同，一直到 T4 |
+| 07-01 | M4 predicts F1 → outputs candidates → fine-tuned on F1 → M5 |
+| 07-08 | M5 predicts F2 → outputs candidates → fine-tuned on F2 → M6 |
+| … | The same every week, up to T4 |
 
-每周的 Recall@100 照常记录。如果某周比前 4 周的平均值低 10% 以上，在报告中标出，但**不改配置**。
+The Recall@100 of every week is recorded as usual. If a week is more than 10% below the mean of the previous 4 weeks, it is flagged in the report, but **the configuration is not changed**.
 
-**实现（M6，`src/hmrec/recall/generate.py`、`scripts/m6_generate_candidates.py`）**：
+**Implementation (M6, `src/hmrec/recall/generate.py`, `scripts/m6_generate_candidates.py`)**:
 
-- **只从锁定文件构建**：六路都通过 `src/hmrec/recall/locked.py` 得到。R6 用 `load_locked_twotower_chain`，返回的就是 D 阶段训练链的那个类（`recall/twotower/chain.py` 的 `TwoTowerChainChannel`），所以每周 fine-tune 走的是同一段代码：这一周的购买 `[a, a + 7)` 加 1 : 1 的 replay、排除锁定的报警用户、每周重新初始化 Adam、锁定的 `E_update = 2` 和 fine-tune lr 1e-4。
-- **每个 fold 内的顺序**（R6）：① 取"预测这一周的模型"并核对 sha256；② 预测，保存向量和候选；③ 再用这一周 fine-tune，保存模型 `artifacts/models/twotower/chain_locked/{fold}.pt`，把 sha256 和 fine-tune 的行数、loss、报警用户 loss、耗时追加到 `results/m6_twotower_chain.csv`。**T4 只预测，不 fine-tune**，所以没有模型也没有记录。
-- **顺序由代码强制**（`src/hmrec/recall/chain_records.py`）：F1 用锁定文件中的 `f1_start`（即 M4）；之后每个 fold 用上一个 fold 保存的模型，这个模型必须存在、在 `results/m6_twotower_chain.csv` 中有记录、并且 sha256 与记录一致，否则报错。所以不能跳过一周，也不能用别的运行留下的模型。
-- **为特征保存的文件**（`features/` 不能 import `recall/`，只能读这些文件，见 §14.2）：R5 的向量（用户只存该 fold 的 query 用户）；R6 的向量（用户是该 fold 的 query 用户，商品是**商品目录中的全部商品**，不只是 `A(a)`，因为 R2 的候选可能在活跃池外；用**预测这一周时的模型**计算，即这一周 fine-tune 之前）；R1 完整的桶内分数表 `S(g, i)`（不受 Top-100 和活跃池限制）。R6 在 `A(a)` 内的商品向量就是生成候选时用的那一份，池外的商品另外编码后合并，所以候选和分数与只编码 `A(a)` 时完全相同。
-- **一致性检查**（每个 fold 都做，不通过就报错，候选不写盘）：把保存的文件读回来，R5、R6 每个候选的 `score` 必须与用保存的向量算出的点积逐位相同；R1 每个非补齐候选的 `score` 必须与分数表中的值逐位相同。
-- **每个 (fold, channel) 一个独立进程**，结束时把耗时和真实内存峰值（`ru_maxrss`）追加到 `results/m6_runs.csv`；`scripts/m6_run_folds.py` 按时间顺序逐个 fold 驱动。候选文件一旦存在就不覆盖，重跑时跳过并提示。
-- **监控**（`src/hmrec/eval/monitor.py`、`scripts/m6_monitor_candidates.py`，结果追加到 `results/m6_candidates.csv`；只记录，不做任何选择）：F、V 周记录每一路的 Recall@quota、六路 union recall、每个 query 去重后的候选数、没有任何一路命中的 query 比例；每一路的 recall 与它前 4 周的平均值比较（F1 的前 4 周是 D1–D4，分数取自锁定文件），低 10% 以上时在 `low_recall_flag` 一列标出。**T 周在 M6 中完全不读 label**，只记录候选行数和每个 query 的候选数；T 周的指标留到 M8。代码拒绝为 T fold 构建评估器（有测试）。
-- **停下由人决定的情况**（设置在 `configs/m6_candidates.yaml`）：任何进程的真实内存峰值超过 `memory.limit_gb`；schema 校验或一致性检查失败；模型的 sha256 与记录不一致；R6 fine-tune 的训练 loss 或报警用户 loss 不是有限值、或超过 `twotower_chain.max_fine_tune_loss`（7.0；D 阶段训练链每周的训练 loss 为 5.49–5.56，报警用户 loss 为 5.25–5.69）。
+- **Built from the lock files only**: all six channels are obtained through `src/hmrec/recall/locked.py`. R6 uses `load_locked_twotower_chain`, which returns the very class of the D-phase training chain (`TwoTowerChainChannel` in `recall/twotower/chain.py`), so the weekly fine-tuning runs the same code: the purchases of the week `[a, a + 7)` plus 1 : 1 replay, the locked alarm users excluded, Adam re-initialized every week, the locked `E_update = 2` and fine-tune lr 1e-4.
+- **Order within each fold** (R6): ① take "the model that predicts this week" and check its sha256; ② predict, and save the vectors and the candidates; ③ then fine-tune on this week, save the model `artifacts/models/twotower/chain_locked/{fold}.pt`, and append the sha256 and the rows, loss, alarm-user loss and run time of the fine-tuning to `results/m6_twotower_chain.csv`. **T4 only predicts and is not fine-tuned**, so it has neither a model nor a record.
+- **The order is enforced by code** (`src/hmrec/recall/chain_records.py`): F1 uses `f1_start` of the lock file (i.e. M4); every later fold uses the model saved by the previous fold, which must exist, have a record in `results/m6_twotower_chain.csv`, and match the sha256 of the record, otherwise an error is raised. So a week cannot be skipped, and a model left by another run cannot be used.
+- **Files saved for the features** (`features/` may not import `recall/` and can only read these files, see §14.2): the vectors of R5 (for users, only the query users of the fold are saved); the vectors of R6 (the users are the query users of the fold, and the items are **all articles of the catalog**, not only `A(a)`, because the candidates of R2 may be outside the active pool; computed with **the model that predicts this week**, i.e. before this week's fine-tuning); the complete bucket score table `S(g, i)` of R1 (not limited by the Top-100 or the active pool). The item vectors of R6 inside `A(a)` are the ones used when the candidates were generated, and the articles outside the pool are encoded separately and merged in, so the candidates and scores are exactly the same as when only `A(a)` is encoded.
+- **Consistency check** (done for every fold; on failure an error is raised and the candidates are not written): the saved files are read back, and the `score` of every candidate of R5 and R6 must be bit-identical to the dot product computed from the saved vectors; the `score` of every non-fallback candidate of R1 must be bit-identical to the value in the score table.
+- **One separate process per (fold, channel)**, which appends its run time and true memory peak (`ru_maxrss`) to `results/m6_runs.csv` when it ends; `scripts/m6_run_folds.py` drives the folds one by one in time order. A candidate file is never overwritten once it exists; a re-run skips it with a notice.
+- **Monitoring** (`src/hmrec/eval/monitor.py`, `scripts/m6_monitor_candidates.py`, results appended to `results/m6_candidates.csv`; recorded only, with no selection made): for the F and V weeks it records the Recall@quota of each channel, the six-channel union recall, the deduplicated candidates per query, and the share of queries no channel hits; the recall of each channel is compared with its mean over the previous 4 weeks (for F1 the previous 4 weeks are D1–D4, with scores taken from the lock files), and when it is more than 10% lower, this is flagged in the column `low_recall_flag`. **For the T weeks no label at all is read in M6**; only the number of candidate rows and the candidates per query are recorded, and the metrics of the T weeks are left to M8. The code refuses to build an evaluator for a T fold (tested).
+- **When the run stops for a person to decide** (settings in `configs/m6_candidates.yaml`): the true memory peak of any process exceeds `memory.limit_gb`; the schema validation or the consistency check fails; the sha256 of a model does not match its record; the training loss or the alarm-user loss of the R6 fine-tuning is not finite, or exceeds `twotower_chain.max_fine_tune_loss` (7.0; in the D-phase training chain the weekly training loss was 5.49–5.56 and the alarm-user loss 5.25–5.69).
 
-### 6.7 事后诊断（只报告，不改选择）
+### 6.7 Post-hoc diagnostic (reported only; changes no selection)
 
-在 V 和 T 阶段，额外计算 **HP drift regret**：如果用当周的 label 重新挑选 `E_update` 和 `replay`，最多能多拿多少 Recall。差距小，说明"超参数在几个月内保持稳定"这个假设成立。
+In the V and T phases, **HP drift regret** is computed additionally: how much more recall could at most be gained if `E_update` and `replay` were re-picked with the labels of the current week. A small gap means the assumption "hyperparameters stay stable over a few months" holds.
 
 ---
 
-## 7. 候选合并：先 Fusion，再训练
+## 7. Candidate fusion: fuse first, then train
 
-### 7.1 三种做法
+### 7.1 Three options
 
-| 做法 | 怎么做 | 结论 |
+| Option | How | Verdict |
 |---|---|---|
-| A. 每路单独进宽表 | 同一个商品被 3 路召回，就出现 3 行 | **不采用** |
-| B. RRF 合并后截断 | 用 RRF 打分，只留前 N 个给 Ranker | **不采用** |
-| C. **合并去重（union + dedup）后训练** | 每个 `(query, article)` 只有一行，每一路的 rank / score 作为这一行的列 | **采用** |
+| A. Each channel goes into the wide table separately | An article recalled by 3 channels appears as 3 rows | **Not used** |
+| B. Truncate after RRF fusion | Score with RRF and keep only the top N for the ranker | **Not used** |
+| C. **Union + dedup, then train** | One row per `(query, article)`, with the rank / score of every channel as columns of that row | **Used** |
 
-### 7.2 为什么选 C
+### 7.2 Why C
 
-我同意你倾向的"先 fusion"，但这里的 fusion 必须是**合并去重，不是 RRF 截断**：
+I agree with your preference for "fuse first", but the fusion here has to be **union + dedup, not RRF truncation**:
 
-- **不选 A**：同一个 `(用户, 商品)` 出现多行，label 被重复计算；被多路召回的热门商品行数更多，Ranker 会误以为它们更重要；LambdaMART 的 group 里有重复商品，排序本身就没有意义，最后输出的 Top-12 也可能出现重复。
-- **不选 B**：RRF 只看排名，被它截掉的商品 Ranker 永远看不到，直接降低系统的召回上限。
-- **选 C**：所有候选都保留，"被几路召回、在每一路排第几"全部变成特征，交给 LambdaMART 去学。RRF 分数也作为一列特征保留。
+- **Not A**: the same `(user, article)` appears in several rows, and the label is counted repeatedly; popular articles recalled by several channels have more rows, and the ranker would wrongly take them to be more important; with duplicate articles in a LambdaMART group the ranking itself is meaningless, and the final Top-12 could contain duplicates too.
+- **Not B**: RRF looks only at ranks, and the ranker never sees the articles it cuts off, which directly lowers the recall ceiling of the system.
+- **C**: all candidates are kept, and "how many channels recalled it and at which rank in each" all become features for LambdaMART to learn from. The RRF score is kept as a feature column too.
 
-### 7.3 合并流程（每个 anchor 一次）
+### 7.3 Fusion procedure (once per anchor)
 
-1. 读取 6 路的输出表（每路一个 Parquet 文件）。
-2. 按 query 分块，把 6 路结果 pivot 成宽表：每个 `(query_id, article_id)` 一行，每路的 rank 和 score 各占一列，没被这一路召回的填 NaN。
-3. 计算聚合列：`n_channels`、`best_rank`、`rrf_score`。
-4. 拼接 §8 的其余特征。
-5. 存成 `artifacts/features/{fold}/part-*.parquet`（按 query 分块，每块一个文件）。**生成之后冻结，之后被拿去训练时不再重新生成。**
+1. Read the output tables of the 6 channels (one Parquet file per channel).
+2. In chunks of queries, pivot the results of the 6 channels into the wide table: one row per `(query_id, article_id)`, one column each for the rank and the score of every channel, filled with NaN where the channel did not recall the article.
+3. Compute the aggregate columns: `n_channels`, `best_rank`, `rrf_score`.
+4. Join the other features of §8.
+5. Store as `artifacts/features/{fold}/part-*.parquet` (chunked by query, one file per chunk). **Frozen once generated, and not regenerated when later used for training.**
 
 ---
 
-## 8. Ranker 宽表特征（共 71 个）
+## 8. Ranker wide-table features (71 in total)
 
-> 2026-11-17：最初的 56 个之外新增 15 个（B 组 2、C 组 1、D 组 1、E 组 11），总数 71。新增是在**特征锁定之前、没有任何 Ranker 结果的情况下**做的设计修改，依据是 H&M 比赛第一名方案对用户–商品交互特征和多时间窗口的强调（`docs/decisions.md`）。下面各表中新增的特征标 **（新增）**。
+> 2026-11-17: 15 features were added to the original 56 (2 in group B, 1 in group C, 1 in group D, 11 in group E), 71 in total. The additions are a design change made **before the feature lock, with no ranker result in existence**, based on the emphasis that the first-place solution of the H&M competition puts on user–item interaction features and on multiple time windows (`docs/decisions.md`). The added features are marked **(new)** in the tables below.
 
-### 8.1 原则
+### 8.1 Principles
 
-- 每一行 = 一个 `(query, article)` 候选。
-- **所有特征只用 `t_dat < anchor` 的数据**，时间窗口都从 anchor 往前算。
-- 不使用原始 ID（`customer_id`、`article_id`、`product_code`）作为特征。
-- 类目字段作为 LightGBM categorical feature。
-- 缺失值保留为 NaN，LightGBM 会自己处理。
+- Each row = one `(query, article)` candidate.
+- **All features use only data with `t_dat < anchor`**, and every time window is counted backwards from the anchor.
+- Raw IDs (`customer_id`, `article_id`, `product_code`) are not used as features.
+- Category fields are LightGBM categorical features.
+- Missing values stay NaN; LightGBM handles them itself.
 
-**落实后的约定（M6，`configs/features.yaml`、`src/hmrec/features/`）**：
+**Conventions as implemented (M6, `configs/features.yaml`, `src/hmrec/features/`)**:
 
-- **宽表的列**：`query_id`、`article_idx`（int32，只作键，不是特征），然后是下面 71 个特征，顺序与 `configs/features.yaml` 一致。没有 `customer_idx`，也**没有 label 列**（label 在 M7 的 `ranker/sampling.py` 中才拼接）。
-- **dtype**：数值特征一律 float32，缺失为 NaN；8 个类别特征（§8.4 的 6 个商品类目、§8.5 的 `club_member_status` 和 `fashion_news_frequency`）是 int16 整数编码：0 = 缺失，1..K = 该字段全部取值排序后的序号。编码表由 `articles`、`customers` 的全部行生成，所有 fold 共用一份，保存在 `artifacts/features/category_codes.json`；后面的 fold 重新生成后必须与它完全相同。
-- **"购买行数 / 次数"都按购买行计**（同一用户同一天买同一商品两行算 2），与 R1、R2 的计数方式一致。唯一的例外是 `item_repurchase_ratio_52w`（见 §8.4）。
-- **"距今天数"** = `anchor_day − t_dat_day`，昨天 = 1。
-- **窗口**：1w = `[a−7, a)`，prev_1w = `[a−14, a−7)`，4w = `[a−28, a)`，52w = `[a−364, a)`；没写窗口的特征用全部历史 `t_dat < a`。每个窗口都通过 `data/asof.py` 取数。
-- **缺失值规则**：计数类特征没有数据时为 0；"距今天数"、均值、占比、比值在无法定义时为 NaN（从没买过、窗口内没有数据、分母为 0、任一侧缺失）。
-- **输出**：`artifacts/features/{fold}/part-{i}.parquet`，每 `chunking.query_chunk_size` 个 query 一个文件，按 `(query_id, article_idx)` 排序，同一个 query 的行连续且不跨文件；最后写 `features.json`，它存在才表示这个 fold 完成。生成后不覆盖。
+- **Columns of the wide table**: `query_id`, `article_idx` (int32, keys only, not features), then the 71 features below, in the order of `configs/features.yaml`. There is no `customer_idx` and **no label column** (the label is joined only in `ranker/sampling.py` of M7).
+- **dtype**: numeric features are always float32, with NaN for missing; the 8 categorical features (the 6 article categories of §8.4, and `club_member_status` and `fashion_news_frequency` of §8.5) are int16 integer codes: 0 = missing, 1..K = the index of the value among all sorted values of the field. The code table is built from all rows of `articles` and `customers`, is shared by all folds, and is saved in `artifacts/features/category_codes.json`; when a later fold builds it again, it must be exactly the same.
+- **"Number of purchase lines / purchases" always counts purchase lines** (two lines of the same article by the same user on the same day count as 2), consistent with how R1 and R2 count. The only exception is `item_repurchase_ratio_52w` (see §8.4).
+- **"Days since"** = `anchor_day − t_dat_day`; yesterday = 1.
+- **Windows**: 1w = `[a−7, a)`, prev_1w = `[a−14, a−7)`, 4w = `[a−28, a)`, 52w = `[a−364, a)`; a feature with no window stated uses the whole history `t_dat < a`. Every window is read through `data/asof.py`.
+- **Missing-value rules**: count features are 0 when there are no data; "days since", means, shares and ratios are NaN when they cannot be defined (never bought, no data in the window, denominator 0, either side missing).
+- **Output**: `artifacts/features/{fold}/part-{i}.parquet`, one file per `chunking.query_chunk_size` queries, sorted by `(query_id, article_idx)`, with the rows of a query contiguous and never spanning two files; `features.json` is written last, and only its existence means the fold is complete. Nothing is overwritten after generation.
 
-### 8.2 A 组：召回来源（14 个）
+### 8.2 Group A: recall source (14)
 
-| 特征 | 定义 |
+| Feature | Definition |
 |---|---|
-| `pop_rank`、`rep_rank`、`sib_rank`、`icf_rank`、`wals_rank`、`tt_rank` | 各路的排名（1 = 最好）；没被这一路召回则为 NaN |
-| `pop_score`、`rep_score`、`sib_score`、`icf_score` | 各路的原始分数；没被召回则为 NaN |
-| `pop_is_fallback` | R1 的这个候选是否来自全局补齐 |
-| `n_channels` | 有几路召回了这个商品（1–6） |
-| `best_rank` | 6 路中最好的排名 |
-| `rrf_score` | `Σ 1 / (60 + rank)`，对召回了它的各路求和 |
+| `pop_rank`, `rep_rank`, `sib_rank`, `icf_rank`, `wals_rank`, `tt_rank` | The rank in each channel (1 = best); NaN when the channel did not recall the article |
+| `pop_score`, `rep_score`, `sib_score`, `icf_score` | The raw score in each channel; NaN when not recalled |
+| `pop_is_fallback` | Whether this candidate of R1 comes from the global fill-in |
+| `n_channels` | How many channels recalled the article (1–6) |
+| `best_rank` | The best rank over the 6 channels |
+| `rrf_score` | `Σ 1 / (60 + rank)`, summed over the channels that recalled it |
 
-WALS 和 Two-Tower 的原始分数放在 B 组，因为 B 组对所有候选都计算，覆盖面更大。
+The raw scores of WALS and Two-Tower are in group B, because group B is computed for all candidates and has wider coverage.
 
-落实（`src/hmrec/fusion/union.py`、`fusion/rrf.py`、`features/source.py`）：六路按 `(query_id, article_idx)` 合并去重，每个候选一行。`pop_is_fallback` 在 R1 召回的行上是 0 / 1，**R1 没有召回的行为 NaN**（与其他来源列一致）。`n_channels`、`best_rank` 存为 float32。`rrf_score` 用 float64 按固定顺序（pop、rep、sib、icf、wals、tt）求和后存为 float32。RRF baseline（§9.5）的排序：`rrf_score DESC`，再 `best_rank ASC`，再 `article_idx ASC`。
+Implementation (`src/hmrec/fusion/union.py`, `fusion/rrf.py`, `features/source.py`): the six channels are merged and deduplicated on `(query_id, article_idx)`, one row per candidate. `pop_is_fallback` is 0 / 1 on the rows R1 recalled and **NaN on the rows R1 did not recall** (like the other source columns). `n_channels` and `best_rank` are stored as float32. `rrf_score` is summed in float64 in a fixed order (pop, rep, sib, icf, wals, tt) and then stored as float32. Ordering of the RRF baseline (§9.5): `rrf_score DESC`, then `best_rank ASC`, then `article_idx ASC`.
 
-### 8.3 B 组：对所有候选都计算的稠密分数（7 个）
+### 8.3 Group B: dense scores computed for all candidates (7)
 
-这组特征不管候选来自哪一路，都会计算。通常是最有用的一组。
+The features of this group are computed whichever channel a candidate comes from. They are usually the most useful group.
 
-| 特征 | 定义 |
+| Feature | Definition |
 |---|---|
-| `tt_dot` | Two-Tower 用户向量 · 商品向量（当周 anchor 的模型） |
-| `wals_dot` | WALS 用户向量 · 商品向量；用户或商品没有向量时为 NaN |
-| `pop_bucket_score` | 该商品在用户年龄桶里的 R1 衰减热度分数（不受 Top-100 限制） |
-| `img_sim_hist` | 商品 CLIP 向量与用户最近 20 件购买的 CLIP 平均向量的 cosine 相似度。平均向量只用这 20 件中有图像向量的商品。**商品本身没有图像向量，或用户最近 20 件购买都没有图像向量时，取 NaN** |
-| `txt_sim_hist` | 同上，换成 MiniLM 文本向量。文本覆盖全部商品，所以只有在**用户没有历史购买（`t_dat < a` 内没有购买）时取 NaN** |
-| `tt_sim_max_hist` **（新增）** | 候选商品与用户最近 20 件购买（与 `img_sim_hist` 同一份历史）的相似度中的**最大值**。相似度 = 该 fold 保存的 R6 商品向量的点积（向量已 L2 归一化）。用户没有历史时为 NaN |
-| `tt_sim_top5_hist` **（新增）** | 同上，取最大的 5 个相似度的平均；历史不足 5 件时取全部。用户没有历史时为 NaN |
+| `tt_dot` | Two-Tower user vector · item vector (the model of the current week's anchor) |
+| `wals_dot` | WALS user vector · item vector; NaN when the user or the article has no vector |
+| `pop_bucket_score` | The R1 decayed popularity score of the article in the user's age bucket (not limited by the Top-100) |
+| `img_sim_hist` | Cosine similarity between the article's CLIP vector and the mean CLIP vector of the user's 20 most recent purchases. The mean vector uses only those of the 20 that have an image vector. **NaN when the article itself has no image vector, or when none of the user's 20 most recent purchases has one** |
+| `txt_sim_hist` | The same with the MiniLM text vector. Text covers all articles, so it is **NaN only when the user has no purchase history (no purchase with `t_dat < a`)** |
+| `tt_sim_max_hist` **(new)** | The **maximum** of the similarities between the candidate article and the user's 20 most recent purchases (the same history as for `img_sim_hist`). Similarity = the dot product of the R6 item vectors saved for the fold (the vectors are L2-normalized). NaN when the user has no history |
+| `tt_sim_top5_hist` **(new)** | As above, the mean of the 5 largest similarities; all of them when the history has fewer than 5 items. NaN when the user has no history |
 
-落实（`src/hmrec/features/dense.py`）：
+Implementation (`src/hmrec/features/dense.py`):
 
-- `tt_dot`、`wals_dot` 用 M6 保存的向量和 `vectors.dot_pairs` 计算（与 R5、R6 的 `score` 是同一个函数）。`tt_dot` 用的是预测这一周时的模型（这一周 fine-tune 之前），对所有候选都有值。**每个 fold 全量检查**：被 R6 召回的行，`tt_dot` 与 R6 候选的 `score` 逐位相同；被 R5 召回的行，`wals_dot` 与 R5 的 `score` 逐位相同。
-- `pop_bucket_score` 读 R1 保存的桶内分数表；表里没有的 (年龄桶, 商品) 记为 **0**（该年龄桶在窗口内没有人买过，衰减热度就是 0）。
-- `img_sim_hist`、`txt_sim_hist`："最近 20 件购买"与 Two-Tower 用的是**同一个函数**（`src/hmrec/data/histories.py` 的 `recent_purchase_histories`：同一天同一商品算一件，不同天买同一商品算多件，从近到远）。平均向量 = 这 20 件中有向量的那些的简单平均（同一商品出现几次就计几次），**平均后做 L2 归一化**；候选商品的向量也重新归一化，两者的点积就是 cosine。
-- `tt_sim_max_hist`、`tt_sim_top5_hist`：与上面两个"平均向量"特征不同，它们看的是**单件**历史商品与候选的相似度，只要有一件很像就会高。同一商品在 20 件中出现两次就计两次。读取向量时检查 R6 商品向量的范数为 1（±1e-3）。按 query 逐个计算（一个 query 的候选在宽表中连续），内存只有"该 query 的候选数 × 历史件数"的一个小矩阵；这一步的耗时单独记入 `features.json` 和 `results/m6_runs.csv`。
+- `tt_dot` and `wals_dot` are computed from the vectors saved in M6 with `vectors.dot_pairs` (the same function as the `score` of R5 and R6). `tt_dot` uses the model that predicts this week (before this week's fine-tuning) and has a value for every candidate. **Checked in full for every fold**: on the rows recalled by R6, `tt_dot` is bit-identical to the `score` of the R6 candidates; on the rows recalled by R5, `wals_dot` is bit-identical to the `score` of R5.
+- `pop_bucket_score` reads the bucket score table saved by R1; an (age bucket, article) not in the table is recorded as **0** (nobody of that age bucket bought it within the window, so the decayed popularity is 0).
+- `img_sim_hist`, `txt_sim_hist`: "the 20 most recent purchases" come from **the same function** as for Two-Tower (`recent_purchase_histories` in `src/hmrec/data/histories.py`: the same article on the same day counts once, the same article bought on different days counts several times, most recent first). The mean vector = the simple mean of those of the 20 that have a vector (an article counts as often as it appears), **L2-normalized after averaging**; the vector of the candidate article is re-normalized too, and the dot product of the two is the cosine.
+- `tt_sim_max_hist`, `tt_sim_top5_hist`: unlike the two "mean vector" features above, they look at the similarity of **single** history items to the candidate and are high as soon as one item is very similar. An article that appears twice among the 20 counts twice. When the vectors are read, the norm of the R6 item vectors is checked to be 1 (±1e-3). They are computed query by query (the candidates of a query are contiguous in the wide table), so memory holds only a small "candidates of the query × history items" matrix; the run time of this step is recorded separately in `features.json` and `results/m6_runs.csv`.
 
-### 8.4 C 组：商品特征（17 个）
+### 8.4 Group C: article features (17)
 
-| 特征 | 定义 |
+| Feature | Definition |
 |---|---|
-| `item_cnt_1w` | `[a−7d, a)` 内的购买行数 |
-| `item_cnt_prev_1w` | `[a−14d, a−7d)` 内的购买行数（和上一个特征配合，看趋势） |
-| `item_cnt_4w` | `[a−28d, a)` 内的购买行数 |
-| `item_uniq_buyers_4w` | `[a−28d, a)` 内的不同买家数 |
-| `item_days_since_first_sale` | 距第一次被购买的天数（新品识别） |
-| `item_days_since_last_sale` | 距最近一次被购买的天数 |
-| `item_price_mean_4w` | `[a−28d, a)` 内的平均成交价 |
-| `item_online_share_4w` | `[a−28d, a)` 内线上渠道（`sales_channel_id=2`）的占比 |
-| `item_buyer_age_mean_4w` | `[a−28d, a)` 内买家的平均年龄 |
-| `item_repurchase_ratio_52w` | `[a−364d, a)` 内买过它的用户中，买过 2 次及以上的比例 |
-| `item_discount_ratio` **（新增）** | `[a−7d, a)` 的成交均价 ÷ `[a−364d, a)` 的成交均价（小于 1 表示上周卖得比全年便宜）；任一窗口没有销售为 NaN |
-| `product_type_no` | 类目（categorical） |
-| `product_group_name` | 类目（categorical） |
-| `garment_group_no` | 类目（categorical） |
-| `index_group_no` | 类目（categorical） |
-| `section_no` | 类目（categorical） |
-| `colour_group_code` | 颜色（categorical） |
+| `item_cnt_1w` | Number of purchase lines in `[a−7d, a)` |
+| `item_cnt_prev_1w` | Number of purchase lines in `[a−14d, a−7d)` (together with the previous feature, for the trend) |
+| `item_cnt_4w` | Number of purchase lines in `[a−28d, a)` |
+| `item_uniq_buyers_4w` | Number of distinct buyers in `[a−28d, a)` |
+| `item_days_since_first_sale` | Days since it was first purchased (to recognize new articles) |
+| `item_days_since_last_sale` | Days since it was last purchased |
+| `item_price_mean_4w` | Mean sale price in `[a−28d, a)` |
+| `item_online_share_4w` | Share of the online channel (`sales_channel_id=2`) in `[a−28d, a)` |
+| `item_buyer_age_mean_4w` | Mean age of the buyers in `[a−28d, a)` |
+| `item_repurchase_ratio_52w` | Among the users who bought it in `[a−364d, a)`, the share who bought it 2 or more times |
+| `item_discount_ratio` **(new)** | Mean sale price in `[a−7d, a)` ÷ mean sale price in `[a−364d, a)` (below 1 means it sold cheaper last week than over the year); NaN when either window has no sale |
+| `product_type_no` | Category (categorical) |
+| `product_group_name` | Category (categorical) |
+| `garment_group_no` | Category (categorical) |
+| `index_group_no` | Category (categorical) |
+| `section_no` | Category (categorical) |
+| `colour_group_code` | Colour (categorical) |
 
-落实（`src/hmrec/features/item.py`，每个 fold 对商品目录的全部商品各算一行）：
+Implementation (`src/hmrec/features/item.py`; for each fold one row is computed for every article of the catalog):
 
-- `item_days_since_first_sale`："第一次被购买"指数据中（2018-09-20 起）的第一条购买行，所以数据开始之前就在卖的商品，这个值最多约 650 天。从没卖出过的商品，两个"距今天数"都是 NaN。
-- `item_price_mean_4w`、`item_online_share_4w`：对 4w 内的购买行求平均 / 占比；4w 内没有购买行时为 NaN。
-- `item_buyer_age_mean_4w`：对 4w 内的**不同买家**求平均（每个买家只算一次），只用年龄已知的买家；没有这样的买家时为 NaN。
-- `item_repurchase_ratio_52w`："买过 2 次及以上"指在 **2 个或更多不同的日期**买过；同一天的多行（一次买多件）不算复购。52w 内没有人买过时为 NaN。
-- **价格均值**（`item_price_mean_4w`、`item_discount_ratio` 的两个均值、`user_price_mean_52w`，以及由它们得到的 `ui_price_ratio`）：聚合前把 `price` 转成 Float64，算完再转成 float32。多线程 group_by 的求和顺序不固定，但在 float64 下只影响第 16 位左右，远小于 float32 的精度；有测试保证同一份数据打乱行序后这些特征的 float32 结果完全相同。
+- `item_days_since_first_sale`: "first purchased" means the first purchase line in the data (which start on 2018-09-20), so for an article already on sale before the data begin this value is at most about 650 days. For an article never sold, both "days since" are NaN.
+- `item_price_mean_4w`, `item_online_share_4w`: the mean / share over the purchase lines within 4w; NaN when there is no purchase line within 4w.
+- `item_buyer_age_mean_4w`: the mean over the **distinct buyers** within 4w (each buyer counted once), using only buyers of known age; NaN when there is no such buyer.
+- `item_repurchase_ratio_52w`: "bought 2 or more times" means bought on **2 or more different dates**; several lines on the same day (several pieces in one purchase) do not count as a repurchase. NaN when nobody bought it within 52w.
+- **Mean prices** (`item_price_mean_4w`, the two means of `item_discount_ratio`, `user_price_mean_52w`, and `ui_price_ratio`, which is derived from them): `price` is cast to Float64 before aggregation and back to float32 afterwards. The summation order of a multi-threaded group_by is not fixed, but in float64 this affects only about the 16th digit, far below the precision of float32; a test guarantees that the float32 results of these features are exactly the same after the rows of the same data are shuffled.
 
-### 8.5 D 组：用户特征（12 个）
+### 8.5 Group D: user features (12)
 
-| 特征 | 定义 |
+| Feature | Definition |
 |---|---|
-| `age` | 年龄（缺失为 NaN） |
+| `age` | Age (NaN when missing) |
 | `club_member_status` | categorical |
 | `fashion_news_frequency` | categorical |
-| `fn`、`active` | 0/1 |
-| `user_cnt_4w` | `[a−28d, a)` 内的购买行数 |
-| `user_cnt_52w` | `[a−364d, a)` 内的购买行数 |
-| `user_days_since_last_purchase` | 距最近一次购买的天数（从没买过则为 NaN） |
-| `user_price_mean_52w` | `[a−364d, a)` 内的平均成交价 |
-| `user_online_share_52w` | `[a−364d, a)` 内的线上占比 |
-| `user_uniq_items_52w` | `[a−364d, a)` 内买过的不同商品数 |
-| `user_purchase_days_52w` **（新增）** | `[a−364d, a)` 内有购买的不同日期数；没有则为 0 |
+| `fn`, `active` | 0/1 |
+| `user_cnt_4w` | Number of purchase lines in `[a−28d, a)` |
+| `user_cnt_52w` | Number of purchase lines in `[a−364d, a)` |
+| `user_days_since_last_purchase` | Days since the most recent purchase (NaN if never bought) |
+| `user_price_mean_52w` | Mean sale price in `[a−364d, a)` |
+| `user_online_share_52w` | Online share in `[a−364d, a)` |
+| `user_uniq_items_52w` | Number of distinct articles bought in `[a−364d, a)` |
+| `user_purchase_days_52w` **(new)** | Number of distinct dates with a purchase in `[a−364d, a)`; 0 when there are none |
 
-落实（`src/hmrec/features/user.py`，只计算该 fold 的 query 用户）：`age` 用表中的原值（16、17 岁照常保留，不截断），未知为 NaN；`fn`、`active` 是 float32 的 0 / 1。`user_price_mean_52w`、`user_online_share_52w` 在 52w 内没有购买时为 NaN。
+Implementation (`src/hmrec/features/user.py`; computed only for the query users of the fold): `age` uses the raw value of the table (ages 16 and 17 are kept as they are, not clipped), with NaN for unknown; `fn` and `active` are float32 0 / 1. `user_price_mean_52w` and `user_online_share_52w` are NaN when there is no purchase within 52w.
 
-### 8.6 E 组：用户–商品交叉特征（21 个）
+### 8.6 Group E: user–article cross features (21)
 
-| 特征 | 定义 |
+| Feature | Definition |
 |---|---|
-| `ui_cnt_item` | 用户历史上（`t_dat < a`）买过这个 `article_id` 的次数 |
-| `ui_days_since_item` | 距用户最近一次买这个商品的天数（没买过为 NaN） |
-| `ui_cnt_pcode` | 用户买过同 `product_code` 商品的次数 |
-| `ui_days_since_pcode` | 距用户最近一次买同 `product_code` 商品的天数 |
-| `ui_share_ptype_52w` | 用户 52 周内的购买中，与该商品同 `product_type_no` 的占比 |
-| `ui_share_garment_52w` | 同上，按 `garment_group_no` |
-| `ui_share_index_52w` | 同上，按 `index_group_no` |
-| `ui_share_colour_52w` | 同上，按 `colour_group_code` |
+| `ui_cnt_item` | Number of times the user bought this `article_id` in the past (`t_dat < a`) |
+| `ui_days_since_item` | Days since the user last bought this article (NaN if never bought) |
+| `ui_cnt_pcode` | Number of times the user bought articles of the same `product_code` |
+| `ui_days_since_pcode` | Days since the user last bought an article of the same `product_code` |
+| `ui_share_ptype_52w` | Among the user's purchases within 52 weeks, the share with the same `product_type_no` as this article |
+| `ui_share_garment_52w` | As above, by `garment_group_no` |
+| `ui_share_index_52w` | As above, by `index_group_no` |
+| `ui_share_colour_52w` | As above, by `colour_group_code` |
 | `ui_price_ratio` | `item_price_mean_4w / user_price_mean_52w` |
 | `ui_age_gap` | `|age − item_buyer_age_mean_4w|` |
-| `ui_decay_ptype`、`ui_decay_garment`、`ui_decay_section`、`ui_decay_colour` **（新增）** | 用户在 `t_dat < a` 的全部历史中，与候选商品同 `product_type_no` / `garment_group_no` / `section_no` / `colour_group_code` 的每一条购买行，按 `exp(−age_days / 30)` 加权求和；没有则为 0。τ 固定为 30（`configs/features.yaml` 的 `decay_tau_days`），**不是超参数** |
-| `ui_days_since_ptype`、`ui_days_since_section` **（新增）** | 距用户最近一次购买同 `product_type_no` / `section_no` 商品的天数；没买过为 NaN |
-| `ui_share_section_52w`、`ui_share_pgroup_52w` **（新增）** | 与 `ui_share_*_52w` 相同的定义，属性换成 `section_no` 和 `product_group_name` |
-| `ui_lift_ptype_52w` **（新增）** | `ui_share_ptype_52w` ÷ 全站 52w 内该 `product_type_no` 的购买行占比；用户 52w 内没有购买，或全站占比为 0 时为 NaN |
-| `ui_channel_gap` **（新增）** | `|user_online_share_52w − item_online_share_4w|`；任一侧缺失为 NaN |
-| `ui_attr_match_cnt` **（新增）** | 6 个类目属性中，候选商品的取值出现在用户最近 20 件购买里的属性个数（0–6）；用户没有历史时为 NaN |
+| `ui_decay_ptype`, `ui_decay_garment`, `ui_decay_section`, `ui_decay_colour` **(new)** | Over the user's whole history with `t_dat < a`, every purchase line with the same `product_type_no` / `garment_group_no` / `section_no` / `colour_group_code` as the candidate article, weighted by `exp(−age_days / 30)` and summed; 0 when there are none. τ is fixed at 30 (`decay_tau_days` in `configs/features.yaml`) and is **not a hyperparameter** |
+| `ui_days_since_ptype`, `ui_days_since_section` **(new)** | Days since the user last bought an article of the same `product_type_no` / `section_no`; NaN if never bought |
+| `ui_share_section_52w`, `ui_share_pgroup_52w` **(new)** | The same definition as `ui_share_*_52w`, with the attributes `section_no` and `product_group_name` |
+| `ui_lift_ptype_52w` **(new)** | `ui_share_ptype_52w` ÷ the site-wide share of the purchase lines of that `product_type_no` within 52w; NaN when the user has no purchase within 52w or the site-wide share is 0 |
+| `ui_channel_gap` **(new)** | `|user_online_share_52w − item_online_share_4w|`; NaN when either side is missing |
+| `ui_attr_match_cnt` **(new)** | Of the 6 category attributes, the number whose value for the candidate article appears among the user's 20 most recent purchases (0–6); NaN when the user has no history |
 
-落实（`src/hmrec/features/user_item.py`）：
+Implementation (`src/hmrec/features/user_item.py`):
 
-- `ui_cnt_pcode`、`ui_days_since_pcode` 的"同 `product_code` 商品"**包括候选商品本身**。
-- `ui_share_*_52w` = 用户 52w 内与候选同类目的购买行数 / 用户 52w 内的全部购买行数。用户 52w 内没有购买时为 NaN（0 / 0）；有购买但没有同类目的为 0。
-- `ui_price_ratio`：任一侧缺失、或用户均价为 0 时为 NaN。`ui_age_gap`：年龄未知、或商品 4w 内没有年龄已知的买家时为 NaN。
+- "Articles of the same `product_code`" in `ui_cnt_pcode` and `ui_days_since_pcode` **include the candidate article itself**.
+- `ui_share_*_52w` = the user's purchase lines within 52w in the same category as the candidate / all purchase lines of the user within 52w. NaN (0 / 0) when the user has no purchase within 52w; 0 when there are purchases but none in the same category.
+- `ui_price_ratio`: NaN when either side is missing or the user's mean price is 0. `ui_age_gap`: NaN when the age is unknown or the article has no buyer of known age within 4w.
 
-### 8.7 特征的冻结和检查
+### 8.7 Freezing and checking the features
 
-- 特征列表和 dtype 写在 `configs/features.yaml`（加载时逐项核对：必须正好是 §8.2–§8.6 的 71 个，顺序、分组、类别特征都不能变）。**特征已锁定**（2026-11-18，F1 的特征生成并核对之后、任何 Ranker 结果出现之前；原计划是"M6 之前"）：`configs/locks/features.lock.yaml` 记录 71 个特征的名称、顺序、dtype，8 个类别特征的清单，两个固定值（`decay_tau_days` 30、`history_similarity_top_k` 5），以及另外四项决定特征取值的设置（`history_length` 20、`rrf_k` 60、`online_sales_channel_id` 2、三个窗口长度 7 / 28 / 364）。代码仍然读 `configs/features.yaml`；`hmrec.locks.check_features_match_lock` 逐项比较两个文件，不一致就报错，`scripts/m6_build_features.py` 在生成每个 fold 之前调用它，`tests/unit/test_features_lock.py` 也调用它。`configs/features.yaml` 里只有 `embedding_pair_chunk_size` 不在锁定文件中（它只影响内存，不影响结果）。类别编码表（`artifacts/features/category_codes.json`，不进 git）也不在锁定文件中，由每个 fold 生成时核对是否与已有文件一致。V 阶段**不调特征**。
-- **每个 fold 生成后自动检查**（`src/hmrec/features/build.py`）：行数等于去重后的候选数（`results/m6_candidates.csv` 的 union 行）；没有重复的 `(query_id, article_idx)`；`tt_dot` / `wals_dot` 与 R6 / R5 的 `score` 逐位相同；每个特征的缺失率、最小值、最大值、均值写进 `results/m6_features.csv`。
-- **独立核对**（`scripts/checks/check_features.py`）：不使用 `features/`、`fusion/`、`asof`、`vectors` 的任何代码，用最朴素的循环对随机 1,000 行重新计算 25 个特征（每组至少 2 个，其中 6 个是新增的），与宽表比较。
-- **特征文件的记录和核对**（`src/hmrec/feature_files.py`）：每个 fold 的 `features.json` 记录每个 part 文件的 sha256、行数，以及列清单。`verify_feature_files` 核对：列清单与预期一致、磁盘上的 part 文件正好是记录的那些、每个文件的 sha256 / 行数 / 列都一致。**M7 读取任何一个 fold 的特征之前必须先调用它。**
-- 每个特征都要有一个时间截断测试：把 anchor 当天及之后的交易全部删掉，重新计算，结果必须完全一致。
-- 训练结束后输出 feature importance（gain），只用来分析，不用来增删特征。
+- The feature list and dtypes are written in `configs/features.yaml` (checked item by item on load: they must be exactly the 71 of §8.2–§8.6, and neither order, nor groups, nor the categorical features may change). **The features are locked** (2026-11-18, after the features of F1 were generated and verified and before any ranker result appeared; the original plan was "before M6"): `configs/locks/features.lock.yaml` records the names, order and dtypes of the 71 features, the list of the 8 categorical features, two fixed values (`decay_tau_days` 30, `history_similarity_top_k` 5), and four further settings that determine feature values (`history_length` 20, `rrf_k` 60, `online_sales_channel_id` 2, the three window lengths 7 / 28 / 364). The code still reads `configs/features.yaml`; `hmrec.locks.check_features_match_lock` compares the two files item by item and raises an error on any mismatch; `scripts/m6_build_features.py` calls it before generating each fold, and so does `tests/unit/test_features_lock.py`. Only `embedding_pair_chunk_size` of `configs/features.yaml` is not in the lock file (it affects only memory, not results). The category code table (`artifacts/features/category_codes.json`, not in git) is not in the lock file either; each fold checks at generation that it agrees with the existing file. **No feature is tuned** in the V phase.
+- **Automatic checks after each fold is generated** (`src/hmrec/features/build.py`): the number of rows equals the number of deduplicated candidates (the union row of `results/m6_candidates.csv`); no duplicate `(query_id, article_idx)`; `tt_dot` / `wals_dot` are bit-identical to the `score` of R6 / R5; the missing rate, minimum, maximum and mean of every feature are written to `results/m6_features.csv`.
+- **Independent verification** (`scripts/checks/check_features.py`): using no code of `features/`, `fusion/`, `asof` or `vectors`, it recomputes 25 features (at least 2 per group, 6 of them new) for 1,000 random rows with the plainest loops and compares them with the wide table.
+- **Recording and verifying the feature files** (`src/hmrec/feature_files.py`): the `features.json` of each fold records the sha256 and the row count of every part file, and the column list. `verify_feature_files` verifies: the column list is as expected, the part files on disk are exactly the recorded ones, and the sha256 / rows / columns of every file agree. **M7 must call it before reading the features of any fold.**
+- Every feature must have a time cut-off test: delete all transactions on the anchor day and after it and recompute; the result must be exactly the same.
+- After training, feature importance (gain) is output, for analysis only, not for adding or dropping features.
 
 ---
 
-## 9. Ranker 训练、HPO 和 Baseline
+## 9. Ranker training, HPO and baseline
 
-### 9.1 训练样本和负采样
+### 9.1 Training samples and negative sampling
 
-- **只用至少有 1 个正样本的 query 训练**。LambdaMART 在没有正样本的 group 上梯度为零，留着只占内存。
-- 保留每个 query 的**所有正样本**。
-- **负样本**：在同一个 query 的候选里**均匀随机采样**，每个正样本对应 r 个负样本（候选不够时全取）。`r ∈ {40, 60, 80}` 是 HPO 参数，默认 40。经验上至少需要 40 才能让 MAP@12 达到 0.032 以上。**只用随机负采样，不用 hard negative。**
-- 负采样只用于训练。**V 和 T 的评估使用全部候选，不采样。**
-- 采样 seed 固定，写进 config。
+- **Only queries with at least 1 positive are used for training.** LambdaMART has zero gradient on a group without positives, and keeping such groups only takes memory.
+- **All positives** of each query are kept.
+- **Negatives**: sampled **uniformly at random** among the candidates of the same query, r negatives per positive (all of them when there are not enough candidates). `r ∈ {40, 60, 80}` is an HPO parameter, with a default of 40. Empirically at least 40 are needed for MAP@12 to reach 0.032 or more. **Only random negative sampling is used, no hard negatives.**
+- Negative sampling is for training only. **Evaluation on V and T uses all candidates, with no sampling.**
+- The sampling seed is fixed and written in the config.
 
-估算（与 §1.3 ② 一致）：每周正样本 ≈ 8.2 万 query × 3.4 label × 24%（G2 的 union recall 目标）≈ 6.7 万；r = 40 时 6.7 万 × 41 ≈ 每周 274 万行，4 周约 1,100 万行；r = 80 时 6.7 万 × 81 ≈ 每周 542 万行，4 周约 2,170 万行（候选不够时负样本全取，所以是上限）。计算过程和内存处理见 §1.3。
+Estimate (consistent with §1.3 ②): positives per week ≈ 82,000 queries × 3.4 labels × 24% (the union recall target of G2) ≈ 67,000; at r = 40, 67,000 × 41 ≈ 2.74 million rows per week, about 11 million rows for 4 weeks; at r = 80, 67,000 × 81 ≈ 5.42 million rows per week, about 21.7 million rows for 4 weeks (when there are not enough candidates all negatives are taken, so this is an upper bound). The calculation and the memory handling are in §1.3.
 
-M4 在 D1–D4 上的实测（2026-11-17，§5.7，M5 锁定的配置）：六路 union recall 25.2%，所以正样本比上面的估算多约 5%；**49.5% 的 query 至少有 1 个正样本**（50.5% 的 query 没有任何一路命中，不进入训练）；每个 query 去重后平均 307 个候选（P50 320，P90 364；R3 改为只输出 `A(a)` 之前为 313 / 327 / 373），所以 r = 80 时绝大多数正样本都能配满负样本（一个有 2 个正样本的 query 需要 160 个负样本）。这几周的分数偏乐观（各路配置就是在这 4 周上选的），F、V、T 周以实测为准。
+Measured at M4 on D1–D4 (2026-11-17, §5.7, the configuration locked at M5): the six-channel union recall is 25.2%, so the positives are about 5% more than estimated above; **49.5% of the queries have at least 1 positive** (for 50.5% of the queries no channel hits, and they do not enter training); after deduplication each query has 307 candidates on average (P50 320, P90 364; 313 / 327 / 373 before R3 was changed to output only `A(a)`), so at r = 80 the great majority of positives can be given their full number of negatives (a query with 2 positives needs 160 negatives). The scores of these weeks are optimistically biased (the configurations of the channels were selected on these 4 weeks); for the F, V and T weeks the measured values count.
 
-### 9.2 滚动重训：固定 4 周窗口
+### 9.2 Rolling retraining: a fixed 4-week window
 
-| 预测 | 训练用的 4 周 |
+| Predicted | The 4 training weeks |
 |---|---|
 | V1 | F1 F2 F3 F4 |
 | V2 | F2 F3 F4 V1 |
@@ -793,87 +793,87 @@ M4 在 D1–D4 上的实测（2026-11-17，§5.7，M5 锁定的配置）：六�
 | T3 | V3 V4 T1 T2 |
 | T4 | V4 T1 T2 T3 |
 
-- 预测 V2 时（anchor 08-05），V1 的 label（07-29 – 08-04）已经完整，可以直接使用。
-- 每次都从头训练，不用 `init_model` 续训。
-- 窗口固定为 4 周，每次训练数据量差不多，这样选出的 tree 数才能在各周之间通用。
+- When V2 is predicted (anchor 08-05), the labels of V1 (07-29 – 08-04) are already complete and can be used directly.
+- Training starts from scratch every time; `init_model` is not used to continue training.
+- The window is fixed at 4 weeks, so every training run has about the same amount of data, which is what lets the selected number of trees carry over between weeks.
 
-### 9.3 固定参数
+### 9.3 Fixed parameters
 
-| 参数 | 值 |
+| Parameter | Value |
 |---|---|
 | objective | `lambdarank` |
 | learning_rate | 0.05 |
 | feature_fraction | 0.8 |
 | bagging_fraction / bagging_freq | 0.8 / 1 |
 | max_bin | 255 |
-| eval_at | 12（只用于训练日志） |
+| eval_at | 12 (for the training log only) |
 | num_threads | 6 |
 
-### 9.4 HPO（V1–V4）
+### 9.4 HPO (V1–V4)
 
-| 步骤 | 参数 | 取值 | 训练次数 |
+| Step | Parameter | Values | Training runs |
 |---|---|---|---|
 | 1 | `num_leaves` × `min_data_in_leaf` | {31, 63, 127} × {100, 500} | 6 × 4 = 24 |
-| 2 | 负采样比例 r | {40, 60, 80}（训练数据流式加载，见 §1.3） | +2 × 4 = 8 |
-| 贯穿 | `num_trees` | 每个模型训到 **1000** 棵，在 k = 100, 200, …, 1000 棵处各评估一次，一次训练得到整条曲线（原定 2000 棵；2026-11-18 看到 V1 的测速结果之后，作为计算预算上的决定改为 1000，见表下说明）。"k 棵树时的分数"由 `ranker/predict.py` 的 `staged_raw_scores` 定义：每 100 棵算一段原始分数再按顺序累加，每棵树只算一次（见 §9.7） | 不增加 |
+| 2 | Negative sampling ratio r | {40, 60, 80} (training data are stream-loaded, see §1.3) | +2 × 4 = 8 |
+| Throughout | `num_trees` | Every model is trained to **1000** trees and evaluated at k = 100, 200, …, 1000 trees, so one training gives the whole curve (2000 trees originally; changed to 1000 on 2026-11-18, after seeing the speed-test results of V1, as a compute-budget decision, see the note below the table). "The score with k trees" is defined by `staged_raw_scores` of `ranker/predict.py`: a segment of raw scores is computed per 100 trees and accumulated in order, with every tree computed once (see §9.7) | no increase |
 
-按 §4 的规则，用 4 周的 MAP@12 选 `(num_leaves, min_data_in_leaf, 负采样比例, num_trees)`。
+Under the rule of §4, `(num_leaves, min_data_in_leaf, negative sampling ratio, num_trees)` is selected by the MAP@12 of the 4 weeks.
 
-**先定棵数、再比参数**（2026-11-18，运行之前写进 `configs/hpo/v_phase.yaml`，`docs/decisions.md`）：
+**Fix the number of trees first, then compare parameters** (2026-11-18, written into `configs/hpo/v_phase.yaml` before the run, `docs/decisions.md`):
 
-1. 每组参数先定自己的棵数。设 `P(k)` 是 4 周合并（query-weighted）的 MAP@12，`k* = min{k : (max P − P(k)) / max P < 1%}`：与最高值相对差距小于 1% 的 k 里取最小的；差距正好 1% 不算。
-2. 再按 §4.2 的多候选规则比较各组参数，每组用自己 `k*` 处的 4 周分数和合并分数。
-3. 第 1 步的优先顺序：(31, 500) [默认] < (31, 100) < (63, 500) < (63, 100) < (127, 500) < (127, 100)。第 2 步：r = 40 [默认，即第 1 步的赢家，不重跑] < 60 < 80，每个 r 各自先定 k。
-4. 一步的赢家如果 `k*` 等于上限（最后一个检查点；现在是 1000），曲线可能还在上升：这一步之后停下汇报，由人决定是否加树。没被选中的候选 `k*` 等于上限时只在报告里标注。
+1. Each parameter set first fixes its own number of trees. Let `P(k)` be the 4-week pooled (query-weighted) MAP@12; `k* = min{k : (max P − P(k)) / max P < 1%}`: the smallest k among those whose relative gap to the maximum is below 1%; a gap of exactly 1% does not count.
+2. The parameter sets are then compared by the multi-candidate rule of §4.2, each with the scores of the 4 weeks and the pooled score at its own `k*`.
+3. Priority order of step 1: (31, 500) [default] < (31, 100) < (63, 500) < (63, 100) < (127, 500) < (127, 100). Step 2: r = 40 [default, i.e. the winner of step 1, not re-run] < 60 < 80, with every r first fixing its own k.
+4. If the `k*` of a step's winner equals the cap (the last checkpoint; now 1000), the curve may still be rising: the run stops after this step and reports, and a person decides whether to add trees. For an unselected candidate whose `k*` equals the cap, this is only noted in the report.
 
-**树的上限从 2000 改为 1000**（2026-11-18，`docs/decisions.md`）。这是在**看到 V1 的测速结果之后**做的、计算预算上的决定，不是事先登记的：默认配置在 V1 上 100 → 200 棵的 MAP@12 增量是 +2.5%，200 → 300 棵是 +1.4%，每 100 棵的增量约缩小到上一次的六成；按这个速度推算，900 → 1000 棵的增量约 0.03%，远小于 1% 的"差不多"标准。推算只来自一个 fold、一组参数；上面第 4 条的上限规则保留，赢家的 `k*` 等于 1000 时照样停下。选择规则本身（`configs/hpo/v_phase.yaml`）没有改。
+**Cap on the number of trees lowered from 2000 to 1000** (2026-11-18, `docs/decisions.md`). This is a compute-budget decision made **after seeing the speed-test results of V1**; it was not registered beforehand: for the default configuration on V1, the gain in MAP@12 from 100 → 200 trees is +2.5% and from 200 → 300 trees +1.4%, with the gain per 100 trees shrinking to about six tenths of the previous one; extrapolated at this rate, the gain from 900 → 1000 trees is about 0.03%, far below the 1% "about the same" criterion. The extrapolation comes from one fold and one parameter set only; the cap rule of item 4 above is kept, and the run still stops if the winner's `k*` equals 1000. The selection rule itself (`configs/hpo/v_phase.yaml`) was not changed.
 
-**不做 per-fit early stopping**：tree 数和 Two-Tower 的 epoch 一样，作为超参数在 4 周上选定后锁住。这样每次训练都能用上最新的一周数据，各周模型的训练程度也一致。
+**No per-fit early stopping**: like the number of Two-Tower epochs, the number of trees is a hyperparameter selected over 4 weeks and then locked. Every training run can thus use the data of the latest week, and the models of all weeks are trained to the same degree.
 
-### 9.5 Baseline 和系统级 Ablation（V1–V4）
+### 9.5 Baseline and system-level ablation (V1–V4)
 
-| 实验 | 必做 / 可选 | 说明 |
+| Experiment | Required / optional | Description |
 |---|---|---|
-| **RRF baseline** | 必做 | 同一个候选集，按 `rrf_score`（k=60）排序取 Top-12；分数相同时按 `best_rank` 再按 `article_id`；不训练、不调 k |
-| Full（6 路 + LambdaMART） | 必做 | 主系统 |
-| −R6（去掉 Two-Tower） | 必做 | Two-Tower 成本最高，必须证明它对 MAP@12 有贡献 |
-| −R1 … −R5 | 不做 | R1–R5 的价值只用 D 阶段的 leave-one-out union recall 来看 |
+| **RRF baseline** | Required | The same candidate set, ordered by `rrf_score` (k=60), Top-12; ties are broken by `best_rank`, then by `article_id`; nothing is trained and k is not tuned |
+| Full (6 channels + LambdaMART) | Required | The main system |
+| −R6 (without Two-Tower) | Required | Two-Tower is the most expensive, so its contribution to MAP@12 has to be shown |
+| −R1 … −R5 | Not done | The value of R1–R5 is judged only by the leave-one-out union recall of the D phase |
 
-"去掉某一路"的做法：删掉**只由这一路召回**的候选行，删掉这一路的特征列（包括 B 组对应的稠密分数），然后按 §9.2 重新滚动训练。
+How "removing a channel" is done: drop the candidate rows **recalled only by this channel**, drop the feature columns of the channel (including the corresponding dense scores of group B), then retrain in the rolling manner of §9.2.
 
-**−R6 的落实**（`src/hmrec/ranker/ablation.py`，采样和打分共用同一个函数；不重新生成候选和特征）：(1) 删掉其余五路 rank 全为 NaN 的行；(2) 删掉 `tt_rank`、`tt_dot`、`tt_sim_max_hist`、`tt_sim_top5_hist`，剩 67 个特征，顺序不变；(3) 用 `fusion/rrf.py` 的同一组表达式和锁定的 `rrf_k`，由其余五个 rank 列**重新计算** `n_channels`、`best_rank`、`rrf_score`（否则这三列里仍然带着 R6 的排名）；(4) 重新采样（只采选中的 r），用选中的参数训练到选中的 `k*` 棵（训练是确定性的，前 k 棵与训到上限（1000 棵）的模型的前 k 棵相同），在 V1–V4 上评估。结果只汇报，不触发任何选择。
+**Implementation of −R6** (`src/hmrec/ranker/ablation.py`; sampling and scoring share the same function; candidates and features are not regenerated): (1) drop the rows whose ranks in the other five channels are all NaN; (2) drop `tt_rank`, `tt_dot`, `tt_sim_max_hist` and `tt_sim_top5_hist`, leaving 67 features in the same order; (3) **recompute** `n_channels`, `best_rank` and `rrf_score` from the other five rank columns, with the same expressions of `fusion/rrf.py` and the locked `rrf_k` (otherwise these three columns would still carry the rank of R6); (4) resample (only the selected r), train with the selected parameters to the selected `k*` trees (training is deterministic, and the first k trees equal the first k trees of a model trained to the cap (1000 trees)), and evaluate on V1–V4. The result is only reported and triggers no selection.
 
-### 9.6 锁定
+### 9.6 The lock
 
-V4 结束后、T1 之前，把 Ranker 配置写进 `configs/locks/ranker.lock.yaml`。
+After V4 and before T1, the ranker configuration is written into `configs/locks/ranker.lock.yaml`.
 
-**已锁定（2026-11-18）**：`num_leaves` 31、`min_data_in_leaf` 500、负采样比例 40、500 棵树（V 阶段的结果见 §9.7 末尾）。锁定文件写明：
+**Locked (2026-11-18)**: `num_leaves` 31, `min_data_in_leaf` 500, negative sampling ratio 40, 500 trees (the V-phase results are at the end of §9.7). The lock file states:
 
-- `model`：三个调参项中的两个、树的棵数、`seed`、直方图方式（row-wise），以及传给 LightGBM 的全部参数（7 个分箱参数、24 个训练参数）；
-- `sampling`：负采样的方法、`seed`、比例 40、采样文件的 row group 行数；
-- `training_window`：4 周，每次从头训练；`scoring`：分段打分的步长（100 棵一段，float64 累加）和 Top-12；
-- `runtime`：LightGBM 4.7.0、libomp 22.1.4、`num_threads` 6；
-- `references`：`features.lock.yaml`、`channels.lock.yaml` 和 `twotower.lock.yaml` 的路径和 sha256（R6 的候选和四个 `tt_` 特征依赖 twotower 的锁定）；
-- `selection`：选择依据（规则选择，保留默认值）、对应的 `config_id`（`ca1a3cdfce49`）、`docs/decisions.md` 的记录、V 上的分数（只作记录）；
-- `lock` 段（日期和当时的 HEAD）。
+- `model`: two of the three tuned items, the number of trees, `seed`, the histogram mode (row-wise), and all parameters passed to LightGBM (7 binning parameters and 24 training parameters);
+- `sampling`: the method of negative sampling, `seed`, ratio 40, and the number of rows per row group of the sample files;
+- `training_window`: 4 weeks, trained from scratch each time; `scoring`: the segment length of staged scoring (segments of 100 trees, accumulated in float64) and Top-12;
+- `runtime`: LightGBM 4.7.0, libomp 22.1.4, `num_threads` 6;
+- `references`: the paths and sha256 of `features.lock.yaml`, `channels.lock.yaml` and `twotower.lock.yaml` (the candidates of R6 and the four `tt_` features depend on the twotower lock);
+- `selection`: the basis of the selection (selected by the rule, the default kept), the corresponding `config_id` (`ca1a3cdfce49`), the entry in `docs/decisions.md`, and the scores on V (for the record only);
+- the `lock` section (the date and the HEAD of the time).
 
-没有写进锁定文件的：只影响内存和日志的设置（`scoring_query_chunk_size`、`train_metric_every`、`configs/base.yaml` 的内存上限和分块）。
+Not written into the lock file: the settings that affect only memory and logging (`scoring_query_chunk_size`, `train_metric_every`, the memory limit and the chunking of `configs/base.yaml`).
 
-**唯一入口**：M8 只能通过 `src/hmrec/ranker/locked.py` 的 `load_locked_ranker` 取 Ranker 的配置，不能再读 `configs/ranker.yaml` 的默认值和固定参数、`configs/hpo/v_phase.yaml`，也不能在 `results/v_phase*.csv` 上重放选择。入口在返回配置之前核对三件事，任何一件不过就报错：(1) 用锁定文件里的设置重新算出的 `config_id` 等于文件记录的；(2) 引用的三个锁定文件（features、channels、twotower）的 sha256 与记录一致；(3) 本进程的 LightGBM 版本、libomp 版本和 `num_threads` 与记录一致（libomp 是 `uv.lock` 之外的系统依赖，升级之后 M8 会在这里停下）。
+**The only entry point**: M8 may obtain the ranker configuration only through `load_locked_ranker` of `src/hmrec/ranker/locked.py`; it may no longer read the defaults and fixed parameters of `configs/ranker.yaml`, nor `configs/hpo/v_phase.yaml`, nor replay the selection over `results/v_phase*.csv`. Before returning a configuration the entry point checks three things and raises an error if any one fails: (1) the `config_id` recomputed from the settings in the lock file equals the one recorded in the file; (2) the sha256 of the three referenced lock files (features, channels, twotower) match the records; (3) the LightGBM version, the libomp version and `num_threads` of the running process equal the records (libomp is a system dependency outside `uv.lock`, and after an upgrade M8 stops here).
 
-**与记录的核对**（`src/hmrec/hpo/v_lock.py`，只在测试里调用）：不读锁定文件，在 `results/v_phase_metrics.csv` 上重放两步的选择规则，加上 V 阶段运行时的固定配置和赢家 trial 记录的版本，得到锁定文件应当写的内容，再逐项比较。`tests/unit/test_v_lock.py` 还把锁定文件的每一个值逐个改掉，确认每一处改动都被拒绝。
+**Check against the records** (`src/hmrec/hpo/v_lock.py`, called only in tests): without reading the lock file, it replays the selection rule of the two steps over `results/v_phase_metrics.csv`, adds the fixed configuration of the V-phase run and the versions recorded by the winning trials, obtains what the lock file should contain, and compares item by item. `tests/unit/test_v_lock.py` also changes every value of the lock file one by one and confirms that every change is rejected.
 
-### 9.7 落实后的约定（M7，2026-11-18）
+### 9.7 Conventions as implemented (M7, 2026-11-18)
 
-配置在 `configs/ranker.yaml`（固定参数、三个调参项的默认值、采样设置、直方图方式的规则、测速设置）和 `configs/hpo/v_phase.yaml`（步骤、优先顺序、选择规则；在任何 Ranker 结果出现之前提交）。
+The configuration is in `configs/ranker.yaml` (fixed parameters, the defaults of the three tuned items, sampling settings, the rule for the histogram mode, speed-test settings) and `configs/hpo/v_phase.yaml` (steps, priority order, the selection rule; committed before any ranker result existed).
 
-**范围**：M7 只涉及 F1–F4 和 V1–V4。预测目标必须是 V 周，训练周必须是 F 或 V 周（`ranker/window.py`）；每个入口第一步检查，T（或 D）fold 在打开任何文件之前就报错。训练用的 label 只在 `ranker/sampling.py` 读，评估用的只通过 `eval/ranker_eval.py` 的 `load_m7_evaluator` 读。特征只从 `artifacts/features/` 读，读之前调用 `verify_feature_files`，列清单取自 `features.lock.yaml`。
+**Scope**: M7 involves only F1–F4 and V1–V4. The predicted target must be a V week and the training weeks must be F or V weeks (`ranker/window.py`); every entry point checks this as its first step, and a T (or D) fold raises an error before any file is opened. The labels for training are read only in `ranker/sampling.py`, and those for evaluation only through `load_m7_evaluator` of `eval/ranker_eval.py`. Features are read only from `artifacts/features/`, after calling `verify_feature_files`, with the column list taken from `features.lock.yaml`.
 
-**负采样**（§9.1）：每个 query 用 `(seed, query_id)` 单独建一个随机数发生器，把该 query 的负样本（按 `article_idx` 排序）随机排列，取前 `min(负样本数, r × 正样本数)` 个。所以一个 query 的样本只取决于 seed、query_id 和它的候选，与分块和处理顺序无关；r = 40 的样本是 r = 60 的子集，r = 60 是 r = 80 的子集。每个 (fold, r) 一个文件 `artifacts/ranker/samples/{full|minus_r6}/{fold}/r{r}.parquet`：`query_id`、`article_idx`、`label`（int8）和特征列，按 `(query_id, article_idx)` 排序，每 10 万行一个 row group；旁边的 `.json`（行数、query 数、正样本数、每个 query 的行数分布、sha256、来源 `features.json` 的 sha256）最后写入。写一次，不覆盖。M7 只采 F1–F4、V1–V3（V4 只训练预测 T 周的模型，留给 M8）。
+**Negative sampling** (§9.1): each query gets its own random generator from `(seed, query_id)`, the negatives of the query (sorted by `article_idx`) are permuted at random, and the first `min(number of negatives, r × number of positives)` are taken. So the sample of a query depends only on the seed, the query_id and its candidates, not on chunking or processing order; the sample of r = 40 is a subset of that of r = 60, and r = 60 a subset of r = 80. One file per (fold, r), `artifacts/ranker/samples/{full|minus_r6}/{fold}/r{r}.parquet`: `query_id`, `article_idx`, `label` (int8) and the feature columns, sorted by `(query_id, article_idx)`, with 100,000 rows per row group; the `.json` next to it (rows, queries, positives, the distribution of rows per query, sha256, the sha256 of the source `features.json`) is written last. Written once, never overwritten. M7 samples only F1–F4 and V1–V3 (V4 trains only the models that predict T weeks and is left to M8).
 
-实测的样本规模（2026-11-18，只读统计；每个 fold 有 47.9%–51.0% 的 query 至少有 1 个正样本）：
+Measured sample sizes (2026-11-18, a read-only count; in each fold 47.9%–51.0% of the queries have at least 1 positive):
 
-| fold | 正样本 | 有正样本的 query | r = 40 行数 | r = 60 行数 | r = 80 行数 | 配不满的 query（r = 40 / r = 80） |
+| fold | Positives | Queries with a positive | Rows at r = 40 | Rows at r = 60 | Rows at r = 80 | Queries not fully supplied (r = 40 / r = 80) |
 |---|---|---|---|---|---|---|
 | F1 | 72,385 | 41,420 | 2,951,046 | 4,313,058 | 5,559,664 | 282 / 2,908 |
 | F2 | 61,660 | 36,679 | 2,515,389 | 3,686,828 | 4,768,474 | 182 / 2,208 |
@@ -883,67 +883,67 @@ V4 结束后、T1 之前，把 Ranker 配置写进 `configs/locks/ranker.lock.ya
 | V2 | 65,586 | 38,166 | 2,676,158 | 3,916,942 | 5,054,204 | 210 / 2,597 |
 | V3 | 58,920 | 34,028 | 2,397,998 | 3,496,447 | 4,502,500 | 250 / 2,271 |
 
-**Dataset**（`ranker/dataset.py`）：每个采样文件一个 `lgb.Sequence`，一次只在内存里放一个 row group；4 个文件按时间顺序传给 `lgb.Dataset`。`query_id` 随 fold 的顺序递增，所以 group 大小就是 `query_id` 的游程长度，顺序与行顺序一致。构建后存成 binary：`artifacts/lgb_datasets/{实验}/{目标周}_r{r}/train.bin`，旁边的 `dataset.json` 记录 4 个采样文件的 sha256 和分箱参数；trial 加载前核对。LightGBM 4.7.0 的三个事实（合成数据上验证）：`Sequence` 的单行访问必须返回 float64；经 `Sequence` 构建两次，binary 文件逐字节相同，但它与"直接传 numpy 数组"的分箱不同，所以所有 Ranker 都走这条路径；`feature_pre_filter` 必须关掉，同一个 binary 才能被不同的 `min_data_in_leaf` 复用。
+**Dataset** (`ranker/dataset.py`): one `lgb.Sequence` per sample file, with only one row group in memory at a time; the 4 files are passed to `lgb.Dataset` in time order. `query_id` increases with the order of the folds, so the group sizes are the run lengths of `query_id`, in the same order as the rows. After construction it is stored as a binary: `artifacts/lgb_datasets/{experiment}/{target week}_r{r}/train.bin`, with a `dataset.json` next to it that records the sha256 of the 4 sample files and the binning parameters; a trial checks it before loading. Three facts about LightGBM 4.7.0 (verified on synthetic data): single-row access of a `Sequence` must return float64; building twice through `Sequence` gives byte-identical binary files, but the binning differs from "passing a numpy array directly", so every ranker goes through this path; `feature_pre_filter` must be off for the same binary to be reused with different `min_data_in_leaf`.
 
-**参数**（§9.3 之外的全部写在 `configs/ranker.yaml`，标明哪些是 LightGBM 4.7.0 的默认值）：`seed` 42、`deterministic` true；`lambdarank_truncation_level` 30、`lambdarank_norm` true、`bagging_by_query` false（都是默认值，不在第一轮网格里）；8 个类别特征按整数编码传入，编码 0（缺失）是一个普通类别。**直方图方式**（col-wise / row-wise）两者可能给出不同的树，必须在网格之前定死，M8 沿用：规则在测速之前写进 `configs/ranker.yaml`（`histogram`：两种方式各训练 50 棵、不评估；row-wise 每棵树快 15% 以上且真实峰值在 8 GB 以内才选 row-wise，否则 col-wise），`mode` 在测速之后填入；`mode` 为 `undecided` 时网格拒绝运行。**测速的结果（2026-11-18）是 row-wise**：每棵树 0.368 秒，col-wise 0.682 秒，快 46%；row-wise 进程的真实峰值 1.99 GB。`mode: row_wise` 已写进配置。
+**Parameters** (everything beyond §9.3 is written in `configs/ranker.yaml`, with the LightGBM 4.7.0 defaults marked as such): `seed` 42, `deterministic` true; `lambdarank_truncation_level` 30, `lambdarank_norm` true, `bagging_by_query` false (all defaults, not in the first round of the grid); the 8 categorical features are passed as integer codes, and code 0 (missing) is an ordinary category. **The histogram mode** (col-wise / row-wise) may give different trees and has to be fixed before the grid, and M8 keeps it: the rule is written into `configs/ranker.yaml` before the speed test (`histogram`: each mode trains 50 trees without evaluation; row-wise is chosen only if it is at least 15% faster per tree and its true peak is within 8 GB, otherwise col-wise), and `mode` is filled in after the speed test; while `mode` is `undecided` the grid refuses to run. **The result of the speed test (2026-11-18) is row-wise**: 0.368 seconds per tree against 0.682 seconds for col-wise, 46% faster; the true peak of the row-wise process is 1.99 GB. `mode: row_wise` has been written into the config.
 
-**trial**：一个 trial = 一组参数在一个 V 周上的一次训练加评估，用一个独立进程（`scripts/m7_train_eval.py`），所以进程的 `ru_maxrss` 就是这个 trial 自己的真实峰值。训练从头开始，不做 early stopping；训练集 NDCG@12 每 100 棵记一次（只用于日志）。评估对预测周的全部候选打分（不采样），逐个 part 文件处理。
+**trial**: a trial = one training plus evaluation of one parameter set on one V week, in a separate process (`scripts/m7_train_eval.py`), so the `ru_maxrss` of the process is the true peak of this trial itself. Training starts from scratch with no early stopping; the training-set NDCG@12 is recorded every 100 trees (for the log only). Evaluation scores all candidates of the predicted week (no sampling), one part file at a time.
 
-**k 棵树时的分数**（`ranker/predict.py` 的 `staged_raw_scores`，M7 和 M8 共用）：`predict(start_iteration=s, num_iteration=100, raw_score=True)` 每 100 棵算一段，用 float64 按顺序累加。它与 `predict(num_iteration=k)` 不是逐位相同（浮点加法的顺序不同，合成数据上最大相差 1.4e-14），所以以这个函数为准。每个检查点按 `query_id ASC, score DESC, article_idx ASC` 取 Top-12。
+**The score with k trees** (`staged_raw_scores` of `ranker/predict.py`, shared by M7 and M8): `predict(start_iteration=s, num_iteration=100, raw_score=True)` computes one segment per 100 trees, accumulated in order in float64. It is not bit-identical to `predict(num_iteration=k)` (the order of floating-point additions differs; the maximum difference on synthetic data is 1.4e-14), so this function is the definition. At every checkpoint the Top-12 is taken by `query_id ASC, score DESC, article_idx ASC`.
 
-**记录**（都在 `results/`）：`v_phase.csv` 每个 trial 一行（配置、fold、训练周、行数、训练和打分耗时、采样峰值 `sampled_peak_rss_gb`、真实峰值 `process_max_rss_gb`、git commit）；`v_phase_metrics.csv` 每个 (配置, fold, k) 一行（query 数、MAP@12、Recall@12、NDCG@12、训练集 NDCG@12）；`v_phase_steps.csv` 每一步每个配置的 `k*`、分数、是否通过、选中谁和原因。V 阶段用新的记录类（`hpo/v_records.py`），D 阶段的 `TrialRecord` 和 `results/d_phase.csv` 不动。**选择只从 `v_phase_metrics.csv` 计算**：合并分数 = `Σ(n_f × mean_f) / Σ n_f`（`math.fsum`），与"全部 query 一起平均"只差浮点舍入（约 1e-16），好处是选择可以只凭 git 里的文件重放。每个 trial 另外保存每个检查点的 Top-12 和每个 query 的指标（`artifacts/predictions/`），`scripts/checks/check_ranker_eval.py` 用朴素循环从 Top-12 重算指标。
+**Records** (all in `results/`): `v_phase.csv` has one row per trial (configuration, fold, training weeks, rows, training and scoring time, sampled peak `sampled_peak_rss_gb`, true peak `process_max_rss_gb`, git commit); `v_phase_metrics.csv` has one row per (configuration, fold, k) (queries, MAP@12, Recall@12, NDCG@12, training-set NDCG@12); `v_phase_steps.csv` has, for every configuration of every step, its `k*`, scores, whether it passes, which one is selected and why. The V phase uses a new record class (`hpo/v_records.py`); `TrialRecord` of the D phase and `results/d_phase.csv` are not touched. **The selection is computed from `v_phase_metrics.csv` alone**: pooled score = `Σ(n_f × mean_f) / Σ n_f` (`math.fsum`), which differs from "the mean over all queries together" only by floating-point rounding (about 1e-16); the benefit is that the selection can be replayed from the files in git alone. Every trial also saves the Top-12 of every checkpoint and the metrics of every query (`artifacts/predictions/`), and `scripts/checks/check_ranker_eval.py` recomputes the metrics from the Top-12 with plain loops.
 
-**测速**（`scripts/m7_speed_test.py`，网格之前只做一次）：采样 F1–F4，构建 V1 / r = 40 的 Dataset；两种直方图方式各训练 50 棵（不评估）并按规则选定方式；默认配置训练 300 棵，在 V1 上评估 100、200、300 棵，同时计算 V1 的 RRF baseline；汇报每棵树的训练耗时、打分耗时、真实峰值、训练数据的检查（各 fold 的正样本比例、每个 query 的行数分布、训练集 NDCG@12 是否上升）。**如果 300 棵时 MAP@12 低于 RRF baseline，停下排查，不外推时间。**结果写 `results/m7_speed_test.csv` 和 `results/m7_speed_test_metrics.csv`，不进 `v_phase*.csv`。
+**Speed test** (`scripts/m7_speed_test.py`, done once before the grid): sample F1–F4 and build the Dataset of V1 / r = 40; each of the two histogram modes trains 50 trees (not evaluated) and the mode is chosen by the rule; the default configuration trains 300 trees and is evaluated on V1 at 100, 200 and 300 trees, with the RRF baseline of V1 computed as well; reported are the training time per tree, the scoring time, the true peak, and checks of the training data (the share of positives of each fold, the distribution of rows per query, whether the training-set NDCG@12 rises). **If MAP@12 at 300 trees is below the RRF baseline, stop and investigate, without extrapolating times.** The results are written to `results/m7_speed_test.csv` and `results/m7_speed_test_metrics.csv`, not into `v_phase*.csv`.
 
-测速的结果（2026-11-18，HEAD `25cacf2`，工作区干净；LightGBM 4.7.0，libomp 22.1.4）：
+Results of the speed test (2026-11-18, HEAD `25cacf2`, clean working tree; LightGBM 4.7.0, libomp 22.1.4):
 
-| V1（82,802 个 query） | MAP@12 | Recall@12 | NDCG@12 | 训练集 NDCG@12 |
+| V1 (82,802 queries) | MAP@12 | Recall@12 | NDCG@12 | Training-set NDCG@12 |
 |---|---|---|---|---|
 | RRF baseline | 0.018511 | 0.048789 | 0.031607 | — |
-| 默认配置 (31, 500, r = 40)，100 棵 | 0.028597 | 0.064804 | 0.044900 | 0.336789 |
-| 200 棵 | 0.029305 | 0.066029 | 0.045978 | 0.349325 |
-| 300 棵 | 0.029719 | 0.066720 | 0.046538 | 0.357690 |
+| Default configuration (31, 500, r = 40), 100 trees | 0.028597 | 0.064804 | 0.044900 | 0.336789 |
+| 200 trees | 0.029305 | 0.066029 | 0.045978 | 0.349325 |
+| 300 trees | 0.029719 | 0.066720 | 0.046538 | 0.357690 |
 
-300 棵时 MAP@12 比 RRF baseline 高 61%，没有触发"停下排查"。训练集 NDCG@12 逐次上升；它与 V1 的 NDCG 不能直接比（训练集只有含正样本的 query，每个正样本只配 40 个负样本）。训练数据的检查：F1–F4 的正样本比例 2.449%–2.453%（略高于 1/41，因为少数 query 配不满），每个 query 的行数平均 68.1–71.2、P50 41、P90 123。耗时和内存见 §1.3。这是一个 fold、一组参数、300 棵的结果，只用来确认流程和估算时间，不是模型表现的结论。
+At 300 trees MAP@12 is 61% above the RRF baseline, so "stop and investigate" was not triggered. The training-set NDCG@12 rises each time; it cannot be compared directly with the NDCG of V1 (the training set has only queries with a positive, and each positive is paired with only 40 negatives). Checks of the training data: the share of positives of F1–F4 is 2.449%–2.453% (slightly above 1/41, because a few queries are not fully supplied), and the rows per query are 68.1–71.2 on average, with P50 41 and P90 123. Run time and memory are in §1.3. This is the result of one fold, one parameter set and 300 trees; it serves only to confirm the pipeline and to estimate times and is not a conclusion about model performance.
 
-**网格里的自动核对**（`hpo/v_phase.py` 的 `check_default_against_speed_test`）：网格训练完默认配置在 V1 上的模型之后，立刻比较它的前 300 棵与测速的模型（两个模型文件先各自核对 sha256，再比较前 300 棵树的文本）；不一致就停下，不再运行后面的 trial。原因：训练是确定性的，两者必须相同；不同说明环境（LightGBM、libomp）、Dataset 或参数变了。
+**Automatic check in the grid** (`check_default_against_speed_test` of `hpo/v_phase.py`): as soon as the grid has trained the model of the default configuration on V1, its first 300 trees are compared with the model of the speed test (each of the two model files is first checked against its sha256, then the text of the first 300 trees is compared); on a mismatch the run stops and no later trial is run. Reason: training is deterministic, so the two must be the same; a difference means the environment (LightGBM, libomp), the Dataset or the parameters changed.
 
-**进程里不能同时有 torch 和 LightGBM**：torch 自带一份 libomp，LightGBM 用的是 Homebrew 的 libomp（`/opt/homebrew/Cellar/libomp/22.1.4`，不由 `uv.lock` 锁定），两份在一个进程里会直接退出、卡死或段错误。M7 的代码不 import torch（`git_state` 为此从 `hpo/runner.py` 移到 `src/hmrec/git_state.py`），测试分两个进程运行（`tests/conftest.py`，AGENTS.md §7）。libomp 是 `uv.lock` 之外的系统依赖（`brew install libomp`，见 README）：每个 M7 进程的结果行都记录 `lightgbm_version`、`libomp_path`、`libomp_version`（`ranker/runtime.py`，取自本进程实际加载的库）；升级 libomp 之后要重新做一次"两次训练得到相同模型"的核对。
+**torch and LightGBM cannot be in the same process**: torch ships its own libomp, and LightGBM uses Homebrew's libomp (`/opt/homebrew/Cellar/libomp/22.1.4`, not locked by `uv.lock`); two copies in one process exit at once, hang or segfault. The M7 code does not import torch (for this, `git_state` moved from `hpo/runner.py` to `src/hmrec/git_state.py`), and tests run in two processes (`tests/conftest.py`, AGENTS.md §7). libomp is a system dependency outside `uv.lock` (`brew install libomp`, see the README): the result rows of every M7 process record `lightgbm_version`, `libomp_path` and `libomp_version` (`ranker/runtime.py`, taken from the library actually loaded in the process); after upgrading libomp, the check "two trainings give the same model" has to be done again.
 
-**V 阶段的结果（2026-11-18，M7 的最终结果）**。结果表：`results/v_phase.csv`（36 个 trial）、`results/v_phase_metrics.csv`、`results/v_phase_steps.csv`、`results/v_phase_feature_importance.csv`；逐项记录见 `docs/decisions.md`。
+**V-phase results (2026-11-18, the final results of M7)**. Result tables: `results/v_phase.csv` (36 trials), `results/v_phase_metrics.csv`, `results/v_phase_steps.csv`, `results/v_phase_feature_importance.csv`; the item-by-item record is in `docs/decisions.md`.
 
-第 1 步（`num_leaves` × `min_data_in_leaf`，r = 40）和第 2 步（负采样比例），各自先定 k，再按 §4.2 的规则与默认比较。两步都没有候选通过，**保留默认值**：
+Step 1 (`num_leaves` × `min_data_in_leaf`, r = 40) and step 2 (the negative sampling ratio); each configuration first fixes its own k and is then compared with the default under the rule of §4.2. No candidate passed in either step, so **the default is kept**:
 
-| 步骤 | 配置 | 选中的 k | V1–V4 合并 MAP@12 | 最高分所在的 k | 最高分 | 相对默认 |
+| Step | Configuration | Selected k | V1–V4 pooled MAP@12 | k of the best score | Best score | Relative to default |
 |---|---|---|---|---|---|---|
-| 1、2 | **(31, 500)，r = 40（默认，最终配置）** | **500** | **0.032713** | 1000 | 0.032865 | — |
+| 1, 2 | **(31, 500), r = 40 (default, final configuration)** | **500** | **0.032713** | 1000 | 0.032865 | — |
 | 1 | (31, 100) | 500 | 0.032619 | 1000 | 0.032849 | −0.29% |
 | 1 | (63, 500) | 300 | 0.032645 | 600 | 0.032804 | −0.21% |
 | 1 | (63, 100) | 300 | 0.032555 | 600 | 0.032755 | −0.48% |
 | 1 | (127, 500) | 200 | 0.032536 | 500 | 0.032766 | −0.54% |
 | 1 | (127, 100) | 200 | 0.032528 | 400 | 0.032653 | −0.56% |
-| 2 | (31, 500)，r = 60 | 400 | 0.032664 | 900 | 0.032917 | −0.15% |
-| 2 | (31, 500)，r = 80 | 400 | 0.032698 | 800 | 0.032952 | −0.04% |
+| 2 | (31, 500), r = 60 | 400 | 0.032664 | 900 | 0.032917 | −0.15% |
+| 2 | (31, 500), r = 80 | 400 | 0.032698 | 800 | 0.032952 | −0.04% |
 
-- "各自定 k"带来的现象：r 越大，最高分越高，规则给 r = 60、80 选了更小的 k（400），所以表里的差距是负的。在相同的 k = 500 上，r = 80 是 0.032821，比 r = 40 高 0.33%；按最高分比高 0.27%。都远低于 1% 的门槛，结论不变。
-- 默认配置的最高分落在上限 1000 棵，但选中的 k 是 500，没有触发"赢家的 k 等于上限就停下"；900 → 1000 棵只增加 0.03%。
-- **Ranker 的这几个参数已经在平台期**：8 组配置的合并 MAP@12 都在 0.0325–0.0330 之间。提升空间在候选和特征。备选清单（`lambdarank_truncation_level`、把漂移明显的分数类特征换算成 query 内名次）没有评估，留到下一版；下一版还可以考虑删掉贡献接近 0 的特征。
+- An effect of "each fixes its own k": the larger r, the higher the best score, and the rule gives r = 60 and 80 a smaller k (400), which is why the differences in the table are negative. At the same k = 500, r = 80 scores 0.032821, 0.33% above r = 40; comparing best scores it is 0.27% higher. Both are far below the 1% threshold, and the conclusion is unchanged.
+- The best score of the default configuration falls on the cap of 1000 trees, but the selected k is 500, so "stop if the winner's k equals the cap" was not triggered; 900 → 1000 trees adds only 0.03%.
+- **These parameters of the ranker are on a plateau**: the 8 configurations all have a pooled MAP@12 between 0.0325 and 0.0330. The headroom is in candidates and features. The list of alternatives (`lambdarank_truncation_level`, converting clearly drifting score-type features into within-query ranks) was not evaluated and is left to the next version; the next version may also consider dropping features with a contribution close to 0.
 
-最终配置（k = 500）与 RRF baseline、去掉 R6 的系统：
+The final configuration (k = 500) against the RRF baseline and the system without R6:
 
-| MAP@12 | V1 | V2 | V3 | V4 | 合并 |
+| MAP@12 | V1 | V2 | V3 | V4 | Pooled |
 |---|---|---|---|---|---|
 | RRF baseline | 0.018511 | 0.019064 | 0.020604 | 0.019662 | 0.019419 |
-| 完整系统 | 0.030112 | 0.031332 | 0.035029 | 0.034850 | **0.032713** |
-| 去掉 R6 | 0.028727 | 0.029881 | 0.033603 | 0.033013 | 0.031193 |
-| 去掉 R6 的相对下降 | −4.60% | −4.63% | −4.07% | −5.27% | −4.64% |
+| Full system | 0.030112 | 0.031332 | 0.035029 | 0.034850 | **0.032713** |
+| Without R6 | 0.028727 | 0.029881 | 0.033603 | 0.033013 | 0.031193 |
+| Relative drop without R6 | −4.60% | −4.63% | −4.07% | −5.27% | −4.64% |
 
-- **G1（合并 MAP@12 ≥ 0.032）在 V 上达标**，G3（4 周中至少 3 周高于 RRF baseline）达标（4 周都更高）。**余量只有 2.2%，而且 V 上的分数偏乐观**（k 和参数就是在这四周上选的），**T 上有可能低于 0.032**；以 M8 为准。
-- 去掉 R6 之后合并 MAP@12 降 4.64%，低于 G1；Recall@12 降 7.00%（0.072987 → 0.067875），NDCG@12 降 6.05%。
+- **G1 (pooled MAP@12 ≥ 0.032) is met on V**, and G3 (above the RRF baseline in at least 3 of the 4 weeks) is met (higher in all 4 weeks). **The margin is only 2.2%, and the scores on V are optimistically biased** (k and the parameters were selected on these very four weeks), so **T may fall below 0.032**; M8 decides.
+- Without R6, pooled MAP@12 falls by 4.64%, below G1; Recall@12 falls by 7.00% (0.072987 → 0.067875) and NDCG@12 by 6.05%.
 
-Feature importance（最终配置的 4 个模型，前 500 棵，gain 占比的四周平均；只用于分析）。前 20 个：
+Feature importance (the 4 models of the final configuration, first 500 trees, the four-week mean of the share of gain; for analysis only). Top 20:
 
-| 名次 | 特征 | 组 | 占比 | 名次 | 特征 | 组 | 占比 |
+| Rank | Feature | Group | Share | Rank | Feature | Group | Share |
 |---|---|---|---|---|---|---|---|
 | 1 | `best_rank` | A | 12.01% | 11 | `section_no` | C | 2.85% |
 | 2 | `rrf_score` | A | 10.80% | 12 | `item_days_since_first_sale` | C | 2.02% |
@@ -956,9 +956,9 @@ Feature importance（最终配置的 4 个模型，前 500 棵，gain 占比的�
 | 9 | `colour_group_code` | C | 3.07% | 19 | `item_discount_ratio` | C | 1.19% |
 | 10 | `user_days_since_last_purchase` | D | 2.97% | 20 | `item_online_share_4w` | C | 1.06% |
 
-前 5 个合计 49.0%，前 20 个合计 85.1%；4 个 R6 特征合计约 19.0%。最后 10 个：
+The top 5 account for 49.0% and the top 20 for 85.1%; the 4 R6 features account for about 19.0% together. The last 10:
 
-| 名次 | 特征 | 组 | 占比 | 名次 | 特征 | 组 | 占比 |
+| Rank | Feature | Group | Share | Rank | Feature | Group | Share |
 |---|---|---|---|---|---|---|---|
 | 62 | `ui_share_index_52w` | E | 0.0499% | 67 | `index_group_no` | C | 0.0040% |
 | 63 | `ui_share_pgroup_52w` | E | 0.0419% | 68 | `pop_is_fallback` | A | 0.0028% |
@@ -966,469 +966,467 @@ Feature importance（最终配置的 4 个模型，前 500 棵，gain 占比的�
 | 65 | `n_channels` | A | 0.0245% | 70 | `active` | D | 0.0013% |
 | 66 | `club_member_status` | D | 0.0045% | 71 | `fn` | D | 0.0008% |
 
-五组各自的占比：
+Share of each of the five groups:
 
-| 组 | 特征数 | 占比（四周平均） | 四周的范围 |
+| Group | Features | Share (four-week mean) | Range over the four weeks |
 |---|---|---|---|
-| A（召回来源） | 14 | 33.85% | 33.09–35.14% |
-| B（稠密分数） | 7 | 15.02% | 14.27–15.98% |
-| C（商品特征） | 17 | 24.22% | 23.82–24.68% |
-| D（用户特征） | 12 | 5.27% | 4.93–5.82% |
-| E（用户–商品交叉特征） | 21 | 21.64% | 21.23–22.68% |
+| A (recall source) | 14 | 33.85% | 33.09–35.14% |
+| B (dense scores) | 7 | 15.02% | 14.27–15.98% |
+| C (article features) | 17 | 24.22% | 23.82–24.68% |
+| D (user features) | 12 | 5.27% | 4.93–5.82% |
+| E (user–article cross features) | 21 | 21.64% | 21.23–22.68% |
 
-耗时和内存：1000 棵的 trial 每个 433–707 秒（训练 0.27–0.53 秒/棵，打分加评估 148–286 秒），真实峰值 2.63–3.84 GB；36 个 trial 中最大 3.84 GB。
-
----
-
-## 10. T 阶段（T1–T4）
-
-- 6 路 recall：按锁定配置，每周用 `t_dat < anchor` 的数据重新计算或 fine-tune，然后输出候选（M6 已生成并冻结）。
-- Ranker：按 §9.2 每周用最近 4 周重训，配置不变。
-- 报告每周和 4 周合并的结果：**MAP@12（主指标）**、Recall@12、NDCG@12、union recall、零命中 query 比例；同时报告 RRF baseline。
-- 对照 G1–G3 给出是否达标。
-
-### 10.1 落实后的约定（M8，2026-11-18，写于读取任何 T 周 label 之前）
-
-**只运行一次。** T1–T4 的 label 在 M8 之前从未被读取（M6、M7 的入口都拒绝 T fold，这些保护保持不变）。M8 的正式运行只做一次；看到 T 的结果之后，不再修改任何配置、代码逻辑或选择。顺序是：写代码和测试（只用小数据）→ 提交 → 彩排 → 正式运行。
-
-**配置和输入**（`configs/m8_final.yaml`、`src/hmrec/final/`）：
-
-- Ranker 的配置只通过 `ranker/locked.py` 的 `load_locked_ranker` 取得（§9.6）；候选和特征是 M6 冻结的文件，读取前调用 `verify_feature_files`。
-- 训练窗口（`ranker/final_window.py`）：T1 ← V1–V4，T2 ← V2、V3、V4、T1，T3 ← V3、V4、T1、T2，T4 ← V4、T1、T2、T3；每次从头训练到锁定的 500 棵。所以 T1–T3 的 label 也是后面几周的训练 label；每个训练周都在预测周开始之前结束。
-- 采样：V1–V3 复用 M7 的 r = 40 采样文件，**不重新采样**；正式运行逐个核对它们的 sha256 与"通过的那次彩排训练时用的文件"一致（记在 `results/m8_rehearsal_check.csv`）。V4、T1、T2、T3 新采样，方法、seed 和比例来自锁定文件。T4 不训练任何模型，不采样。
-- **T 周 label 的唯一入口**（M8 之后的描述性诊断另有第二个入口，见 §10.2）是 `eval/final_eval.py`：评估用 `load_final_evaluator`，采样用 `final_training_label_phases`，两者都要求一个 `FormalRunPermit`；许可只由 `final/gate.py` 签发（见下）。
-
-**彩排**（`scripts/m8_final_eval.py --stage rehearsal`，不读任何 T 周的 label）：用 M8 的代码路径和锁定配置，把 V4 当作目标周跑一遍（训练周 F4、V1、V2、V3，用 M7 的窗口函数，所以够不到 T fold）。结果必须与 M7、M6 的记录**逐位相同**（`final/rehearsal.py`）：
-
-- 完整系统在 100、200、…、500 棵时的 MAP@12、Recall@12、NDCG@12 和 query 数，与 `results/v_phase_metrics.csv` 中锁定配置在 V4 的记录相等（float64 的 `==`）；
-- RRF baseline 和去掉 R6 的系统同样比较；
-- 模型的前 500 棵与 M7 的模型相同（两个模型文件先各自核对与记录的 sha256 一致，再比较树的文本）；
-- 保存的 Top-12（500 棵）与 M7 保存的逐行相同（包括 float64 的分数）；
-- V4 的 recall 监控行与 `results/m6_candidates.csv` 中 M6 记录的相同；
-- 彩排的 trial 是用当前代码、在干净的工作区里跑的。
-
-比较的结果写入 `results/m8_rehearsal_check.csv`（每次比较一行：`passed` / `failed`、每一项的明细、彩排训练用的采样文件的 sha256、git commit）。
-
-**闸门**（`final/gate.py`，用代码强制）：
-
-1. 最近一次彩排必须是 `passed`、在干净的工作区里运行，并且当前 HEAD 的代码和配置（`src/`、`scripts/`、`configs/`、`pyproject.toml`、`uv.lock`）与那次彩排的 commit 相同；否则正式运行拒绝开始，不读任何文件。
-2. 正式运行开始时，在读任何 T 周 label **之前**，先在 `results/t_phase_label_access.csv` 记一行"T 周 label 首次读取"：时间和 git commit。
-3. 这一行存在之后，每个进程都必须运行同样的代码：HEAD 的代码或配置与记录的 commit 不同就拒绝。所以中断的正式运行可以续跑（已记录的步骤跳过），但不能换了代码再跑。
-4. M8 的每个进程都要求工作区干净（M7 只是警告）。
-
-**正式运行**（`--stage formal`；每一步一个独立进程 `scripts/m8_step.py`）：
-
-1. **主结果**：T1–T4 每周和 4 周合并（query-weighted）的 MAP@12、Recall@12、NDCG@12，同时给出四周等权平均。T 周只在锁定的 500 棵处评估，不计算其他棵数的指标。
-2. **RRF baseline**：同样的指标。
-3. **recall 层的监控**（M6 留到 M8 的部分）：每一路的 Recall@quota、六路 union recall、每个 query 的候选数、没有任何一路命中的 query 比例；用 M6 的同一个函数计算，写入 `results/t_phase_recall.csv`。
-4. **预先登记的次要分析**：T 上去掉 R6 的 ablation，做法与 M7 相同（§9.5）。只用于报告，不影响任何结论的判定。
-5. **目标的判定标准**（写在 `configs/m8_final.yaml`，运行后不能改；由 `final/goals.py` 判定，结论写入 `results/t_phase_goals.csv`）：
-   - **G1**：T1–T4 合并 MAP@12 ≥ 0.032；
-   - **G2**：T1–T4 **每一周**的六路 union recall ≥ 24%；
-   - **G3**：LambdaMART 的 MAP@12 在 4 周中至少 3 周**严格高于** RRF baseline（相等不算）。
-6. **记录**：`results/t_phase.csv`（每个 trial 一行：耗时、采样峰值、真实峰值、LightGBM 和 libomp 的版本、git commit）、`results/t_phase_metrics.csv`、`results/m8_runs.csv`（采样、Dataset、baseline、监控各进程）；每周的 Top-12 保存在 `artifacts/predictions/t_phase/`。
-
-**与本节原文的一处不同**：原文还列了 Recall@20、NDCG@20。锁定的 Ranker 每个 query 只保留 Top-12（`ranker.lock.yaml` 的 `scoring.top_k`），M8 只报告 @12 的三个指标；`configs/m8_final.yaml` 里出现 K 大于 12 的指标会被拒绝。
-
-**独立核对**：`scripts/checks/check_ranker_eval.py --area t_phase` 用朴素循环从保存的 Top-12 重算一个 T 周 trial 的三个指标。它读 T 周 label 也要先过闸门，所以不可能成为第一个读 T label 的程序。
+Run time and memory: a trial of 1000 trees takes 433–707 seconds (training 0.27–0.53 seconds/tree, scoring plus evaluation 148–286 seconds), with a true peak of 2.63–3.84 GB; the maximum over the 36 trials is 3.84 GB.
 
 ---
 
-### 10.2 M8 之后的描述性诊断（2026-11-19）
+## 10. T phase (T1–T4)
 
-T 上的结果高于 V（§11），原因没有查。这一节的诊断只是**描述**已经记录的结果，帮助理解这个差别。它不训练任何模型，不重跑 M8，不改任何配置和锁定文件，也**不用来选择或修改任何东西**；之后的任何改动仍然只能在 V1–V4 上比较和选择。
+- The 6 recall channels: with the locked configuration, each week is recomputed or fine-tuned from the data with `t_dat < anchor`, and then outputs its candidates (generated and frozen in M6).
+- Ranker: retrained every week on the latest 4 weeks as in §9.2, with the configuration unchanged.
+- Results are reported per week and pooled over the 4 weeks: **MAP@12 (the main metric)**, Recall@12, NDCG@12, union recall, the share of zero-hit queries; the RRF baseline is reported as well.
+- Whether G1–G3 are met is stated.
 
-**代码**：`scripts/m8_diagnostics.py`、`src/hmrec/diagnostics/`，配置在 `configs/m8_diagnostics.yaml`。结果写到 `results/t_diag_*.csv`（只追加；每一行带 `git_commit` 和 `run_started_at`）。`results/t_phase*.csv` 和 `results/m8_*.csv` 只读不写。
+### 10.1 Conventions as implemented (M8, 2026-11-18, written before any label of a T week was read)
 
-**读 T label 的第二个入口**。M8 的入口（`eval/final_eval.py` + `final/gate.py`）要求代码与正式运行的 commit 完全相同，诊断代码是新代码，所以过不了那道闸门，这是它应有的行为。诊断用另一个入口 `eval/diagnostic_labels.py`：读 T 周的 label 要带 `DiagnosticAccess`，只由 `diagnostics/access.py` 签发，条件是：
+**Run once.** The labels of T1–T4 were never read before M8 (the entry points of M6 and M7 all reject T folds, and these protections stay unchanged). The formal run of M8 is done once; after the T results are seen, no configuration, code logic or selection is changed. The order is: write code and tests (on small data only) → commit → rehearsal → formal run.
 
-1. 正式运行已经结束：`results/t_phase_goals.csv` 里有 G1–G3 三条判定（再读 label 改变不了结论）。
-2. 工作区干净。
-3. 正式运行那个 commit 时已有的 M8 文件（`src/hmrec/final/`、`eval/final_eval.py`、`ranker/final_window.py`、`scripts/m8_final_eval.py`、`scripts/m8_step.py`）和 `configs/` 下已有文件的内容没有变；允许新增文件。
-4. 在打开任何 T label 文件**之前**，先在 `results/t_diag_label_access.csv` 追加一行：时间、git commit、用途（`descriptive diagnostics`）、脚本名。每运行一次一行。
+**Configuration and inputs** (`configs/m8_final.yaml`, `src/hmrec/final/`):
 
-D、F、V 周的 label 之前已经读过很多次，不需要这个对象。只有诊断代码能用这个入口，诊断代码不 import 训练、采样、打分和 M8 的 trial 代码（`tests/unit/test_diag_code_rules.py`）。
+- The ranker configuration is obtained only through `load_locked_ranker` of `ranker/locked.py` (§9.6); candidates and features are the files frozen in M6, read after calling `verify_feature_files`.
+- Training windows (`ranker/final_window.py`): T1 ← V1–V4, T2 ← V2, V3, V4, T1, T3 ← V3, V4, T1, T2, T4 ← V4, T1, T2, T3; trained from scratch each time to the locked 500 trees. So the labels of T1–T3 are also training labels of the later weeks; every training week ends before the predicted week begins.
+- Sampling: V1–V3 reuse the r = 40 sample files of M7 and are **not resampled**; the formal run checks, file by file, that their sha256 equals "the files the passed rehearsal trained on" (recorded in `results/m8_rehearsal_check.csv`). V4, T1, T2 and T3 are sampled anew, with the method, seed and ratio from the lock file. T4 trains no model and is not sampled.
+- **The only entry point for the labels of the T weeks** (the descriptive diagnostics after M8 have a second entry point, see §10.2) is `eval/final_eval.py`: evaluation uses `load_final_evaluator` and sampling uses `final_training_label_phases`, both of which require a `FormalRunPermit`; the permit is issued only by `final/gate.py` (see below).
 
-**一个后果**：诊断代码提交之后，`scripts/checks/check_ranker_eval.py --area t_phase` 在当前的 HEAD 上不能再运行（它要过 M8 的闸门）。需要重跑时先切回 tag `m8-run-v1`。
+**Rehearsal** (`scripts/m8_final_eval.py --stage rehearsal`; reads no label of a T week): the M8 code path with the locked configuration runs once with V4 as the target week (training weeks F4, V1, V2, V3, using the window function of M7, so T folds are out of reach). The result must be **bit-identical** to the records of M7 and M6 (`final/rehearsal.py`):
 
-**四张表**：
+- MAP@12, Recall@12, NDCG@12 and the number of queries of the full system at 100, 200, …, 500 trees equal the record of the locked configuration on V4 in `results/v_phase_metrics.csv` (float64 `==`);
+- the RRF baseline and the system without R6 are compared in the same way;
+- the first 500 trees of the model equal the M7 model (each of the two model files is first checked against its recorded sha256, then the text of the trees is compared);
+- the saved Top-12 (500 trees) is the same row by row as the one M7 saved (including the float64 scores);
+- the recall monitoring rows of V4 equal those M6 recorded in `results/m6_candidates.csv`;
+- the rehearsal trials were run with the current code on a clean working tree.
 
-| 表 | 文件 | 范围 | 内容 | 数据来源 |
+The outcome of the comparison is written to `results/m8_rehearsal_check.csv` (one row per comparison: `passed` / `failed`, the details of every item, the sha256 of the sample files the rehearsal trained on, the git commit).
+
+**Gate** (`final/gate.py`, enforced in code):
+
+1. The latest rehearsal must be `passed`, run on a clean working tree, and the code and configuration at the current HEAD (`src/`, `scripts/`, `configs/`, `pyproject.toml`, `uv.lock`) must equal the commit of that rehearsal; otherwise the formal run refuses to start and reads no file.
+2. When the formal run starts, **before** any label of a T week is read, one row "first read of T-week labels" is recorded in `results/t_phase_label_access.csv`: the time and the git commit.
+3. Once this row exists, every process must run the same code: it refuses if the code or configuration at HEAD differs from the recorded commit. So an interrupted formal run can be resumed (recorded steps are skipped), but not with different code.
+4. Every process of M8 requires a clean working tree (M7 only warns).
+
+**Formal run** (`--stage formal`; one separate process per step, `scripts/m8_step.py`):
+
+1. **Main results**: MAP@12, Recall@12 and NDCG@12 per week and pooled over the 4 weeks (query-weighted) for T1–T4, with the equal-weight mean of the four weeks as well. T weeks are evaluated only at the locked 500 trees; metrics at other tree counts are not computed.
+2. **RRF baseline**: the same metrics.
+3. **Monitoring of the recall layer** (the part M6 left to M8): the Recall@quota of each channel, the six-channel union recall, the candidates per query, the share of queries no channel hits; computed with the same function as in M6 and written to `results/t_phase_recall.csv`.
+4. **Pre-registered secondary analysis**: the ablation without R6 on T, done as in M7 (§9.5). For reporting only; it affects no verdict.
+5. **Criteria for the goals** (written in `configs/m8_final.yaml`, not to be changed after the run; judged by `final/goals.py`, with the verdict written to `results/t_phase_goals.csv`):
+   - **G1**: pooled MAP@12 on T1–T4 ≥ 0.032;
+   - **G2**: six-channel union recall ≥ 24% in **every week** of T1–T4;
+   - **G3**: the MAP@12 of LambdaMART is **strictly above** the RRF baseline in at least 3 of the 4 weeks (a tie does not count).
+6. **Records**: `results/t_phase.csv` (one row per trial: run time, sampled peak, true peak, the LightGBM and libomp versions, git commit), `results/t_phase_metrics.csv`, `results/m8_runs.csv` (the processes of sampling, Dataset, baseline and monitoring); the Top-12 of every week is saved in `artifacts/predictions/t_phase/`.
+
+**One difference from the original text of this section**: the original also listed Recall@20 and NDCG@20. The locked ranker keeps only the Top-12 of each query (`scoring.top_k` of `ranker.lock.yaml`), so M8 reports only the three @12 metrics; a metric with K above 12 in `configs/m8_final.yaml` is rejected.
+
+**Independent verification**: `scripts/checks/check_ranker_eval.py --area t_phase` recomputes the three metrics of one T-week trial from the saved Top-12 with plain loops. It also has to pass the gate first to read the labels of T weeks, so it cannot become the first program to read T labels.
+
+---
+
+### 10.2 Descriptive diagnostics after M8 (2026-11-19)
+
+The results on T are higher than on V (§11), and the cause was not investigated. The diagnostics of this section only **describe** results that are already recorded, to help understand this difference. They train no model, do not re-run M8, change no configuration and no lock file, and are **not used to select or change anything**; any later change may still only be compared and selected on V1–V4.
+
+**Code**: `scripts/m8_diagnostics.py`, `src/hmrec/diagnostics/`, with the config in `configs/m8_diagnostics.yaml`. Results are written to `results/t_diag_*.csv` (append-only; every row carries `git_commit` and `run_started_at`). `results/t_phase*.csv` and `results/m8_*.csv` are read, never written.
+
+**A second entry point for reading T labels.** The entry point of M8 (`eval/final_eval.py` + `final/gate.py`) requires the code to be exactly the commit of the formal run; the diagnostics code is new code and so cannot pass that gate, which is how it should behave. The diagnostics use another entry point, `eval/diagnostic_labels.py`: reading the labels of a T week requires a `DiagnosticAccess`, issued only by `diagnostics/access.py`, on these conditions:
+
+1. The formal run is finished: `results/t_phase_goals.csv` holds the three verdicts G1–G3 (reading the labels again cannot change the verdict).
+2. The working tree is clean.
+3. The content of the M8 files (`src/hmrec/final/`, `eval/final_eval.py`, `ranker/final_window.py`, `scripts/m8_final_eval.py`, `scripts/m8_step.py`) and of the files under `configs/` that existed at the commit of the formal run has not changed; new files are allowed.
+4. **Before** any T label file is opened, a row is appended to `results/t_diag_label_access.csv`: time, git commit, purpose (`descriptive diagnostics`), script name. One row per run.
+
+The labels of the D, F and V weeks have been read many times before and need no such object. Only the diagnostics code may use this entry point, and the diagnostics code does not import training, sampling, scoring or the trial code of M8 (`tests/unit/test_diag_code_rules.py`).
+
+**A consequence**: once the diagnostics code is committed, `scripts/checks/check_ranker_eval.py --area t_phase` can no longer run at the current HEAD (it has to pass the M8 gate). To re-run it, first check out tag `m8-run-v1`.
+
+**The four tables**:
+
+| Table | File | Scope | Content | Data source |
 |---|---|---|---|---|
-| A 分解 | `t_diag_decomposition.csv` | V1–T4，每周一行 | union recall、Recall@12、Recall@12 ÷ union recall、MAP@12；LambdaMART 和 RRF baseline 各一组 | 只用结果表，不读 label |
-| B 集中度 | `t_diag_concentration.csv` | D1–T4，每周一行 | 购买量最高的 100 个、1000 个商品各占该周购买的比例；首次销售在 `[anchor − 28, anchor)` 的商品、anchor 之前没有任何销售的商品，各自的个数和占该周购买的比例 | label 文件；anchor 之前的交易（通过 `data/asof.py`） |
-| C 分组 | `t_diag_query_groups.csv` | V1–T4，每周三行 | 按 anchor 之前的历史把 query 分成"无历史 / 最近 30 天内买过 / 其他"，每组的 query 数和占比、union recall、两个系统的 MAP@12 | 宽表、候选文件、保存的逐 query 指标、label |
-| D 区间 | `t_diag_bootstrap.csv` | T 合并、V 合并，各三行 | 合并 MAP@12 的 95% 区间（LambdaMART、RRF baseline、两者之差） | C 的逐 query 值 |
+| A decomposition | `t_diag_decomposition.csv` | V1–T4, one row per week | union recall, Recall@12, Recall@12 ÷ union recall, MAP@12; one set each for LambdaMART and the RRF baseline | result tables only, no label read |
+| B concentration | `t_diag_concentration.csv` | D1–T4, one row per week | the share of the week's purchases on the 100 and on the 1000 best-selling articles; for the articles first sold in `[anchor − 28, anchor)` and the articles with no sale before the anchor, their number and their share of the week's purchases | label files; transactions before the anchor (through `data/asof.py`) |
+| C groups | `t_diag_query_groups.csv` | V1–T4, three rows per week | queries split by history before the anchor into "no history / bought in the last 30 days / other"; for each group the number and share of queries, union recall, and the MAP@12 of the two systems | wide table, candidate files, saved per-query metrics, labels |
+| D intervals | `t_diag_bootstrap.csv` | T pooled and V pooled, three rows each | the 95% interval of the pooled MAP@12 (LambdaMART, the RRF baseline, their difference) | the per-query values of C |
 
-- **B 的"购买"**是 label 文件里去重后的（顾客, 商品）对，不是购买行。"anchor 当天及之后首次销售的商品"定义为：出现在该周的 label 文件里，而 `t_dat < anchor` 的交易里没有它；不读 anchor 之后的交易表。这只是对 label 周本身的统计，**不进入任何模型或特征**。
-- **C 的分组**用宽表里已保存的 `user_days_since_last_purchase`（每个 query 一个值）：NaN 是"无历史"，1–30 是"最近 30 天内买过"（昨天是 1，anchor 当天不算历史），其余是"其他"。
-- **重算和核对**：LambdaMART 的逐 query AP 是保存下来的；RRF baseline 的逐 query AP 和逐 query 的 union recall 当时没有保存，用冻结的宽表、候选文件和 label 重新算（用项目自己的函数）。每一周重算出的平均值必须与结果表里的记录相同（容差 1e-12，`hpo/selection.py` 的 `SCORE_EQUALITY_TOLERANCE`），三组的 query 数之和必须等于记录的 query 数；任何一项不符就报错，四张表都不写。
-- **D 的做法（按顾客的 cluster bootstrap）**：把一个阶段的 4 周合在一起，以顾客为单位有放回地抽；被抽中的顾客带上他在这 4 周里的全部 query；合并 MAP@12 = 被抽中 query 的 AP 之和 ÷ query 数。1000 次，seed 写在配置里，取 2.5% 和 97.5% 分位。"LambdaMART 减 baseline"用同一批抽样（配对）。T 和 V 各做一次。**这个区间只反映顾客抽样的不确定性，不反映周与周之间的差别**：每一次重抽里都是同样的 4 周。
+- **A "purchase" in B** is a deduplicated (customer, article) pair of the label file, not a purchase line. "Articles first sold on the anchor day or later" are defined as: present in the label file of the week and absent from the transactions with `t_dat < anchor`; the transaction table after the anchor is not read. This is only a statistic of the label week itself and **enters no model and no feature**.
+- **The groups of C** use `user_days_since_last_purchase` as saved in the wide table (one value per query): NaN is "no history", 1–30 is "bought in the last 30 days" (yesterday is 1, and the anchor day is not history), and the rest is "other".
+- **Recomputation and checks**: the per-query AP of LambdaMART is the saved one; the per-query AP of the RRF baseline and the per-query union recall were not saved at the time and are recomputed from the frozen wide table, the candidate files and the labels (with the project's own functions). The recomputed mean of every week must equal the record in the result tables (tolerance 1e-12, `SCORE_EQUALITY_TOLERANCE` of `hpo/selection.py`), and the queries of the three groups must add up to the recorded number of queries; if anything does not match, an error is raised and none of the four tables is written.
+- **How D is done (a cluster bootstrap over customers)**: the 4 weeks of a phase are pooled and customers are drawn with replacement; a drawn customer brings all of their queries in these 4 weeks; pooled MAP@12 = the sum of the AP of the drawn queries ÷ the number of queries. 1000 times, with the seed written in the config, taking the 2.5% and 97.5% quantiles. "LambdaMART minus baseline" uses the same draws (paired). It is done once each for T and V. **This interval reflects only the uncertainty from sampling customers, not the differences between weeks**: every resample contains the same 4 weeks.
 
-## 11. 实施顺序（Milestones）
+## 11. Implementation order (milestones)
 
-内存预算是 12 GB（§1.3），**重任务一次只跑一个**。
+The memory budget is 12 GB (§1.3), and **only one heavy task runs at a time**.
 
-| # | 内容 | 产出 | 完成标准 | 状态 |
+| # | Content | Output | Completion criterion | Status |
 |---|---|---|---|---|
-| M0 | 按 §14 建好仓库骨架、`AGENTS.md`、lint / test 配置；数据清洗与压缩（ID 转 int32 等）；`fold_manifest`；年龄桶；活跃池规则；`selection_rule.yaml`；Two-Tower 200 步 benchmark；内存实测 | 处理好的 Parquet、configs | 校验脚本通过；规则在看到任何分数之前提交 | **完成** |
-| M1 | 实现评估模块（Recall / MAP / NDCG / union recall）和 R1–R5 | 代码 + 单元测试 | 时间截断测试、tie-break 测试、手算小例子全部通过 | **完成** |
-| M2 | R1–R5 在 D1–D4 上做 ablation + HPO | `results/d_phase.csv` | 每路配置锁定 | **完成**（选择在 M2 完成，锁定在 M5 统一进行） |
-| M3 | Two-Tower：数据准备 → base → D1–D4 训练链 | checkpoints、M4、结果表 | `twotower.lock.yaml` | **完成**（锁定文件在 M5 写入） |
-| M4 | D 阶段 union 检查（§5.7） | union recall 表 | **G2 达标**，否则回到 M2 / M3 | **完成**（4 周合并 25.24%，G2 达标；R3 按预先登记的规则改为只输出 `A(a)`） |
-| M5 | **冻结全部 recall 配置**（打 git tag） | `channels.lock.yaml`、`twotower.lock.yaml` | 之后不再修改 | **完成**（2026-11-17 写入锁定文件；锁定后在 D1 上重新生成候选、与记录逐位核对的结果，以及 tag，见 `docs/decisions.md`） |
-| M6 | 逐周生成 F1–T4 的候选和宽表特征（Two-Tower 沿训练链逐周推进） | `artifacts/candidates/`、`artifacts/features/` | 每周通过时间截断测试 | 12 周的候选（2026-11-17）和特征（2026-11-18）都已生成并通过检查；特征已锁定（`features.lock.yaml`，tag `lock-features-v1`）。待用户确认 |
-| M7 | Ranker 在 V1–V4 上滚动 HPO + baseline + 系统 ablation | `results/v_phase.csv` | `ranker.lock.yaml`；**G1、G3 在 V 上达标** | 代码和测试已写（2026-11-18，§9.7）；选择规则已写进 `configs/hpo/v_phase.yaml`。测速已完成（2026-11-18，§9.7）：选定 row-wise，默认配置 300 棵在 V1 上 MAP@12 0.0297（RRF baseline 0.0185）。树的上限改为 1000。**第 1 步已完成**（2026-11-18，24 个 trial，结果在 `results/v_phase*.csv`，记录见 `docs/decisions.md`）：按规则保留默认配置（31 叶、`min_data_in_leaf` 500、r = 40），k = 500，V1–V4 合并 MAP@12 **0.032713**；五个候选在各自的 k 上都低于默认（−0.21% 到 −0.56%）。RRF baseline 合并 0.019419（四周 0.018511 / 0.019064 / 0.020604 / 0.019662）。**G1 目前达标**，但只高出 0.032 约 2.2%，而且 V 上的分数偏乐观（k 和参数就是在这四周上选的），所以 T 上是否达标现在不能确定；**G3 目前达标**（4 周都高于 baseline）。**第 2 步、去掉 R6 和 feature importance 已完成**（2026-11-18，§9.7 末尾）：r = 60、80 都没有通过规则，保留 r = 40；去掉 R6 后合并 MAP@12 降到 0.031193（−4.64%）。**最终配置已锁定**（`configs/locks/ranker.lock.yaml`，§9.6）：31 叶、`min_data_in_leaf` 500、r = 40、500 棵。**完成，待用户确认并打 tag**。V 上的余量只有 2.2%，T 上有可能低于 0.032 |
-| M8 | T1–T4 最终评估 | 最终报告 | 报告 G1–G3 | **正式运行已完成**（2026-11-18，只做了这一次；HEAD `18d957f`，工作区干净；结果在 `results/t_phase*.csv`、`results/m8_*.csv`，commit `6a0ee92`；记录见 `docs/decisions.md`）。彩排通过：V4 上 18 项比较与 M7、M6 的记录逐位相同。T 周 label 首次读取：2026-11-18T22:14:34。**T1–T4 合并 MAP@12 0.039194**（四周 0.034960 / 0.040270 / 0.039673 / 0.042435，等权平均 0.039335）；Recall@12 合并 0.087135，NDCG@12 合并 0.059852。RRF baseline 合并 MAP@12 0.021154（四周 0.019151 / 0.021471 / 0.021848 / 0.022411）。六路 union recall 四周 27.88% / 29.08% / 29.09% / 30.69%。**G1 达标**（0.039194 ≥ 0.032）、**G2 达标**（最低的一周 27.88% ≥ 24%）、**G3 达标**（4 周都严格高于 baseline）。次要分析：去掉 R6 后合并 MAP@12 0.036724（−6.30%）。只报告 @12 的指标（锁定文件只保留 Top-12）。**T 高于 V（V 合并 0.032713），与事先"V 偏乐观、T 可能低于 0.032"的预期相反，原因待诊断**；诊断只做描述，不用来选择或修改任何东西。T1–T4 已经用过一次，M8 不重跑；之后的任何改动只能在 V1–V4 上比较和选择。最终报告还没有写 |
+| M0 | Build the repository skeleton of §14, `AGENTS.md`, the lint / test configuration; data cleaning and compression (IDs to int32 and so on); `fold_manifest`; age buckets; the active-pool rule; `selection_rule.yaml`; the 200-step benchmark of Two-Tower; memory measurements | Processed Parquet, configs | The validation script passes; the rule is committed before any score is seen | **Done** |
+| M1 | Implement the evaluation module (Recall / MAP / NDCG / union recall) and R1–R5 | Code + unit tests | The time cut-off tests, the tie-break tests and the hand-computed small examples all pass | **Done** |
+| M2 | Ablation + HPO of R1–R5 on D1–D4 | `results/d_phase.csv` | The configuration of each channel locked | **Done** (the selection was finished in M2; everything is locked together at M5) |
+| M3 | Two-Tower: data preparation → base → training chain over D1–D4 | checkpoints, M4, result tables | `twotower.lock.yaml` | **Done** (the lock file is written at M5) |
+| M4 | Union check of the D phase (§5.7) | union recall table | **G2 met**, otherwise back to M2 / M3 | **Done** (25.24% for the 4 weeks pooled, G2 met; R3 changed to output only `A(a)` under the pre-registered rule) |
+| M5 | **Freeze all recall configurations** (with a git tag) | `channels.lock.yaml`, `twotower.lock.yaml` | Not modified afterwards | **Done** (lock files written on 2026-11-17; for the result of regenerating the candidates on D1 after the lock and checking them bit by bit against the records, and for the tag, see `docs/decisions.md`) |
+| M6 | Generate the candidates and wide-table features of F1–T4 week by week (Two-Tower advances along the training chain week by week) | `artifacts/candidates/`, `artifacts/features/` | Every week passes the time cut-off tests | The candidates (2026-11-17) and the features (2026-11-18) of the 12 weeks have all been generated and passed the checks; the features are locked (`features.lock.yaml`, tag `lock-features-v1`). Awaiting the user's confirmation |
+| M7 | Rolling HPO of the ranker on V1–V4 + baseline + system ablation | `results/v_phase.csv` | `ranker.lock.yaml`; **G1 and G3 met on V** | Code and tests written (2026-11-18, §9.7); the selection rule written into `configs/hpo/v_phase.yaml`. The speed test is done (2026-11-18, §9.7): row-wise chosen, and the default configuration with 300 trees has MAP@12 0.0297 on V1 (RRF baseline 0.0185). The cap on trees changed to 1000. **Step 1 is done** (2026-11-18, 24 trials, results in `results/v_phase*.csv`, record in `docs/decisions.md`): by the rule the default configuration is kept (31 leaves, `min_data_in_leaf` 500, r = 40), k = 500, V1–V4 pooled MAP@12 **0.032713**; the five candidates are all below the default at their own k (−0.21% to −0.56%). RRF baseline pooled 0.019419 (four weeks 0.018511 / 0.019064 / 0.020604 / 0.019662). **G1 is currently met**, but only about 2.2% above 0.032, and the scores on V are optimistically biased (k and the parameters were selected on these very four weeks), so whether it is met on T cannot be known now; **G3 is currently met** (above the baseline in all 4 weeks). **Step 2, the run without R6 and feature importance are done** (2026-11-18, end of §9.7): neither r = 60 nor 80 passed the rule, and r = 40 is kept; without R6, pooled MAP@12 falls to 0.031193 (−4.64%). **The final configuration is locked** (`configs/locks/ranker.lock.yaml`, §9.6): 31 leaves, `min_data_in_leaf` 500, r = 40, 500 trees. **Done, awaiting the user's confirmation and tag**. The margin on V is only 2.2%, and T may fall below 0.032 |
+| M8 | Final evaluation on T1–T4 | Final report | Report G1–G3 | **The formal run is complete** (2026-11-18, done this one time only; HEAD `18d957f`, clean working tree; results in `results/t_phase*.csv` and `results/m8_*.csv`, commit `6a0ee92`; record in `docs/decisions.md`). The rehearsal passed: 18 comparisons on V4 are bit-identical to the records of M7 and M6. First read of T-week labels: 2026-11-18T22:14:34. **T1–T4 pooled MAP@12 0.039194** (four weeks 0.034960 / 0.040270 / 0.039673 / 0.042435, equal-weight mean 0.039335); Recall@12 pooled 0.087135, NDCG@12 pooled 0.059852. RRF baseline pooled MAP@12 0.021154 (four weeks 0.019151 / 0.021471 / 0.021848 / 0.022411). Six-channel union recall of the four weeks 27.88% / 29.08% / 29.09% / 30.69%. **G1 met** (0.039194 ≥ 0.032), **G2 met** (the lowest week 27.88% ≥ 24%), **G3 met** (strictly above the baseline in all 4 weeks). Secondary analysis: without R6, pooled MAP@12 is 0.036724 (−6.30%). Only @12 metrics are reported (the lock file keeps only the Top-12). **T is higher than V (V pooled 0.032713), contrary to the prior expectation that "V is optimistically biased and T may fall below 0.032"; the cause is to be diagnosed**; the diagnostics only describe and are not used to select or change anything. T1–T4 has been used once, and M8 is not re-run; any later change may only be compared and selected on V1–V4. The final report has not been written yet |
 
-M2 中计算量小的 R1–R3 可以和 M3 的 Two-Tower 训练同时跑；R4 建图和 R5 拟合不要和 Two-Tower 同时跑。
+The cheap R1–R3 of M2 can run at the same time as the Two-Tower training of M3; building the R4 graph and fitting R5 should not run at the same time as Two-Tower.
 
-目录结构见 §14，代码规范见 §15。
+The directory structure is in §14 and the code conventions in §15.
 ---
 
-## 12. 已知局限
+## 12. Known limitations
 
-1. **超参数稳定性假设**：我们假设 6 月选出的超参数在 7–9 月仍然适用。模型参数每周更新来跟上数据变化，但超参数是锁住的。用 §6.7 的 regret 诊断来检验，结果写进报告。
-2. **季节差距**：D 阶段（6 月）和 T 阶段（9 月）相隔约 3 个月。统计类 recall 的超参数（例如衰减 τ）对季节应该不太敏感；Two-Tower 依靠每周 fine-tune 跟上变化。
-3. **Ranker 训练窗口只有 4 周**：Kaggle 前排方案常用 6–18 周。我们受 F 阶段长度和 8 GB 内存的限制，先用 4 周。
-4. **D 周的分数偏乐观**：它们参与了 recall 的选择，只能用来比较配置，不能当作模型表现来报告。
-5. **V 周的分数偏乐观**：它们参与了 Ranker 的选择。系统表现以 T 阶段为准。
-6. **T 阶段不是完全没见过的数据**：旧项目曾经看过 T3、T4 附近的周。T 阶段的结果按 retrospective test 报告。
-7. **活跃池不是真实库存**：只是近期销量的近似。
-8. **D3、D4 疑似促销周**：D3、D4（2020-06-17 至 06-30）的买家数（即 query 数）比 16 周平均多 40% 以上（D3 +46.9%，D4 +41.8%），每个 query 的 label 数也更多（4.0–4.1，其他周 3.1–3.6），疑似促销周（未核实）。在 D 阶段的 query-weighted 合并中，D3、D4 约占 **60%** 权重（236,182 / 391,681 = 60.3%），所以 D 阶段选出的 recall 配置会偏向促销周的购买模式。处理方式：不改选择规则，只在 D 阶段报告中增加 D1–D2 / D3–D4 分组诊断（见 §4.1）。
+1. **Assumption of hyperparameter stability**: we assume that the hyperparameters selected in June still apply in July–September. Model parameters are updated every week to follow changes in the data, but the hyperparameters are locked. This is tested with the regret diagnostic of §6.7, with the result written into the report.
+2. **Seasonal gap**: the D phase (June) and the T phase (September) are about 3 months apart. The hyperparameters of the statistics-based recall channels (for example the decay τ) should not be very sensitive to the season; Two-Tower relies on weekly fine-tuning to keep up.
+3. **The ranker's training window is only 4 weeks**: top Kaggle solutions often use 6–18 weeks. We are limited by the length of the F phase and the 8 GB of memory, and use 4 weeks for now.
+4. **The scores of the D weeks are optimistically biased**: they took part in selecting recall and can only be used to compare configurations, not reported as model performance.
+5. **The scores of the V weeks are optimistically biased**: they took part in selecting the ranker. System performance is judged on the T phase.
+6. **The T phase is not completely unseen data**: the old project had looked at weeks around T3 and T4. The results of the T phase are reported as a retrospective test.
+7. **The active pool is not real inventory**: it is only an approximation from recent sales.
+8. **D3 and D4 look like promotion weeks**: D3 and D4 (2020-06-17 to 06-30) have over 40% more buyers (i.e. queries) than the 16-week mean (D3 +46.9%, D4 +41.8%), and more labels per query (4.0–4.1, against 3.1–3.6 in the other weeks); they look like promotion weeks (not verified). In the query-weighted pooling of the D phase, D3 and D4 carry about **60%** of the weight (236,182 / 391,681 = 60.3%), so the recall configurations selected in the D phase lean towards the purchase patterns of promotion weeks. How it is handled: the selection rule is not changed, and the D-phase reports only gain the grouped diagnostic D1–D2 / D3–D4 (see §4.1).
 
 ---
 
 
-## 13. 已决定事项
+## 13. Decided questions
 
-| 编号 | 问题 | 决定 |
+| ID | Question | Decision |
 |---|---|---|
-| O1 | Two-Tower 每周从零重训的对照 | **不做** |
-| O2 | −R1 … −R5 的系统级 ablation（每次去掉一路，重新生成候选和特征，重训 Ranker，看 MAP@12 下降多少） | **不做**。只保留 −R6；R1–R5 用 D 阶段的 leave-one-out union recall 判断 |
-| O3 | 年龄的合理范围 | 18 岁以下和异常值（> 99）单独一个桶 `AGE_INVALID`；缺失为 `AGE_UNKNOWN` |
-| O4 | Hard negative | **不做**，只用随机负采样 |
-| O5 | 负采样比例和内存 | HPO 试 `r ∈ {40, 60, 80}`；训练数据流式加载，不要求全部放进内存 |
+| O1 | A control that retrains Two-Tower from scratch every week | **Not done** |
+| O2 | System-level ablations −R1 … −R5 (remove one channel at a time, regenerate candidates and features, retrain the ranker, and see how much MAP@12 falls) | **Not done**. Only −R6 is kept; R1–R5 are judged by the leave-one-out union recall of the D phase |
+| O3 | The plausible range of age | Under 18 and outliers (> 99) form one bucket of their own, `AGE_INVALID`; missing is `AGE_UNKNOWN` |
+| O4 | Hard negatives | **Not done**; only random negative sampling |
+| O5 | Negative sampling ratio and memory | HPO tries `r ∈ {40, 60, 80}`; training data are stream-loaded and need not all fit in memory |
 
 ---
 
-## 14. 目录结构
+## 14. Directory structure
 
 ```
 hm-recsys/
-├── AGENTS.md                    # 给 coding agent（Claude Code 等）的规则，必须遵守
-├── CLAUDE.md                    # 只有一行 "@AGENTS.md"，让 Claude Code 读取 AGENTS.md
-├── README.md                    # 安装、数据放置、如何运行每个 milestone
-├── .python-version              # 3.12，uv 据此选择 Python
-├── pyproject.toml               # 依赖、ruff / pyright / pytest 配置
-├── uv.lock                      # uv 生成的精确依赖版本，进 git
-├── Makefile                     # 常用命令：make lint / test / preprocess ...
-├── .gitignore                   # 忽略 data/、artifacts/
+├── AGENTS.md                    # Rules for coding agents (Claude Code and others); mandatory
+├── CLAUDE.md                    # A single line "@AGENTS.md", so that Claude Code reads AGENTS.md
+├── README.md                    # Installation, where the data go, how to run each milestone
+├── .python-version              # 3.12; uv picks the Python from it
+├── pyproject.toml               # Dependencies; ruff / pyright / pytest configuration
+├── uv.lock                      # Exact dependency versions generated by uv; in git
+├── Makefile                     # Common commands: make lint / test / preprocess ...
+├── .gitignore                   # Ignores data/ and artifacts/
 │
 ├── docs/
-│   ├── proposal.md              # 本文件，唯一的设计依据（source of truth）
-│   └── decisions.md             # 决策记录：日期、决定、原因（只追加，不改历史）
+│   ├── proposal.md              # This file, the only design reference (source of truth)
+│   └── decisions.md             # Decision log: date, decision, reason (append-only, history not changed)
 │
 ├── configs/
-│   ├── base.yaml                # 路径、全局 seed、线程数、内存上限、分块大小
-│   ├── fold_manifest.yaml       # D1–T4 共 16 个 fold 的 anchor 和日期
-│   ├── selection_rule.yaml      # §4 的选择规则（看分数之前提交）
-│   ├── preprocess.yaml          # M0：day_zero、年龄桶边界、embedding 维数、交易表 row group 大小
-│   ├── catalog.yaml             # 活跃池 A(a)：window_days=28、min_purchase_lines=3（§2.4，冻结，不调）
-│   ├── queries.yaml             # query_id_fold_offset（§2.3 query_id 的编号规则）
-│   ├── m4_union_check.yaml      # M4：union recall 目标、R3 活跃池规则的阈值（预先登记）、人工选择
-│   ├── m6_candidates.yaml       # M6：监控和停止条件（前 4 周对比、fine-tune loss 上限）；不影响任何候选
-│   ├── m8_final.yaml            # M8：目标周、彩排周、G1–G3 的判定标准（读取 T label 之前提交，之后不能改）
-│   ├── m8_diagnostics.yaml      # M8 之后的描述性诊断：四张表各覆盖哪些阶段、Top-N、天数、bootstrap 的次数和 seed
-│   ├── recall/                  # 每路的默认配置
+│   ├── base.yaml                # Paths, global seed, number of threads, memory limit, chunk sizes
+│   ├── fold_manifest.yaml       # Anchor and dates of the 16 folds D1–T4
+│   ├── selection_rule.yaml      # The selection rule of §4 (committed before scores were seen)
+│   ├── preprocess.yaml          # M0: day_zero, age-bucket boundaries, embedding dimensions, row-group size of the transaction table
+│   ├── catalog.yaml             # Active pool A(a): window_days=28, min_purchase_lines=3 (§2.4, frozen, not tuned)
+│   ├── queries.yaml             # query_id_fold_offset (the numbering rule of query_id, §2.3)
+│   ├── m4_union_check.yaml      # M4: union recall target, threshold of the R3 active-pool rule (pre-registered), manual selection
+│   ├── m6_candidates.yaml       # M6: monitoring and stop conditions (comparison with the previous 4 weeks, fine-tune loss limit); affects no candidate
+│   ├── m8_final.yaml            # M8: target weeks, rehearsal week, criteria of G1–G3 (committed before T labels were read; not to be changed afterwards)
+│   ├── m8_diagnostics.yaml      # Descriptive diagnostics after M8: which phases each of the four tables covers, Top-N, days, bootstrap replicates and seed
+│   ├── recall/                  # Default configuration of each channel
 │   │   ├── r1_popularity.yaml
 │   │   ├── r2_repurchase.yaml
 │   │   ├── r3_sibling.yaml
 │   │   ├── r4_itemcf.yaml
 │   │   ├── r5_wals.yaml
 │   │   └── r6_twotower.yaml
-│   ├── hpo/                     # D 阶段和 V 阶段的搜索网格
+│   ├── hpo/                     # Search grids of the D phase and the V phase
 │   │   ├── d_phase.yaml
-│   │   └── v_phase.yaml         # M7：Ranker 的步骤、优先顺序、选择规则（看分数之前提交）
-│   ├── features.yaml            # 宽表的 71 个特征、dtype、哪些是类别特征，以及窗口、衰减 τ 等设置（§8）
-│   ├── ranker.yaml              # LightGBM 固定参数（§9.3）、调参项的默认值、采样设置、直方图方式的规则、测速设置
-│   └── locks/                   # 锁定后的配置，只能新增，不能修改
-│       ├── channels.lock.yaml   # M5：R1–R5 的完整配置、名额、trial_id、D 阶段分数（只作记录）、选择依据
-│       ├── twotower.lock.yaml   # M5：R6 的完整配置、报警用户设置、两个模型文件的路径和 sha256
-│       ├── features.lock.yaml   # M6：71 个特征的名称、顺序、dtype，类别特征清单，两个固定值和四项设置
+│   │   └── v_phase.yaml         # M7: steps, priority order and selection rule of the ranker (committed before scores were seen)
+│   ├── features.yaml            # The 71 features of the wide table, dtypes, which are categorical, and settings such as windows and decay τ (§8)
+│   ├── ranker.yaml              # Fixed LightGBM parameters (§9.3), defaults of the tuned items, sampling settings, rule for the histogram mode, speed-test settings
+│   └── locks/                   # Locked configurations; files may only be added, never modified
+│       ├── channels.lock.yaml   # M5: full configuration of R1–R5, quotas, trial_id, D-phase scores (for the record only), basis of the selection
+│       ├── twotower.lock.yaml   # M5: full configuration of R6, alarm-user settings, paths and sha256 of the two model files
+│       ├── features.lock.yaml   # M6: names, order and dtypes of the 71 features, list of categorical features, two fixed values and four settings
 │       └── ranker.lock.yaml
 │
-├── src/hmrec/                   # 所有可复用逻辑都在这里
+├── src/hmrec/                   # All reusable logic lives here
 │   ├── __init__.py
-│   ├── config.py                # 读 YAML → 带类型的 dataclass
-│   ├── paths.py                 # 所有文件路径都从这里拿，不在别处拼路径
-│   ├── logging_utils.py         # 统一的 logger 设置
-│   ├── memory.py                # 内存监控：分阶段的采样峰值（下限）和整个进程的真实峰值（ru_maxrss）
-│   ├── threads.py               # 在 import polars 之前按 base.yaml 设置 POLARS_MAX_THREADS（只依赖标准库和 yaml）
-│   ├── vectors.py               # 用户 / 商品向量（WALS、Two-Tower 共用）：按 (customer_idx, article_idx) 批量点积、保存 / 读取
-│   ├── locks.py                 # 读取并校验 configs/locks/ 的锁定文件；文件 sha256 核对（底层，recall / features / ranker 都可以用）
-│   ├── csv_records.py           # 只追加、表头固定的结果表（results/*.csv）的读写
-│   ├── feature_files.py         # 每个 fold 特征文件的记录（features.json：各 part 的 sha256、行数、列清单）和核对；M7 读特征前调用
-│   ├── git_state.py             # HEAD commit 和工作区是否干净（结果记录里的 git_commit / git_dirty）；不依赖 torch
-│   ├── run_records.py           # results/m6_runs.csv：每个进程一行（耗时、采样峰值、真实峰值）；真实峰值超限时停下
-│   ├── pipeline.py              # M6：一个 fold 的各步各用一个进程依次运行；每个 fold 的一行摘要
+│   ├── config.py                # Reads YAML → typed dataclasses
+│   ├── paths.py                 # Every file path comes from here; paths are not assembled anywhere else
+│   ├── logging_utils.py         # Uniform logger setup
+│   ├── memory.py                # Memory monitoring: sampled peak per stage (a lower bound) and true peak of the whole process (ru_maxrss)
+│   ├── threads.py               # Sets POLARS_MAX_THREADS from base.yaml before polars is imported (depends only on the standard library and yaml)
+│   ├── vectors.py               # User / item vectors (shared by WALS and Two-Tower): batched dot products for (customer_idx, article_idx), saving / loading
+│   ├── locks.py                 # Reads and validates the lock files of configs/locks/; sha256 check of files (bottom layer; recall / features / ranker may all use it)
+│   ├── csv_records.py           # Reading and writing the append-only result tables with a fixed header (results/*.csv)
+│   ├── feature_files.py         # Record of each fold's feature files (features.json: sha256 and rows of every part, column list) and its verification; M7 calls it before reading features
+│   ├── git_state.py             # HEAD commit and whether the working tree is clean (git_commit / git_dirty of result records); does not depend on torch
+│   ├── run_records.py           # results/m6_runs.csv: one row per process (run time, sampled peak, true peak); stops when the true peak exceeds the limit
+│   ├── pipeline.py              # M6: runs the steps of one fold one after another, each in its own process; one summary line per fold
 │   │
 │   ├── data/
-│   │   ├── preprocess.py        # 原始 CSV → Parquet；ID 映射成 int32；压缩 dtype
-│   │   ├── id_maps.py           # customer_id / article_id 与整数索引互转
-│   │   ├── day_index.py         # 日期 ↔ t_dat_day（距 day_zero 的天数）换算的唯一实现
-│   │   ├── metadata.py          # 读写 data/processed/metadata.json；scan_processed_parquet 先校验再读表
-│   │   ├── folds.py             # Fold dataclass；读取并校验 fold_manifest
-│   │   ├── asof.py              # 唯一做日期过滤的地方：history 窗口和 label 周（防泄漏的唯一入口）
-│   │   ├── histories.py         # "用户在某天之前最近 N 件购买"的唯一实现；Two-Tower 和特征（img / txt_sim_hist）共用
-│   │   ├── catalog.py           # 商品目录 C、活跃池 A(a)
-│   │   └── queries.py           # 每周的 query 名单和 label 集合 G_q
+│   │   ├── preprocess.py        # Raw CSV → Parquet; IDs mapped to int32; compressed dtypes
+│   │   ├── id_maps.py           # Conversion between customer_id / article_id and integer indexes
+│   │   ├── day_index.py         # The only implementation of date ↔ t_dat_day (days since day_zero)
+│   │   ├── metadata.py          # Reads and writes data/processed/metadata.json; scan_processed_parquet validates before reading a table
+│   │   ├── folds.py             # Fold dataclass; reads and validates fold_manifest
+│   │   ├── asof.py              # The only place that filters by date: history window and label week (the only entry point against leakage)
+│   │   ├── histories.py         # The only implementation of "a user's N most recent purchases before a day"; shared by Two-Tower and the features (img / txt_sim_hist)
+│   │   ├── catalog.py           # Catalog C, active pool A(a)
+│   │   └── queries.py           # Weekly query list and label sets G_q
 │   │
 │   ├── recall/
-│   │   ├── base.py              # RecallChannel 接口；输出表 schema 校验
+│   │   ├── base.py              # RecallChannel interface; schema validation of the output table
 │   │   ├── r1_popularity.py
 │   │   ├── r2_repurchase.py
 │   │   ├── r3_sibling.py
 │   │   ├── r4_itemcf.py
 │   │   ├── r5_wals.py
-│   │   ├── vector_scoring.py    # R5 / R6 共用：按向量点积取 Top-quota，score 用 vectors.dot_pairs
-│   │   ├── build.py             # 从原始配置构建 R1–R5（分块大小取自 base.yaml）；HPO 和锁定入口共用
-│   │   ├── locked.py            # M5 之后构建六路的唯一入口：只读 configs/locks/；R6 加载模型前核对 sha256；锁定配置的训练链
-│   │   ├── inputs.py            # 一个 fold 的 channel 输入（表、活跃池、query 名单）；D 阶段和 M6 共用，不读 label
-│   │   ├── chain_records.py     # results/m6_twotower_chain.csv；强制训练链按周推进（上一周的模型存在且 sha256 一致）
-│   │   ├── generate.py          # M6：为一个 fold 生成一路候选，保存特征要用的文件，做一致性检查，写盘（不覆盖）
+│   │   ├── vector_scoring.py    # Shared by R5 / R6: Top-quota by vector dot product, score from vectors.dot_pairs
+│   │   ├── build.py             # Builds R1–R5 from a raw configuration (chunk sizes from base.yaml); shared by HPO and the locked entry point
+│   │   ├── locked.py            # The only entry point for building the six channels after M5: reads only configs/locks/; R6 checks the sha256 before loading a model; the training chain of the locked configuration
+│   │   ├── inputs.py            # Channel inputs of one fold (tables, active pool, query list); shared by the D phase and M6; reads no label
+│   │   ├── chain_records.py     # results/m6_twotower_chain.csv; forces the training chain to advance week by week (the previous week's model exists and its sha256 matches)
+│   │   ├── generate.py          # M6: generates one channel's candidates for one fold, saves the files the features need, runs the consistency check, writes to disk (no overwriting)
 │   │   └── twotower/
-│   │       ├── data.py          # 训练样本、用户历史数组 [N, 20]、商品特征表（末尾 padding 行）、在设备上取 batch
-│   │       ├── benchmark.py     # §1.4 的 200 步计时（占位模型；也用于真实模型的设备选择）
-│   │       ├── model.py         # ItemTower、UserTower
-│   │       ├── loss.py          # multi-positive、duplicate-aware 的 in-batch softmax + LogQ
-│   │       ├── train.py         # base 训练、每周 fine-tune
-│   │       ├── infer.py         # 生成用户 / 商品向量，取 Top-100
-│   │       └── chain.py         # §6 的训练链：先预测、再 fine-tune
+│   │       ├── data.py          # Training samples, user history array [N, 20], item feature table (padding row at the end), fetching batches on the device
+│   │       ├── benchmark.py     # The 200-step timing of §1.4 (placeholder model; also used for the device choice of the real model)
+│   │       ├── model.py         # ItemTower, UserTower
+│   │       ├── loss.py          # Multi-positive, duplicate-aware in-batch softmax + LogQ
+│   │       ├── train.py         # Base training, weekly fine-tuning
+│   │       ├── infer.py         # Generates user / item vectors, takes the Top-100
+│   │       └── chain.py         # The training chain of §6: predict first, then fine-tune
 │   │
 │   ├── fusion/
-│   │   ├── union.py             # 6 路合并去重：每个 (query, article) 一行，各路的 rank / score 成列
-│   │   └── rrf.py               # rrf_score、n_channels、best_rank；RRF baseline 排序
+│   │   ├── union.py             # Union + dedup of the 6 channels: one row per (query, article), rank / score of each channel as columns
+│   │   └── rrf.py               # rrf_score, n_channels, best_rank; ordering of the RRF baseline
 │   │
-│   ├── features/                # 不 import recall/，不读 label；只读 artifacts/ 里的文件
-│   │   ├── base.py              # FoldData；按窗口取购买行（经 asof）并加 age_days；缺失值规则
-│   │   ├── categories.py        # 类别特征的整数编码表（所有 fold 共用，保存并核对）
-│   │   ├── source.py            # A 组：召回来源特征
-│   │   ├── dense.py             # B 组：tt_dot、wals_dot、pop_bucket_score、img / txt_sim_hist
-│   │   ├── item.py              # C 组：每个 fold 一张商品表
-│   │   ├── user.py              # D 组：每个 fold 一张 query 用户表
-│   │   ├── user_item.py         # E 组：用户-商品 / product_code / 类目的聚合小表，再 join 到候选
-│   │   ├── stats.py             # 每个特征的缺失率、最小值、最大值、均值（results/m6_features.csv）
-│   │   └── build.py             # 一个 fold：读入、按 query 分块合并和计算、自动检查、写 part 文件
+│   ├── features/                # Does not import recall/, reads no label; reads only files in artifacts/
+│   │   ├── base.py              # FoldData; purchase lines by window (through asof) with age_days added; missing-value rules
+│   │   ├── categories.py        # Integer code table of the categorical features (shared by all folds, saved and verified)
+│   │   ├── source.py            # Group A: recall-source features
+│   │   ├── dense.py             # Group B: tt_dot, wals_dot, pop_bucket_score, img / txt_sim_hist
+│   │   ├── item.py              # Group C: one item table per fold
+│   │   ├── user.py              # Group D: one table of query users per fold
+│   │   ├── user_item.py         # Group E: small aggregate tables for user–article / product_code / category, then joined to the candidates
+│   │   ├── stats.py             # Missing rate, minimum, maximum and mean of every feature (results/m6_features.csv)
+│   │   └── build.py             # One fold: read, merge and compute in chunks of queries, automatic checks, write part files
 │   │
-│   ├── ranker/                  # 不 import recall/、features/，不 import torch；可以 import fusion/
-│   │   ├── window.py            # 4 周训练窗口；M7 的 fold 检查（目标 V，训练 F / V，T 直接报错）
-│   │   ├── sampling.py          # query 内随机负采样（读 label 的两处之一）；采样文件和记录
-│   │   ├── ablation.py          # 实验 full / minus_r6：去掉 R6 的行和特征，重算三个聚合特征
-│   │   ├── dataset.py           # lgb.Sequence 流式读取，构建 LightGBM Dataset，存成 binary 并核对
-│   │   ├── train.py             # LightGBM 参数、直方图方式的规则、确定性训练、模型文件
-│   │   ├── runtime.py           # 本进程实际用到的 LightGBM 版本和 libomp 的路径、版本；两份 OpenMP 时报错
-│   │   ├── predict.py           # "k 棵树时的分数"（分段累加）、Top-12 和 tie-break
-│   │   ├── identity.py          # model_config 和 12 位的 config_id（V 阶段的 trial 和锁定入口共用）
-│   │   ├── locked.py            # 锁定之后取 Ranker 配置的唯一入口（M8 用）；核对 config_id、引用的锁定文件、运行环境
-│   │   └── final_window.py      # M8：T 周的 4 周训练窗口（训练周 V / T）；彩排用 M7 的窗口
+│   ├── ranker/                  # Does not import recall/ or features/, does not import torch; may import fusion/
+│   │   ├── window.py            # 4-week training window; fold check of M7 (target V, training F / V, T raises an error)
+│   │   ├── sampling.py          # Random negative sampling within a query (one of the two places that read labels); sample files and records
+│   │   ├── ablation.py          # Experiments full / minus_r6: drops the rows and features of R6, recomputes the three aggregate features
+│   │   ├── dataset.py           # Streaming read through lgb.Sequence, builds the LightGBM Dataset, stores it as a binary and verifies it
+│   │   ├── train.py             # LightGBM parameters, rule for the histogram mode, deterministic training, model files
+│   │   ├── runtime.py           # LightGBM version and the path and version of the libomp actually used by the process; raises an error on two copies of OpenMP
+│   │   ├── predict.py           # "The score with k trees" (segment accumulation), Top-12 and tie-break
+│   │   ├── identity.py          # model_config and the 12-character config_id (shared by V-phase trials and the locked entry point)
+│   │   ├── locked.py            # The only entry point for the ranker configuration after the lock (used by M8); checks config_id, the referenced lock files and the runtime environment
+│   │   └── final_window.py      # M8: 4-week training window of the T weeks (training weeks V / T); the rehearsal uses the window of M7
 │   │
 │   ├── eval/
-│   │   ├── metrics.py           # Recall@K、AP@12、NDCG@K、union recall
-│   │   ├── ranker_eval.py       # M7：只给 V 周的 label；Top-12 表的 MAP / Recall / NDCG
-│   │   ├── final_eval.py        # M8：T 周 label 的唯一入口，必须带 FormalRunPermit；彩排只给配置的 V 周
-│   │   ├── diagnostic_labels.py # M8 之后的描述性诊断读 label 的入口；T 周必须带 DiagnosticAccess（§10.2）
-│   │   ├── monitor.py           # M6 监控：候选数（不需要 label）；F、V 周的 recall / union recall；拒绝读 T 周的 label
-│   │   └── report.py            # 汇总每周 / 4 周结果，写 results/*.csv
+│   │   ├── metrics.py           # Recall@K, AP@12, NDCG@K, union recall
+│   │   ├── ranker_eval.py       # M7: gives labels of V weeks only; MAP / Recall / NDCG of a Top-12 table
+│   │   ├── final_eval.py        # M8: the only entry point for the labels of T weeks, requires a FormalRunPermit; the rehearsal gets the configured V week only
+│   │   ├── diagnostic_labels.py # Entry point for labels of the descriptive diagnostics after M8; a T week requires a DiagnosticAccess (§10.2)
+│   │   ├── monitor.py           # M6 monitoring: candidate counts (no label needed); recall / union recall of the F and V weeks; refuses to read the labels of T weeks
+│   │   └── report.py            # Summarizes weekly / 4-week results, writes results/*.csv
 │   │
 │   └── hpo/
-│       ├── grid.py              # 读取搜索网格，按优先顺序生成每一步的候选（§4.2、§4.3）
-│       ├── selection.py         # 实现 §4 的选择规则（含多候选规则、R5 收敛检查）
-│       ├── records.py           # 一个 trial 的结果；results/d_phase.csv 的读写（可断点续跑）
-│       ├── runner.py            # 逐个 trial 在每个 fold 上运行、记录，并逐步应用选择规则
-│       ├── d_phase.py           # D 阶段：加载 D1–D4，按 channel 运行，写结果和每一步的报告
-│       ├── robustness.py        # 一步中排名靠前的配置再跑额外的 seed（只汇报，不参与选择）
-│       ├── union_precheck.py    # 重放规则得到各路的选择；R1–R5 的 union 预检查
-│       ├── union_check.py       # M4：六路 union 检查（只用命中的候选计算）、R3 活跃池规则
-│       ├── lock_check.py        # M5：只用锁定文件重新生成一个 fold 的候选，分数必须与记录逐位相同
-│       ├── v_records.py         # M7：V 阶段的三张结果表（trial、指标、步骤）；合并分数
-│       ├── v_trial.py           # M7：一个 trial（训练 + 全量打分 + 评估）；Dataset 的计划；RRF baseline
-│       ├── v_phase.py           # M7：读 v_phase.yaml；先定 k 再比参数；逐步启动各进程（可续跑）；−R6、importance
-│       ├── speed_test.py        # M7：网格之前的测速；直方图方式的选择；低于 RRF baseline 时停下
-│       └── v_lock.py            # M7：在结果表上重放选择，逐项核对 ranker.lock.yaml（只是核对，不是配置的来源）
+│       ├── grid.py              # Reads the search grids, generates the candidates of each step in priority order (§4.2, §4.3)
+│       ├── selection.py         # Implements the selection rule of §4 (including the multi-candidate rule and the convergence check of R5)
+│       ├── records.py           # The result of one trial; reading and writing results/d_phase.csv (resumable)
+│       ├── runner.py            # Runs each trial on each fold, records it, and applies the selection rule step by step
+│       ├── d_phase.py           # D phase: loads D1–D4, runs by channel, writes the results and the report of each step
+│       ├── robustness.py        # Runs the top configurations of a step with extra seeds (reported only, not used for selection)
+│       ├── union_precheck.py    # Replays the rule to get each channel's selection; union pre-check of R1–R5
+│       ├── union_check.py       # M4: six-channel union check (computed from hit candidates only), the R3 active-pool rule
+│       ├── lock_check.py        # M5: regenerates the candidates of one fold from the lock files only; the scores must be bit-identical to the records
+│       ├── v_records.py         # M7: the three result tables of the V phase (trials, metrics, steps); pooled score
+│       ├── v_trial.py           # M7: one trial (training + full scoring + evaluation); the Dataset plan; RRF baseline
+│       ├── v_phase.py           # M7: reads v_phase.yaml; fixes k first, then compares parameters; starts the processes step by step (resumable); −R6, importance
+│       ├── speed_test.py        # M7: the speed test before the grid; choice of the histogram mode; stops when below the RRF baseline
+│       └── v_lock.py            # M7: replays the selection over the result tables and checks ranker.lock.yaml item by item (a check only, not a source of configuration)
 │   │
-│   ├── final/                   # M8：最终评估。不 import torch、recall/、hpo 的选择模块
-│   ├── diagnostics/             # M8 之后的描述性诊断（§10.2）：access（记录并签发）、四张表的计算、inputs（读文件）、run（驱动）
-│   │   ├── context.py           # 配置和锁定的 Ranker；rehearsal / formal 两种模式
-│   │   ├── gate.py              # 闸门：彩排通过才能正式运行；记录"T label 首次读取"；只运行一次；签发 FormalRunPermit
-│   │   ├── trial.py             # 复用 / 新采样、Dataset、一个 trial、RRF baseline（两种模式同一条代码路径）
-│   │   ├── monitor.py           # T 周的 recall 监控（与 M6 同一个函数）
-│   │   ├── rehearsal.py         # 彩排与 M7 / M6 记录的逐位比较
-│   │   ├── goals.py             # G1–G3 的判定（纯函数）
-│   │   ├── report.py            # 每周 / 合并 / 等权的汇总；判定结论写入 results/t_phase_goals.csv
-│   │   ├── run.py               # 驱动：每一步一个进程，可续跑
-│   │   └── process.py           # 一个进程里的一步：先过闸门，再运行，再记录
+│   ├── final/                   # M8: the final evaluation. Does not import torch, recall/ or the selection modules of hpo
+│   │   ├── context.py           # Configuration and the locked ranker; the two modes rehearsal / formal
+│   │   ├── gate.py              # Gate: formal run only after a passed rehearsal; records "first read of T labels"; run once; issues the FormalRunPermit
+│   │   ├── trial.py             # Reused / new sampling, Dataset, one trial, RRF baseline (the same code path for both modes)
+│   │   ├── monitor.py           # Recall monitoring of the T weeks (the same function as in M6)
+│   │   ├── rehearsal.py         # Bit-by-bit comparison of the rehearsal with the records of M7 / M6
+│   │   ├── goals.py             # Verdict on G1–G3 (pure functions)
+│   │   ├── report.py            # Weekly / pooled / equal-weight summary; the verdict is written to results/t_phase_goals.csv
+│   │   ├── run.py               # Driver: one process per step, resumable
+│   │   └── process.py           # One step in one process: pass the gate first, then run, then record
+│   ├── diagnostics/             # Descriptive diagnostics after M8 (§10.2): access (records and issues), computing the four tables, inputs (reads files), run (driver)
 │
-├── scripts/                     # 命令行入口，只做"读参数 → 调用 src → 写结果"
+├── scripts/                     # Command-line entry points; they only "read arguments → call src → write results"
 │   ├── m0_preprocess.py
-│   ├── m0_build_queries.py      # 每个 fold 的 query 名单和 label → artifacts/queries/、artifacts/labels/
-│   ├── m0_check_folds.py
-│   ├── m0_benchmark_twotower.py # --device mps / cpu：占位模型 200 步，取 batch 与计算分开计时（§1.4）
+│   ├── m0_build_queries.py      # Query list and labels of each fold → artifacts/queries/, artifacts/labels/
+│   ├── m0_benchmark_twotower.py # --device mps / cpu: 200 steps of the placeholder model, fetching batches and computing timed separately (§1.4)
 │   ├── m2_recall_hpo.py         # --channel r1 ... r5
-│   ├── m3_build_twotower_data.py   # base 窗口的训练数组 → artifacts/twotower/data/base/
+│   ├── m3_build_twotower_data.py   # Training arrays of the base window → artifacts/twotower/data/base/
 │   ├── m3_twotower_base.py
-│   ├── m3_twotower_chain.py
 │   ├── m4_union_check.py
-│   ├── m5_verify_locks.py          # --channel r1_popularity ...：锁定文件在 D1 上重现记录的分数（每路一个进程）
-│   ├── m6_generate_candidates.py   # --fold F1 [--channel ...]：用锁定配置生成一个 fold 的候选（不读 label）
-│   ├── m6_monitor_candidates.py    # --fold F1：监控一个 fold 的候选（F、V 周读 label，T 周不读）
-│   ├── m6_run_folds.py             # --first-fold F1 --last-fold T4：按时间顺序逐个 fold 运行，每步一个进程
-│   ├── m6_build_features.py        # --fold F1：生成一个 fold 的宽表特征（一个 fold 一个进程，不读 label）
-│   ├── m7_sample.py                # --fold F1：一个训练周的负采样（r = 40 / 60 / 80 各一个文件）
-│   ├── m7_build_dataset.py         # --target V1 --ratio 40：一个目标周的 binary Dataset
-│   ├── m7_train_eval.py            # 一个 trial：一组参数在一个 V 周上训练加评估（一个 trial 一个进程）
-│   ├── m7_rrf_baseline.py          # --fold V1：RRF baseline
-│   ├── m7_speed_test.py            # 网格之前的测速（V1，默认配置 300 棵）
+│   ├── m5_verify_locks.py          # --channel r1_popularity ...: the lock files reproduce the recorded scores on D1 (one process per channel)
+│   ├── m6_generate_candidates.py   # --fold F1 [--channel ...]: generates the candidates of one fold with the locked configuration (reads no label)
+│   ├── m6_monitor_candidates.py    # --fold F1: monitors the candidates of one fold (reads labels for F and V weeks, not for T weeks)
+│   ├── m6_run_folds.py             # --first-fold F1 --last-fold T4: runs the folds one by one in time order, one process per step
+│   ├── m6_build_features.py        # --fold F1: generates the wide-table features of one fold (one process per fold, reads no label)
+│   ├── m7_sample.py                # --fold F1: negative sampling of one training week (one file each for r = 40 / 60 / 80)
+│   ├── m7_build_dataset.py         # --target V1 --ratio 40: the binary Dataset of one target week
+│   ├── m7_train_eval.py            # One trial: one parameter set trained and evaluated on one V week (one process per trial)
+│   ├── m7_rrf_baseline.py          # --fold V1: RRF baseline
+│   ├── m7_speed_test.py            # The speed test before the grid (V1, default configuration, 300 trees)
 │   ├── m7_ranker_hpo.py            # --stage baseline / grid / minus_r6 / importance / report
 │   ├── m8_final_eval.py            # --stage rehearsal / formal / report
-│   └── m8_step.py                  # M8 的一步（monitor / baseline / sample / dataset / trial），一个进程
-│   （另有 m8_diagnostics.py：M8 之后的描述性诊断，不属于 M8 的运行，见 §10.2）
+│   └── m8_step.py                  # One step of M8 (monitor / baseline / sample / dataset / trial), one process
+│   (there is also m8_diagnostics.py: the descriptive diagnostics after M8, not part of the M8 run, see §10.2)
 │
 ├── tests/
-│   ├── conftest.py              # 测试分两个进程：torch 一侧和 LightGBM 一侧（--lightgbm-side）
-│   ├── fixtures/                # 手工构造的小数据（几十行），能手算结果
-│   ├── unit/                    # 每个模块的单元测试
-│   └── integration/             # 用小数据把一个 fold 从头跑到尾
+│   ├── conftest.py              # Tests run in two processes: the torch side and the LightGBM side (--lightgbm-side)
+│   ├── fixtures/                # Hand-built small data (a few dozen rows), with results that can be computed by hand
+│   ├── unit/                    # Unit tests of every module
+│   └── integration/             # Runs one fold from start to end on small data
 │
-├── notebooks/                   # 只做探索和画图；不放任何被 src/ 依赖的逻辑
+├── notebooks/                   # Exploration and plotting only; no logic that src/ depends on
 │
-├── data/                        # 不进 git
-│   ├── raw/                     # 原始 CSV：articles / customers / transactions_train / sample_submission
-│   └── processed/               # M0 生成的文件；以及两个预计算 embedding 目录（只读）
-│       ├── transactions.parquet           # 每行一条购买记录：customer_idx, article_idx (int32), t_dat_day (int16), price (float32), sales_channel_id (int8)；按 (t_dat_day, customer_idx) 排序，row group 100 万行
-│       ├── customers.parquet              # 每行一个用户：customer_idx, age (int8), age_bucket, fn, active (int8 0/1), club_member_status, fashion_news_frequency
-│       ├── articles.parquet               # 每行一个商品：article_idx, product_code 和 §8.4 的类目列
-│       ├── customer_id_map.parquet        # customer_idx (int32) ↔ customer_id (64 位字符串)
-│       ├── article_id_map.parquet         # article_idx (int32) ↔ article_id (10 位字符串)
-│       ├── embeddings/                    # 按 article_idx 重新排列的 embedding（M0 生成）
-│       │   ├── image_by_article_idx.npy   # float32 [105542, 512]，没有向量的行是 0
-│       │   ├── image_mask.npy             # bool [105542]，True = 有图像向量（442 个为 False）
+├── data/                        # Not in git
+│   ├── raw/                     # Raw CSV: articles / customers / transactions_train / sample_submission
+│   └── processed/               # Files generated by M0; and the two directories of precomputed embeddings (read-only)
+│       ├── transactions.parquet           # One row per purchase record: customer_idx, article_idx (int32), t_dat_day (int16), price (float32), sales_channel_id (int8); sorted by (t_dat_day, customer_idx), row groups of 1 million rows
+│       ├── customers.parquet              # One row per user: customer_idx, age (int8), age_bucket, fn, active (int8 0/1), club_member_status, fashion_news_frequency
+│       ├── articles.parquet               # One row per article: article_idx, product_code and the category columns of §8.4
+│       ├── customer_id_map.parquet        # customer_idx (int32) ↔ customer_id (64-character string)
+│       ├── article_id_map.parquet         # article_idx (int32) ↔ article_id (10-character string)
+│       ├── embeddings/                    # Embeddings reordered by article_idx (generated by M0)
+│       │   ├── image_by_article_idx.npy   # float32 [105542, 512]; rows without a vector are 0
+│       │   ├── image_mask.npy             # bool [105542], True = has an image vector (False for 442)
 │       │   ├── text_by_article_idx.npy    # float32 [105542, 384]
-│       │   └── text_mask.npy              # bool [105542]，全部为 True
-│       ├── metadata.json                  # day_zero、年龄桶、preprocess 配置 hash、各表行数；下游读取时校验
-│       ├── image_features/      # CLIP ViT-B/32，覆盖 105,100 / 105,542 个商品（缺 442 个）
-│       │   ├── image_embeddings.npy           # float32 [105100, 512]，已 L2 归一化
-│       │   ├── image_article_ids.parquet      # embedding_row (int64, 0..N-1) → article_id (10 位字符串)
-│       │   ├── image_embedding_failures.parquet  # 空表（0 行）
-│       │   ├── image_features_manifest.json   # 模型版本、sha256、校验记录
-│       │   └── image_faiss.index              # FAISS IndexFlatIP，本项目不使用
-│       └── text_features/       # all-MiniLM-L6-v2，覆盖全部 105,542 个商品
-│           ├── text_embeddings.npy            # float32 [105542, 384]，已 L2 归一化
-│           ├── text_article_ids.parquet       # embedding_row → article_id（另含 text, token_count, was_truncated）
+│       │   └── text_mask.npy              # bool [105542], all True
+│       ├── metadata.json                  # day_zero, age buckets, hash of the preprocess config, row counts of the tables; validated by downstream readers
+│       ├── image_features/      # CLIP ViT-B/32, covering 105,100 / 105,542 articles (442 missing)
+│       │   ├── image_embeddings.npy           # float32 [105100, 512], already L2-normalized
+│       │   ├── image_article_ids.parquet      # embedding_row (int64, 0..N-1) → article_id (10-character string)
+│       │   ├── image_embedding_failures.parquet  # Empty table (0 rows)
+│       │   ├── image_features_manifest.json   # Model version, sha256, verification record
+│       │   └── image_faiss.index              # FAISS IndexFlatIP, not used by this project
+│       └── text_features/       # all-MiniLM-L6-v2, covering all 105,542 articles
+│           ├── text_embeddings.npy            # float32 [105542, 384], already L2-normalized
+│           ├── text_article_ids.parquet       # embedding_row → article_id (plus text, token_count, was_truncated)
 │           ├── text_features_manifest.json
-│           └── text_faiss.index               # FAISS IndexFlatIP，本项目不使用
+│           └── text_faiss.index               # FAISS IndexFlatIP, not used by this project
 │
-├── artifacts/                   # 不进 git，全部可以由代码重新生成
-│   ├── queries/{fold}.parquet   # query_id, fold, customer_idx, anchor（M0 生成，生成后冻结）
-│   ├── labels/{fold}.parquet    # query_id, fold, article_idx（只有 eval/ 和 ranker/sampling.py 能读）
-│   ├── candidates/{fold}/{channel}.parquet        # channel = r1_popularity ... r6_twotower；生成后冻结，不覆盖
-│   ├── candidates/{fold}/r1_bucket_scores.parquet # R1 完整的桶内分数表 (age_bucket, article_idx, score)，特征用
-│   ├── features/{fold}/part-*.parquet             # 宽表：query_id, article_idx + 71 个特征；每块 query 一个文件
-│   ├── features/{fold}/features.json              # 最后写入，表示这个 fold 完成：各 part 的 sha256 和行数、列清单、检查的行数
-│   ├── features/category_codes.json               # 类别特征的编码表，所有 fold 共用
-│   ├── ranker/samples/{experiment}/{fold}/r{r}.parquet   # 负采样后的训练行（+ 同名 .json 记录）；experiment = full / minus_r6
-│   ├── lgb_datasets/{experiment}/{目标周}_r{r}/           # train.bin（LightGBM binary dataset）和 dataset.json
-│   ├── models/wals/{fold}/                        # R5 向量（vectors.py 的格式）：该 fold 的 query 用户，全部有向量的商品
-│   ├── models/twotower/vectors/{fold}/            # R6 向量：该 fold 的 query 用户，商品目录的全部商品；fine-tune 之前的模型
-│   ├── models/twotower/chain_locked/{fold}.pt     # 锁定配置的训练链：在该 fold 上 fine-tune 之后的模型（预测下一个 fold）
-│   ├── models/twotower/{base,chain}/              # base 的各个 epoch；D 阶段各条训练链的模型
+├── artifacts/                   # Not in git; everything can be regenerated by code
+│   ├── queries/{fold}.parquet   # query_id, fold, customer_idx, anchor (generated by M0, frozen once generated)
+│   ├── labels/{fold}.parquet    # query_id, fold, article_idx (only eval/ and ranker/sampling.py may read it)
+│   ├── candidates/{fold}/{channel}.parquet        # channel = r1_popularity ... r6_twotower; frozen once generated, never overwritten
+│   ├── candidates/{fold}/r1_bucket_scores.parquet # The complete bucket score table of R1 (age_bucket, article_idx, score), for the features
+│   ├── features/{fold}/part-*.parquet             # Wide table: query_id, article_idx + 71 features; one file per chunk of queries
+│   ├── features/{fold}/features.json              # Written last and marks the fold as complete: sha256 and rows of every part, column list, rows checked
+│   ├── features/category_codes.json               # Code table of the categorical features, shared by all folds
+│   ├── ranker/samples/{experiment}/{fold}/r{r}.parquet   # Training rows after negative sampling (+ a .json record of the same name); experiment = full / minus_r6
+│   ├── lgb_datasets/{experiment}/{target week}_r{r}/           # train.bin (LightGBM binary dataset) and dataset.json
+│   ├── models/wals/{fold}/                        # R5 vectors (format of vectors.py): the query users of the fold, all articles that have a vector
+│   ├── models/twotower/vectors/{fold}/            # R6 vectors: the query users of the fold, all articles of the catalog; the model before fine-tuning
+│   ├── models/twotower/chain_locked/{fold}.pt     # Training chain of the locked configuration: the model after fine-tuning on the fold (it predicts the next fold)
+│   ├── models/twotower/{base,chain}/              # The epochs of the base; the models of the D-phase training chains
 │   ├── models/ranker/{area}/{experiment}/{config_id}/{fold}/model.txt   # area = v_phase / speed_test
-│   ├── predictions/{area}/{experiment}/{config_id}/{fold}.parquet       # 每个检查点的 Top-12；另有 {fold}_per_query.parquet
-│   ├── hpo/D/{channel}/{trial_id}/{fold}.parquet  # R2 / R3 候选 + in_active_pool 标记（M4 的 §5.7 第 4 项用）
-│   ├── m5/lock_check/{fold}/{channel}.parquet     # M5 锁定核对生成的候选；后续步骤不读取这个目录
-│   └── runs/{run_id}/           # 每次运行的 config 快照、日志、指标
+│   ├── predictions/{area}/{experiment}/{config_id}/{fold}.parquet       # Top-12 of every checkpoint; also {fold}_per_query.parquet
+│   ├── hpo/D/{channel}/{trial_id}/{fold}.parquet  # R2 / R3 candidates + the in_active_pool flag (used by §5.7 item 4 in M4)
+│   ├── m5/lock_check/{fold}/{channel}.parquet     # Candidates generated by the M5 lock check; later steps do not read this directory
+│   └── runs/{run_id}/           # Config snapshot, logs and metrics of every run
 │
-└── results/                     # 进 git：小的汇总表
+└── results/                     # In git: small summary tables
     ├── d_phase.csv
-    ├── d_phase_steps/{channel}.csv   # 每一步的全部候选、是否通过、各周 / 合并 / 分组分数、选择结果
-    ├── m5_lock_check.csv             # M5 锁定核对：每次运行一行（两个分数、是否一致、耗时、采样峰值和真实峰值）
-    ├── m6_runs.csv                   # M6：每个进程一行（fold、channel 或 monitor、耗时、采样峰值、真实峰值）
-    ├── m6_candidates.csv             # M6 监控：每个 fold 每一路和六路 union 各一行（T 周没有基于 label 的列）
-    ├── m6_twotower_chain.csv         # M6：训练链每个模型的 sha256 和 fine-tune 的行数、loss、耗时
-    ├── m6_features.csv               # M6：每个 fold 每个特征的缺失率、最小值、最大值、均值
-    ├── v_phase.csv                   # M7：每个 trial 一行（耗时、采样峰值、真实峰值、LightGBM 版本、libomp 路径和版本）
-    ├── v_phase_metrics.csv           # M7：每个 (配置, fold, 棵数) 一行；RRF baseline 的行也在这里
-    ├── v_phase_steps.csv             # M7：每一步每个配置的 k、分数、是否通过、选择结果
-    ├── v_phase_feature_importance.csv  # M7：选中配置的 gain（只作分析）
-    ├── m7_runs.csv                   # M7：采样、构建 Dataset、baseline 各进程的耗时、真实峰值、LightGBM 版本、libomp 路径和版本
-    ├── m7_speed_test.csv             # M7 测速的 trial 行（与 v_phase.csv 同列）
-    ├── m7_speed_test_metrics.csv     # M7 测速的指标行
-    ├── m8_rehearsal.csv              # M8 彩排的 trial 行（与 v_phase.csv 同列）
-    ├── m8_rehearsal_metrics.csv      # M8 彩排的指标行
-    ├── m8_rehearsal_recall.csv       # M8 彩排的 recall 监控行
-    ├── m8_rehearsal_check.csv        # M8：每次彩排与 M7 比较的结果（passed / failed）和采样文件的 sha256
-    ├── m8_runs.csv                   # M8：采样、Dataset、baseline、监控各进程的耗时和真实峰值
-    ├── t_diag_label_access.csv       # 诊断：每次再读 T 周 label 的时间、git commit、用途
-    ├── t_diag_*.csv                  # 诊断的四张表：decomposition / concentration / query_groups / bootstrap
-    ├── t_phase_label_access.csv      # M8：T 周 label 首次读取的时间和 git commit
-    ├── t_phase.csv                   # M8：T 周每个 trial 一行
-    ├── t_phase_metrics.csv           # M8：每个 (系统, T 周) 的指标
-    ├── t_phase_recall.csv            # M8：T 周每一路的 Recall@quota、union recall、零命中比例
-    └── t_phase_goals.csv             # M8：G1–G3 的判定结论
+    ├── d_phase_steps/{channel}.csv   # All candidates of every step, whether they pass, weekly / pooled / group scores, the outcome of the selection
+    ├── m5_lock_check.csv             # M5 lock check: one row per run (the two scores, whether they agree, run time, sampled peak and true peak)
+    ├── m6_runs.csv                   # M6: one row per process (fold, channel or monitor, run time, sampled peak, true peak)
+    ├── m6_candidates.csv             # M6 monitoring: one row per fold for each channel and for the six-channel union (T weeks have no label-based columns)
+    ├── m6_twotower_chain.csv         # M6: sha256 of every model of the training chain and the rows, loss and run time of its fine-tuning
+    ├── m6_features.csv               # M6: missing rate, minimum, maximum and mean of every feature of every fold
+    ├── v_phase.csv                   # M7: one row per trial (run time, sampled peak, true peak, LightGBM version, libomp path and version)
+    ├── v_phase_metrics.csv           # M7: one row per (configuration, fold, number of trees); the rows of the RRF baseline are here too
+    ├── v_phase_steps.csv             # M7: k, scores, whether it passes and the outcome of the selection for every configuration of every step
+    ├── v_phase_feature_importance.csv  # M7: gain of the selected configuration (for analysis only)
+    ├── m7_runs.csv                   # M7: run time, true peak, LightGBM version, libomp path and version of the sampling, Dataset and baseline processes
+    ├── m7_speed_test.csv             # Trial rows of the M7 speed test (same columns as v_phase.csv)
+    ├── m7_speed_test_metrics.csv     # Metric rows of the M7 speed test
+    ├── m8_rehearsal.csv              # Trial rows of the M8 rehearsal (same columns as v_phase.csv)
+    ├── m8_rehearsal_metrics.csv      # Metric rows of the M8 rehearsal
+    ├── m8_rehearsal_recall.csv       # Recall monitoring rows of the M8 rehearsal
+    ├── m8_rehearsal_check.csv        # M8: the outcome of each comparison of a rehearsal with M7 (passed / failed) and the sha256 of the sample files
+    ├── m8_runs.csv                   # M8: run time and true peak of the sampling, Dataset, baseline and monitoring processes
+    ├── t_diag_label_access.csv       # Diagnostics: time, git commit and purpose of every re-read of T-week labels
+    ├── t_diag_*.csv                  # The four tables of the diagnostics: decomposition / concentration / query_groups / bootstrap
+    ├── t_phase_label_access.csv      # M8: time and git commit of the first read of T-week labels
+    ├── t_phase.csv                   # M8: one row per trial of the T weeks
+    ├── t_phase_metrics.csv           # M8: metrics of every (system, T week)
+    ├── t_phase_recall.csv            # M8: Recall@quota of each channel, union recall and the zero-hit share of the T weeks
+    └── t_phase_goals.csv             # M8: the verdict on G1–G3
 ```
 
-### 14.1 分层规则
+### 14.1 Layering rules
 
 ```
 scripts/  →  src/hmrec/{recall, fusion, features, ranker, hpo, final, diagnostics, pipeline}  →  src/hmrec/{data, eval, vectors, locks, csv_records, run_records, feature_files, git_state}  →  config / paths
 ```
 
-- 上层可以调用下层，**下层不能 import 上层**。例如 `data/` 不能 import `recall/`。
-- `final/`（M8）与 `hpo/` 同层。它可以 import `eval/`、`ranker/`、`fusion/` 和底层模块，以及 `hpo/v_records.py`（结果表的读写）和 `hpo/v_trial.py` 里**与预测哪一周无关**的步骤（`plan_dataset_for_folds`、`train_planned_model`、`score_and_save`、`rrf_baseline_metric_row`：训练周或评估器由调用方传入，自己不做任何 fold 检查，也不做任何选择）。它不能 import 做调参和选择的模块（`hpo/v_phase.py`、`hpo/v_lock.py`、`hpo/speed_test.py`、`hpo/runner.py`、`hpo/d_phase.py`）、`recall/` 和 torch。反过来，M6、M7 的代码不 import `final/`、`eval/final_eval.py`、`ranker/final_window.py`（`tests/unit/test_final_code_rules.py` 检查）。
-- `diagnostics/`（M8 之后的描述性诊断，§10.2）也与 `hpo/` 同层。它可以 import `eval/`、`fusion/`、`data/`、底层模块、`hpo/v_records.py`、`hpo/selection.py`（容差常数）、`ranker/locked.py`、`ranker/runtime.py`、`ranker/ablation.py` 和 `final/goals.py`（判定表的列名）；不能 import 训练、采样、打分的代码、`final/` 的其他模块、`eval/final_eval.py`、`recall/`、`features/` 和 torch。其他代码不 import 它（`tests/unit/test_diag_code_rules.py` 检查）。
-- `recall/`、`features/`、`ranker/` 之间互不 import，通过 `artifacts/` 里的文件交接。
-- `fusion/` 不在上一条的限制里：`features/` 和 `ranker/` 都可以 import `fusion/`，`fusion/` 不 import 这三者。宽表、−R6 的重算和 RRF baseline 因此用同一组表达式。
-- `git_state.py`（HEAD commit、工作区是否干净）属于底层，只依赖标准库和 `logging_utils.py`。
-- M7 的代码（`ranker/`、`hpo/v_*.py`、`hpo/speed_test.py`、`eval/ranker_eval.py`、`scripts/m7_*.py`）不能 import torch，也不能 import 会加载 torch 的模块（`recall/`、`hpo/runner.py`）：torch 和 LightGBM 的两份 OpenMP 运行库不能在同一个进程里（§9.7）。
-- `locks.py` 属于底层（只依赖 `config.py` 和标准库）：它只读取、校验 `configs/locks/` 的锁定文件。`recall/` 和 `features/` 都可以 import 它（特征需要某一路的锁定参数时从这里取，不经过 `recall/`）。`ranker/` 也可以 import 它。从锁定文件**构建** channel 在 `recall/locked.py`；**构建 Ranker 的配置**在 `ranker/locked.py`（M8 取 Ranker 配置的唯一入口，§9.6）。`ranker/identity.py`（`model_config` 和 `config_id`）在 `ranker/` 里，`hpo/` 从它那里 import，因为 `ranker/` 不能 import `hpo/`。
-- `csv_records.py`（只追加、表头固定的结果表的读写）和 `run_records.py`（每个进程一行的运行记录：耗时、采样峰值、真实峰值）属于底层，只依赖标准库和 `memory.py`。
-- `feature_files.py`（特征文件的记录和核对）属于底层，只依赖标准库、polars 和 `locks.py`：`features/` 写记录，`ranker/` 核对，两者互不 import。
-- `pipeline.py`（一个 fold 的各步各用一个独立进程依次运行；每个 fold 的摘要）属于上层，与 `recall/`、`hpo/` 同层：它可以 import `eval/` 和底层模块，`recall/`、`features/`、`ranker/` 不能 import 它。
-- `vectors.py` 属于底层（只依赖 numpy 和标准库），`recall/` 和 `features/` 都可以 import 它：R5 / R6 训练后用它把向量存到 `artifacts/models/{wals,twotower}/{fold}/`，§8.3 的 `wals_dot`、`tt_dot` 用它读取并计算点积。召回分数和点积特征用同一个函数计算，所以同一个 (用户, 商品) 的 R5 `score` 与 `wals_dot` 完全相同。
-- 所有按时间取历史数据的操作都必须经过 `data/asof.py`。
+- An upper layer may call a lower layer; **a lower layer may not import an upper layer**. For example, `data/` may not import `recall/`.
+- `final/` (M8) is on the same level as `hpo/`. It may import `eval/`, `ranker/`, `fusion/` and the bottom-layer modules, as well as `hpo/v_records.py` (reading and writing result tables) and the steps of `hpo/v_trial.py` that **do not depend on which week is predicted** (`plan_dataset_for_folds`, `train_planned_model`, `score_and_save`, `rrf_baseline_metric_row`: the training weeks or the evaluator are passed in by the caller, and these functions do no fold check and make no selection themselves). It may not import the modules that tune and select (`hpo/v_phase.py`, `hpo/v_lock.py`, `hpo/speed_test.py`, `hpo/runner.py`, `hpo/d_phase.py`), `recall/` or torch. Conversely, the code of M6 and M7 does not import `final/`, `eval/final_eval.py` or `ranker/final_window.py` (checked by `tests/unit/test_final_code_rules.py`).
+- `diagnostics/` (the descriptive diagnostics after M8, §10.2) is on the same level as `hpo/` too. It may import `eval/`, `fusion/`, `data/`, the bottom-layer modules, `hpo/v_records.py`, `hpo/selection.py` (the tolerance constant), `ranker/locked.py`, `ranker/runtime.py`, `ranker/ablation.py` and `final/goals.py` (the column names of the verdict table); it may not import code that trains, samples or scores, the other modules of `final/`, `eval/final_eval.py`, `recall/`, `features/` or torch. No other code imports it (checked by `tests/unit/test_diag_code_rules.py`).
+- `recall/`, `features/` and `ranker/` do not import one another and hand over through files in `artifacts/`.
+- `fusion/` is outside the restriction of the previous rule: both `features/` and `ranker/` may import `fusion/`, and `fusion/` imports none of the three. The wide table, the recomputation for −R6 and the RRF baseline therefore use the same set of expressions.
+- `git_state.py` (HEAD commit, whether the working tree is clean) belongs to the bottom layer and depends only on the standard library and `logging_utils.py`.
+- The code of M7 (`ranker/`, `hpo/v_*.py`, `hpo/speed_test.py`, `eval/ranker_eval.py`, `scripts/m7_*.py`) may not import torch, nor any module that loads torch (`recall/`, `hpo/runner.py`): the two copies of the OpenMP runtime of torch and LightGBM cannot be in the same process (§9.7).
+- `locks.py` belongs to the bottom layer (depending only on `config.py` and the standard library): it only reads and validates the lock files of `configs/locks/`. Both `recall/` and `features/` may import it (when a feature needs a locked parameter of some channel it takes it from here, not through `recall/`). `ranker/` may import it too. **Building** the channels from the lock files is in `recall/locked.py`; **building the ranker configuration** is in `ranker/locked.py` (the only entry point through which M8 obtains the ranker configuration, §9.6). `ranker/identity.py` (`model_config` and `config_id`) is in `ranker/`, and `hpo/` imports from it, because `ranker/` may not import `hpo/`.
+- `csv_records.py` (reading and writing the append-only result tables with a fixed header) and `run_records.py` (run records with one row per process: run time, sampled peak, true peak) belong to the bottom layer and depend only on the standard library and `memory.py`.
+- `feature_files.py` (the record of the feature files and its verification) belongs to the bottom layer and depends only on the standard library, polars and `locks.py`: `features/` writes the record and `ranker/` verifies it, and the two do not import each other.
+- `pipeline.py` (runs the steps of one fold one after another, each in its own process; the summary of each fold) belongs to the upper layer, on the same level as `recall/` and `hpo/`: it may import `eval/` and the bottom-layer modules, and `recall/`, `features/` and `ranker/` may not import it.
+- `vectors.py` belongs to the bottom layer (depending only on numpy and the standard library), and both `recall/` and `features/` may import it: after training, R5 / R6 use it to save the vectors to `artifacts/models/{wals,twotower}/{fold}/`, and `wals_dot` and `tt_dot` of §8.3 use it to read them and compute the dot products. Recall scores and dot-product features are computed by the same function, so the R5 `score` and the `wals_dot` of a (user, article) are exactly the same.
+- Every operation that reads historical data by time must go through `data/asof.py`.
 
-### 14.2 模块之间交接的数据
+### 14.2 Data handed over between modules
 
-| 产出方 | 文件 | 主要列 | 使用方 |
+| Producer | File | Main columns | Consumer |
 |---|---|---|---|
-| `data/queries.py` | `artifacts/queries/{fold}.parquet` | `query_id, fold, customer_idx, anchor` | 全部 |
-| `data/queries.py` | `artifacts/labels/{fold}.parquet` | `query_id, fold, article_idx` | `eval/`、`ranker/sampling.py` |
-| `recall/generate.py`（六路） | `artifacts/candidates/{fold}/{channel}.parquet`，`channel` = `r1_popularity` … `r6_twotower` | `query_id, article_idx, channel, rank, score`（R1 另有 `pop_is_fallback`）；写入前按各路的 `OutputSpec` 校验，生成后不覆盖 | `fusion/union.py`、`eval/monitor.py` |
-| `recall/generate.py`（R1） | `artifacts/candidates/{fold}/r1_bucket_scores.parquet` | `age_bucket (str), article_idx (int32), score (float32)`：`[a − 7d, a)` 内每个 (年龄桶, 商品) 的 `S(g, i)`，**不受 Top-100 和活跃池限制**；R1 非补齐候选的 `score` 与它逐位相同 | `features/dense.py`（`pop_bucket_score`） |
-| `recall/generate.py`（R5，通过 `vectors.py`） | `artifacts/models/wals/{fold}/`：`user_customer_idx.npy`、`user_vectors.npy`、`item_article_idx.npy`、`item_vectors.npy`、`vectors.json`（来源、fold） | 用户向量只存该 fold 的 query 用户（其中没有向量的不出现），商品向量全部保存；R5 候选的 `score` 与这些向量的点积逐位相同 | `features/dense.py`（`wals_dot`，通过 `vectors.py`） |
-| `recall/generate.py`（R6，通过 `vectors.py`） | `artifacts/models/twotower/vectors/{fold}/`（同样的 5 个文件） | 用户向量：该 fold 的 query 用户；商品向量：**商品目录的全部商品**（R2 的候选可能在 `A(a)` 外）；用预测这一周时的模型计算（这一周 fine-tune **之前**）；R6 候选的 `score` 与这些向量的点积逐位相同 | `features/dense.py`（`tt_dot`，通过 `vectors.py`） |
-| `recall/generate.py`（R6 训练链） | `artifacts/models/twotower/chain_locked/{fold}.pt`，sha256 记在 `results/m6_twotower_chain.csv` | 在该 fold 上 fine-tune 之后的模型；T4 没有 | 下一个 fold 的 R6（加载前核对 sha256） |
-| `fusion/union.py` + `features/build.py` | `artifacts/features/{fold}/part-*.parquet`、`features.json` | `query_id, article_idx`（int32）和 §8 的 71 个特征（float32；8 个类别特征为 int16 编码），**没有 label 列**；按 `(query_id, article_idx)` 排序，同一个 query 不跨文件；`features.json` 记录各 part 的 sha256、行数和列清单 | `ranker/`（先用 `feature_files.verify_feature_files` 核对，再读取；label 在 `ranker/sampling.py` 中拼接） |
-| `features/categories.py` | `artifacts/features/category_codes.json` | 每个类别字段的取值列表（位置 + 1 = 编码，0 = 缺失），所有 fold 共用 | `ranker/`（解释类别编码时） |
-| `ranker/sampling.py` | `artifacts/ranker/samples/{experiment}/{fold}/r{r}.parquet`（+ `.json`） | `query_id, article_idx, label`（int8）和该实验的特征列（71 个，或 −R6 的 67 个）；只含至少有 1 个正样本的 query；按 `(query_id, article_idx)` 排序 | `ranker/dataset.py`（先核对 sha256） |
-| `ranker/dataset.py` | `artifacts/lgb_datasets/{experiment}/{目标周}_r{r}/train.bin`、`dataset.json` | 4 个训练周的分箱数据、label、group；`dataset.json` 记录 4 个采样文件的 sha256 和分箱参数 | `hpo/v_trial.py`（先核对，再训练） |
-| `hpo/v_trial.py`（用 `ranker/predict.py`） | `artifacts/predictions/{area}/{experiment}/{config_id}/{fold}.parquet`、`{fold}_per_query.parquet` | Top-12：`num_trees, query_id, rank, article_idx, score`；每个 query 的指标：`query_id, fold, map@12, recall@12, ndcg@12, num_trees` | `scripts/checks/check_ranker_eval.py`、分析 |
+| `data/queries.py` | `artifacts/queries/{fold}.parquet` | `query_id, fold, customer_idx, anchor` | all |
+| `data/queries.py` | `artifacts/labels/{fold}.parquet` | `query_id, fold, article_idx` | `eval/`, `ranker/sampling.py` |
+| `recall/generate.py` (six channels) | `artifacts/candidates/{fold}/{channel}.parquet`, with `channel` = `r1_popularity` … `r6_twotower` | `query_id, article_idx, channel, rank, score` (R1 also has `pop_is_fallback`); validated against each channel's `OutputSpec` before writing, never overwritten once generated | `fusion/union.py`, `eval/monitor.py` |
+| `recall/generate.py` (R1) | `artifacts/candidates/{fold}/r1_bucket_scores.parquet` | `age_bucket (str), article_idx (int32), score (float32)`: the `S(g, i)` of every (age bucket, article) in `[a − 7d, a)`, **not limited by the Top-100 or the active pool**; the `score` of the non-fallback candidates of R1 is bit-identical to it | `features/dense.py` (`pop_bucket_score`) |
+| `recall/generate.py` (R5, through `vectors.py`) | `artifacts/models/wals/{fold}/`: `user_customer_idx.npy`, `user_vectors.npy`, `item_article_idx.npy`, `item_vectors.npy`, `vectors.json` (source, fold) | User vectors are saved only for the query users of the fold (those without a vector do not appear), and all item vectors are saved; the `score` of the R5 candidates is bit-identical to the dot product of these vectors | `features/dense.py` (`wals_dot`, through `vectors.py`) |
+| `recall/generate.py` (R6, through `vectors.py`) | `artifacts/models/twotower/vectors/{fold}/` (the same 5 files) | User vectors: the query users of the fold; item vectors: **all articles of the catalog** (the candidates of R2 may be outside `A(a)`); computed with the model that predicts this week (**before** this week's fine-tuning); the `score` of the R6 candidates is bit-identical to the dot product of these vectors | `features/dense.py` (`tt_dot`, through `vectors.py`) |
+| `recall/generate.py` (R6 training chain) | `artifacts/models/twotower/chain_locked/{fold}.pt`, with the sha256 recorded in `results/m6_twotower_chain.csv` | The model after fine-tuning on the fold; T4 has none | R6 of the next fold (sha256 checked before loading) |
+| `fusion/union.py` + `features/build.py` | `artifacts/features/{fold}/part-*.parquet`, `features.json` | `query_id, article_idx` (int32) and the 71 features of §8 (float32; the 8 categorical features as int16 codes), **with no label column**; sorted by `(query_id, article_idx)`, a query never spanning two files; `features.json` records the sha256 and rows of every part and the column list | `ranker/` (verified first with `feature_files.verify_feature_files`, then read; the label is joined in `ranker/sampling.py`) |
+| `features/categories.py` | `artifacts/features/category_codes.json` | The list of values of every categorical field (position + 1 = code, 0 = missing), shared by all folds | `ranker/` (when interpreting the category codes) |
+| `ranker/sampling.py` | `artifacts/ranker/samples/{experiment}/{fold}/r{r}.parquet` (+ `.json`) | `query_id, article_idx, label` (int8) and the feature columns of the experiment (71, or the 67 of −R6); only queries with at least 1 positive; sorted by `(query_id, article_idx)` | `ranker/dataset.py` (sha256 checked first) |
+| `ranker/dataset.py` | `artifacts/lgb_datasets/{experiment}/{target week}_r{r}/train.bin`, `dataset.json` | Binned data, labels and groups of the 4 training weeks; `dataset.json` records the sha256 of the 4 sample files and the binning parameters | `hpo/v_trial.py` (verified first, then trained) |
+| `hpo/v_trial.py` (using `ranker/predict.py`) | `artifacts/predictions/{area}/{experiment}/{config_id}/{fold}.parquet`, `{fold}_per_query.parquet` | Top-12: `num_trees, query_id, rank, article_idx, score`; metrics of every query: `query_id, fold, map@12, recall@12, ndcg@12, num_trees` | `scripts/checks/check_ranker_eval.py`, analysis |
 
-Label 只在 `eval/` 和 `ranker/sampling.py` 中读取，**recall 和特征代码永远不读 label**。（M8 之后的描述性诊断通过 `eval/diagnostic_labels.py` 读 label，再读 T 周的 label 要先记录，见 §10.2。）T 周的 label 另有一层：只能通过 `eval/final_eval.py` 并带着 `final/gate.py` 签发的许可读取（§10.1）。
+Labels are read only in `eval/` and `ranker/sampling.py`; **recall and feature code never reads labels**. (The descriptive diagnostics after M8 read labels through `eval/diagnostic_labels.py`, and a re-read of the labels of a T week has to be recorded first, see §10.2.) The labels of the T weeks have one more layer: they can be read only through `eval/final_eval.py`, with the permit issued by `final/gate.py` (§10.1).
 
 ---
 
-## 15. 代码规范
+## 15. Code conventions
 
-读者是 junior MLE，所以**可读性优先于技巧**。完整规则写在 `AGENTS.md`，这里列出要点：
+The reader is a junior MLE, so **readability comes before cleverness**. The full rules are in `AGENTS.md`; the main points are listed here:
 
-1. **语言和工具**：Python 3.12，`uv` 管理环境和锁定依赖（`uv.lock`）；Polars 做表格处理，NumPy / SciPy 做矩阵，PyTorch（MPS）做 Two-Tower，LightGBM 做 Ranker；`ruff` 负责格式化和 lint，`pyright`（`standard` 模式）做类型检查，`pytest` 做测试。与 §1.2 一致。
-2. **每个函数只做一件事**，一般不超过 50 行；每个文件对应一个清楚的组件。
-3. **全部加类型标注**；公开函数都要有 docstring，写清楚输入、输出、**表的粒度（一行代表什么）**和**时间窗口**。
-4. **注释写"为什么"**，而不只是"做了什么"。尤其要说明：时间窗口是开区间还是闭区间、为什么用这个 dtype、为什么要分块。
-5. **数字都放进 config**，代码里不出现没有解释的常数（magic number）。
-6. **计算和读写分开**：计算函数接收 DataFrame / 数组，返回 DataFrame / 数组；读写文件只在 `scripts/` 和少数 IO 函数里做。这样计算函数可以直接用小数据测试。
-7. **防泄漏写成断言**：每个 as-of 函数都检查输入数据的最大日期小于 anchor，不满足就报错。
-8. **用 logger，不用 print**；长任务要打印进度、耗时和内存峰值。
-9. **每个模块都有单元测试**，测试数据小到能手算。
-10. 代码注释和 docstring 用英文，用词尽量简单；设计文档（`docs/`）用中文。
+1. **Language and tools**: Python 3.12, with `uv` managing the environment and locking the dependencies (`uv.lock`); Polars for tables, NumPy / SciPy for matrices, PyTorch (MPS) for Two-Tower, LightGBM for the ranker; `ruff` for formatting and lint, `pyright` (`standard` mode) for type checking, `pytest` for tests. Consistent with §1.2.
+2. **Each function does one thing** and is normally no more than 50 lines; each file corresponds to one clear component.
+3. **Type annotations everywhere**; every public function has a docstring that states the inputs, the outputs, **the grain of the tables (what one row stands for)** and **the time window**.
+4. **Comments say "why"**, not only "what". In particular: whether a time window is open or closed, why this dtype is used, why something is chunked.
+5. **All numbers go into the config**; no unexplained constant (magic number) appears in the code.
+6. **Computation and IO are separate**: a computation function receives DataFrames / arrays and returns DataFrames / arrays; files are read and written only in `scripts/` and a few IO functions. This way computation functions can be tested directly on small data.
+7. **Leakage prevention is written as assertions**: every as-of function checks that the latest date of its input data is before the anchor, and raises an error otherwise.
+8. **Use a logger, not print**; a long task prints progress, run time and memory peak.
+9. **Every module has unit tests**, with test data small enough to compute by hand.
+10. Code comments and docstrings are in English, with words as simple as possible; the design documents (`docs/`) were in Chinese up to tag `v0.1` and are in English from 2026-11-19 on (`AGENTS.md` §11).

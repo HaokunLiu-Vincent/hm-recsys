@@ -210,13 +210,36 @@ def test_ranker_lock_holds_the_final_configuration() -> None:
     assert tuple(lock.selection.v_phase_record.folds) == ("V1", "V2", "V3", "V4")
 
 
+def _entry_headings(decision_log: Path) -> list[str]:
+    """The `## ` lines of a decision log, in file order (one per entry)."""
+    lines = decision_log.read_text(encoding="utf-8").splitlines()
+    return [line for line in lines if line.startswith("## ")]
+
+
 def test_the_ranker_lock_points_to_an_entry_of_the_decision_log() -> None:
     lock = load_ranker_lock(RANKER_FILE)
     prefix = "docs/decisions.md "
     assert lock.selection.decision_record.startswith(prefix)
-    heading = "## " + lock.selection.decision_record.removeprefix(prefix)
-    decisions = (LOCKS.parents[1] / "docs" / "decisions.md").read_text(encoding="utf-8")
-    assert sum(line.startswith(heading) for line in decisions.splitlines()) == 1
+    quoted_title = lock.selection.decision_record.removeprefix(prefix)
+
+    # The lock file was written when the decision log was in Chinese, so it quotes the
+    # Chinese title of the entry, and a lock file is never modified (AGENTS.md §3.3).
+    # The Chinese log is now the frozen archive docs/decisions.zh-CN.md; the English
+    # docs/decisions.md has the same entries in the same order (docs/decisions.md
+    # 2026-11-19, "Documentation language"). So: the quoted title is looked up in the
+    # archive, and the entry at the same position of the English log must have its date.
+    docs = LOCKS.parents[1] / "docs"
+    archive_headings = _entry_headings(docs / "decisions.zh-CN.md")
+    matches = [
+        position
+        for position, heading in enumerate(archive_headings)
+        if heading.startswith("## " + quoted_title)
+    ]
+    assert len(matches) == 1
+    english_heading = _entry_headings(docs / "decisions.md")[matches[0]]
+    assert english_heading.startswith("## 2026-11-18 ")
+    assert quoted_title.startswith("2026-11-18 ")
+    assert "ranker configuration locked" in english_heading
 
 
 def test_ranker_lock_refuses_missing_and_unknown_keys_in_every_section() -> None:

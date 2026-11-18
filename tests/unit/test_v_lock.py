@@ -47,7 +47,8 @@ from hmrec.ranker.locked import (
 
 # Values nothing can be compared with: when the file was written and the pointer to
 # docs/decisions.md. tests/unit/test_locks.py pins them (the date, the commit, and that
-# the decision record is a heading of docs/decisions.md), so a change is still caught.
+# the decision record is a heading of the decision log: the lock quotes the Chinese title,
+# which is in the archive docs/decisions.zh-CN.md), so a change is still caught.
 PINNED_ELSEWHERE = {
     ("lock", "locked_on"),
     ("lock", "git_commit"),
