@@ -1,2 +1,4 @@
 recorded_at,git_commit,git_dirty,run,folds,purpose,script
 2026-11-19T04:21:35,4931e9e2f9933045e26fc08eddfd0c25a0306282,False,rehearsal,V4 T1 T2 T3,ranker training labels: label column of the sample files (Dataset build),scripts/kaggle_ranker.py --step dataset
+2026-11-19T04:52:28,507cff5d50b81eb388414ca45454c52ca7335986,False,submission,T4,ranker training labels: negative sampling of T4 (label file),scripts/kaggle_ranker.py --step sample
+2026-11-19T04:52:35,507cff5d50b81eb388414ca45454c52ca7335986,False,submission,T1 T2 T3 T4,ranker training labels: label column of the sample files (Dataset build),scripts/kaggle_ranker.py --step dataset
