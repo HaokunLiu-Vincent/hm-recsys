@@ -83,6 +83,44 @@ def query_metrics(ranked_articles: list[int], labels: set[int]) -> tuple[float, 
     return average_precision, hits / len(labels), dcg / ideal_dcg
 
 
+def recompute_fold_means(top: pl.DataFrame, label_table: pl.DataFrame) -> tuple[list[float], int]:
+    """Recompute the fold means of METRICS from one checkpoint's Top-12 rows.
+
+    Args:
+        top: The saved Top-12 of ONE number of trees. Columns used: query_id, rank,
+            article_idx, score (other columns, e.g. num_trees, are ignored).
+        label_table: One row per (query_id, article_idx) of the fold's labels.
+
+    Returns:
+        ([MAP@12, Recall@12, NDCG@12] averaged over ALL labelled queries, their number).
+        A query without any prediction counts as 0.
+
+    Raises:
+        ValueError: If a query's ranking is not a clean Top-12 in the right order, or a
+            predicted query has no label.
+    """
+    labels: dict[int, set[int]] = defaultdict(set)
+    for query_id, article in zip(
+        label_table["query_id"].to_list(), label_table["article_idx"].to_list(), strict=True
+    ):
+        labels[query_id].add(article)
+    ranked: dict[int, list[tuple[int, int, float]]] = defaultdict(list)
+    # Select the four columns by name: the file also has num_trees, in another position.
+    ordered = top.select("query_id", "rank", "article_idx", "score").sort("query_id", "rank")
+    for query_id, rank, article, score in ordered.iter_rows():
+        ranked[query_id].append((rank, article, score))
+    unknown = set(ranked) - set(labels)
+    if unknown:
+        raise ValueError(f"{len(unknown)} predicted queries have no label")
+    values: list[list[float]] = [[], [], []]
+    for query_id, query_labels in labels.items():
+        rows = ranked.get(query_id, [])
+        check_ranking(rows, query_id)
+        for index, value in enumerate(query_metrics([row[1] for row in rows], query_labels)):
+            values[index].append(value)
+    return [math.fsum(column) / len(labels) for column in values], len(labels)
+
+
 def main() -> None:
     """Recompute one trial's metrics at one number of trees and compare."""
     args = parse_args()
@@ -91,30 +129,13 @@ def main() -> None:
     fold = load_fold_manifest(paths.fold_manifest_file).get(args.fold)
     # The evaluator checks the phase first; only its label table is used here.
     label_table = load_m7_evaluator(fold, paths.labels_file(args.fold)).labels
-    labels: dict[int, set[int]] = defaultdict(set)
-    for query_id, article in zip(
-        label_table["query_id"].to_list(), label_table["article_idx"].to_list(), strict=True
-    ):
-        labels[query_id].add(article)
     predictions_file = paths.ranker_predictions_file(
         args.area, args.experiment, args.config_id, args.fold
     )
     top = pl.read_parquet(predictions_file).filter(pl.col("num_trees") == args.num_trees)
     if top.height == 0:
         raise ValueError(f"{predictions_file} has no rows with num_trees = {args.num_trees}")
-    ranked: dict[int, list[tuple[int, int, float]]] = defaultdict(list)
-    for query_id, rank, article, score in top.sort("query_id", "rank").iter_rows():
-        ranked[query_id].append((rank, article, score))
-    values: list[list[float]] = [[], [], []]
-    for query_id, query_labels in labels.items():
-        rows = ranked.get(query_id, [])
-        check_ranking(rows, query_id)
-        for index, value in enumerate(query_metrics([row[1] for row in rows], query_labels)):
-            values[index].append(value)
-    means = [math.fsum(column) / len(labels) for column in values]
-    unknown = set(ranked) - set(labels)
-    if unknown:
-        raise ValueError(f"{len(unknown)} predicted queries have no label")
+    means, n_queries = recompute_fold_means(top, label_table)
     _, metrics_file = results_files(paths, args.area)
     recorded = [
         row
@@ -131,7 +152,7 @@ def main() -> None:
         )
         if difference >= TOLERANCE:
             raise ValueError(f"{metric}: recomputed {value} differs from the recorded value")
-    LOGGER.info("OK: %d queries, ranking order and all %d metrics agree", len(labels), len(METRICS))
+    LOGGER.info("OK: %d queries, ranking order and all %d metrics agree", n_queries, len(METRICS))
 
 
 if __name__ == "__main__":

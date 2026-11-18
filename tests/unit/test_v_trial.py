@@ -12,6 +12,7 @@ RRF baseline by hand (order: rrf_score DESC, best_rank ASC, article_idx ASC):
     Fold means: MAP 0.125, Recall 0.5, NDCG 1 / (2 * log2(5)).
 """
 
+import importlib.util
 import math
 from dataclasses import replace
 from pathlib import Path
@@ -21,6 +22,7 @@ import pytest
 from ranker_example import (
     CANDIDATES_PER_QUERY,
     METRICS,
+    REPO,
     build_workspace,
     tiny_inputs,
     tiny_ranker_config,
@@ -180,6 +182,59 @@ def test_trial_trains_scores_and_evaluates(inputs: TrialInputs) -> None:
     # Outputs are never replaced: the same trial again stops before training.
     with pytest.raises(FileExistsError, match="outputs of this trial already exist"):
         run_trial(inputs, _spec(inputs), "c")
+
+
+def _check_script():  # noqa: ANN202 (a module loaded from a file)
+    """scripts/checks/check_ranker_eval.py, loaded by path (scripts/ is not a package)."""
+    path = REPO / "scripts" / "checks" / "check_ranker_eval.py"
+    spec = importlib.util.spec_from_file_location("check_ranker_eval", path)
+    assert spec is not None and spec.loader is not None
+    module = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(module)
+    return module
+
+
+def test_independent_check_recomputes_the_trial_metrics(inputs: TrialInputs) -> None:
+    # The check script reads the Top-12 file exactly as a trial saves it (5 columns,
+    # num_trees first) and must reach the recorded metrics with its own plain loops.
+    spec = _spec(inputs, area=AREA_SPEED_TEST, step="check")
+    outcome = run_trial(inputs, spec, "c")
+    check = _check_script()
+    key = (AREA_SPEED_TEST, "full", outcome.config_id, "V1")
+    predictions = pl.read_parquet(inputs.paths.ranker_predictions_file(*key))
+    labels = pl.read_parquet(inputs.paths.labels_file("V1"))
+    for metric_row in outcome.metric_rows:
+        top = predictions.filter(pl.col("num_trees") == metric_row.num_trees)
+        means, n_queries = check.recompute_fold_means(top, labels)
+        assert n_queries == N_QUERIES
+        for metric, value in zip(check.METRICS, means, strict=True):
+            assert abs(value - metric_row.scores[metric]) < check.TOLERANCE
+    # A ranking in the wrong order is caught: swap the scores of ranks 1 and 2 of a query.
+    top = predictions.filter(pl.col("num_trees") == 20)
+    first_query = top["query_id"].min()
+    broken = top.with_columns(
+        pl.when((pl.col("query_id") == first_query) & (pl.col("rank") == 1))
+        .then(pl.lit(-1e9))
+        .otherwise(pl.col("score"))
+        .alias("score")
+    )
+    with pytest.raises(ValueError, match="not ordered by score DESC"):
+        check.recompute_fold_means(broken, labels)
+    # A query without labels in the predictions is an error, not silently ignored.
+    with pytest.raises(ValueError, match="predicted queries have no label"):
+        check.recompute_fold_means(top, labels.filter(pl.col("query_id") != first_query))
+
+
+def test_check_script_query_metrics_by_hand() -> None:
+    check = _check_script()
+    # Labels {7, 9}; ranked 5, 7, 9: hits at ranks 2 and 3.
+    # AP = (1/2 + 2/3) / min(12, 2) = 0.583333; Recall = 2/2; NDCG = (1/log2(3) + 1/2) /
+    # (1 + 1/log2(3)).
+    average_precision, recall, ndcg = check.query_metrics([5, 7, 9], {7, 9})
+    assert average_precision == pytest.approx((1 / 2 + 2 / 3) / 2)
+    assert recall == 1.0
+    assert ndcg == pytest.approx((1 / math.log2(3) + 0.5) / (1 + 1 / math.log2(3)))
+    assert check.query_metrics([], {1}) == (0.0, 0.0, 0.0)
 
 
 def test_timing_only_trial_reads_no_label_and_saves_nothing(inputs: TrialInputs) -> None:
