@@ -53,6 +53,11 @@ from hmrec.run_records import RUN_COLUMNS
 AREA_V_PHASE = "v_phase"
 AREA_SPEED_TEST = "speed_test"
 AREAS = (AREA_V_PHASE, AREA_SPEED_TEST)
+# The two areas of the final evaluation (M8, hmrec.final). They use the same table
+# shapes but are NOT in AREAS: no M7 script accepts them.
+AREA_T_PHASE = "t_phase"
+AREA_M8_REHEARSAL = "m8_rehearsal"
+FINAL_AREAS = (AREA_T_PHASE, AREA_M8_REHEARSAL)
 
 RRF_BASELINE = "rrf_baseline"  # experiment name and config_id of the RRF baseline rows
 SPEED_TEST_STEP = "speed_test"  # step name of the speed test's evaluated trial
@@ -100,7 +105,11 @@ def results_files(paths: ProjectPaths, area: str) -> tuple[Path, Path]:
         return paths.v_phase_results_file, paths.v_phase_metrics_file
     if area == AREA_SPEED_TEST:
         return paths.m7_speed_test_file, paths.m7_speed_test_metrics_file
-    raise ValueError(f"area must be one of {AREAS}, got {area!r}")
+    if area == AREA_T_PHASE:
+        return paths.t_phase_results_file, paths.t_phase_metrics_file
+    if area == AREA_M8_REHEARSAL:
+        return paths.m8_rehearsal_results_file, paths.m8_rehearsal_metrics_file
+    raise ValueError(f"area must be one of {(*AREAS, *FINAL_AREAS)}, got {area!r}")
 
 
 # ---------------------------------------------------------------- trial rows

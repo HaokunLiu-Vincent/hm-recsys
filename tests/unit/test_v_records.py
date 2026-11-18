@@ -172,4 +172,14 @@ def test_areas_have_separate_files(tmp_path: Path) -> None:
     assert [file.name for file in grid_files] == ["v_phase.csv", "v_phase_metrics.csv"]
     assert [file.name for file in speed_files] == ["m7_speed_test.csv", "m7_speed_test_metrics.csv"]
     with pytest.raises(ValueError, match="area must be one of"):
-        results_files(paths, "t_phase")
+        results_files(paths, "d_phase")
+    # The two areas of the final evaluation (M8) have their own tables.
+    assert results_files(paths, "t_phase") == (
+        paths.t_phase_results_file,
+        paths.t_phase_metrics_file,
+    )
+    assert results_files(paths, "m8_rehearsal") == (
+        paths.m8_rehearsal_results_file,
+        paths.m8_rehearsal_metrics_file,
+    )
+    assert len({*grid_files, *speed_files, *results_files(paths, "t_phase")}) == 6

@@ -63,3 +63,33 @@ def git_state(repo_root: Path, results_root: Path) -> tuple[str, bool]:
         status_command, cwd=repo_root, capture_output=True, text=True, check=True
     ).stdout
     return commit, bool(status.strip())
+
+
+# What "the code" is when two commits are compared: everything a result depends on.
+# docs/ and results/ are left out on purpose: committing result tables or notes
+# between two runs does not change what the code computes.
+CODE_PATHS = ("src", "scripts", "configs", "pyproject.toml", "uv.lock")
+
+
+def code_changed_since(repo_root: Path, earlier_commit: str) -> bool:
+    """True if the code or configs at HEAD differ from those at `earlier_commit`.
+
+    Compares the committed trees of CODE_PATHS (`git diff --quiet`). Uncommitted
+    changes are NOT seen here; git_state reports those.
+
+    Args:
+        repo_root: Root of the git repository.
+        earlier_commit: A full commit hash recorded by an earlier run.
+
+    Raises:
+        ValueError: If git cannot compare the two commits (e.g. the recorded
+            commit does not exist in this repository).
+    """
+    command = ["git", "diff", "--quiet", earlier_commit, "HEAD", "--", *CODE_PATHS]
+    result = subprocess.run(command, cwd=repo_root, capture_output=True, text=True, check=False)
+    # git diff --quiet: 0 = no difference, 1 = differences, anything else = an error.
+    if result.returncode not in (0, 1):
+        raise ValueError(
+            f"git cannot compare {earlier_commit!r} with HEAD: {result.stderr.strip()}"
+        )
+    return result.returncode == 1

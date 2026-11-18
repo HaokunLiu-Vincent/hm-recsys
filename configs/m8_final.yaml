@@ -1,0 +1,45 @@
+# The final evaluation on T1-T4 (M8, proposal §10). Read by hmrec.config.load_final_eval_config.
+#
+# WRITTEN AND COMMITTED BEFORE ANY LABEL OF A T FOLD WAS READ (2026-11-18).
+# DO NOT CHANGE after the formal run has started: the criteria below decide whether the
+# goals are met, and they must not be chosen after the results are seen. The formal run
+# records the commit it started at and refuses to continue if the code or configs at HEAD
+# differ from that commit (hmrec.final.gate).
+#
+# The formal run happens ONCE. Nothing is tuned or selected in M8: every recall channel,
+# every feature and the Ranker are locked (configs/locks/).
+
+phase: T
+target_folds: [T1, T2, T3, T4]
+
+# The main metric, then the metrics reported next to it. All are cut at 12 because the
+# locked Ranker keeps the Top-12 of every query (configs/locks/ranker.lock.yaml, scoring.top_k).
+metric: map@12
+extra_metrics: [recall@12, ndcg@12]
+
+# The rehearsal: the M8 code path with the locked configuration predicts this V fold
+# (training folds F4 V1 V2 V3). It reads no label of a T fold. Its numbers must equal the
+# recorded V-phase numbers of the locked configuration EXACTLY (results/v_phase_metrics.csv,
+# results/m6_candidates.csv) and its models must equal the first trees of the M7 models.
+# The formal run refuses to start until a rehearsal has passed with the same code.
+rehearsal:
+  target_fold: V4
+
+# Acceptance criteria (proposal §0.1). "pooled" = all queries of the 4 folds together
+# (query-weighted, proposal §4.1). They are judged by hmrec.final.goals and the verdict is
+# written to results/t_phase_goals.csv.
+goals:
+  # G1: pooled MAP@12 of the Ranker on T1-T4 >= this.
+  g1_min_pooled_map: 0.032
+  # G2: union recall of the six channels >= this on EVERY one of T1-T4.
+  g2_min_union_recall: 0.24
+  # G3: the Ranker's MAP@12 is STRICTLY above the RRF baseline's on at least this many of
+  # the 4 folds.
+  g3_min_folds_above_baseline: 3
+
+# Pre-registered secondary analysis. It is only reported and changes no verdict:
+#   minus_r6   the system without R6, done exactly as in M7 (rows returned only by R6 and the
+#              four R6 features are removed, n_channels / best_rank / rrf_score are computed
+#              again from the other five channels, the samples are drawn again, the models
+#              are trained to the locked number of trees).
+secondary_experiments: [minus_r6]
