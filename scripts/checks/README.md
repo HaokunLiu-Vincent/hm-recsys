@@ -22,10 +22,12 @@ Each script raises an error on the first failed check and exits non-zero.
 |---|---|---|
 | `check_queries.py` | `artifacts/queries/` and `artifacts/labels/` against `data/processed/transactions.parquet`: query_id range and int32 fit, fold/anchor columns, labels equal the distinct (customer, article) pairs bought in [anchor, anchor + 7d), query count equals the number of distinct buyers that week, last label day of the last fold. Also logs per-fold counts and folds whose query count is more than 30% from the average. | After `scripts/m0_build_queries.py` |
 | `check_features.py` | `artifacts/features/{fold}/` against the candidate files and the processed tables: rows sorted by (query_id, article_idx), no repeated pair, no query split over part files, row count = distinct candidate pairs; then 25 features (at least 2 of every group A-E; 6 of the 15 features added on 2026-11-17) recomputed with plain Python loops for 1,000 random rows and compared with the wide table. Uses nothing from `hmrec.features`, `hmrec.fusion`, `hmrec.data.asof`, `hmrec.data.histories` or `hmrec.vectors`. | After `scripts/m6_build_features.py --fold F1` |
+| `check_ranker_eval.py` | One Ranker trial at one number of trees: reads the saved Top-12 (`artifacts/predictions/...`) and recomputes MAP@12, Recall@12 and NDCG@12 with plain Python loops; checks that every query has ranks 1..n (n <= 12), no repeated article, and the order score DESC then article_idx ASC; compares the fold means with the row in the results table (difference < 1e-9). Uses nothing from `hmrec.eval.metrics` or `hmrec.ranker`. The label table comes from `hmrec.eval.ranker_eval.load_m7_evaluator` (the only allowed reader), which refuses every fold that is not a V fold. | After a trial of `scripts/m7_speed_test.py` or `scripts/m7_ranker_hpo.py` |
 
 Run:
 
 ```bash
 uv run python scripts/checks/check_queries.py
 uv run python scripts/checks/check_features.py --fold F1
+uv run python scripts/checks/check_ranker_eval.py --area speed_test --experiment full --config-id <id> --fold V1 --num-trees 300
 ```

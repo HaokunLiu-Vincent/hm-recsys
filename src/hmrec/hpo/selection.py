@@ -16,8 +16,13 @@ Several candidates in one step (proposal §4.2, docs/decisions.md 2026-11-17):
        order, see hmrec.hpo.grid).
 
 R5 iterations is a convergence check, not a choice (convergence_decision).
+
+Ranker (V phase, configs/hpo/v_phase.yaml): every configuration first gets its
+own number of trees (choose_num_trees), then the configurations are compared
+with choose_winner, each one at its own number of trees.
 """
 
+from collections.abc import Mapping
 from dataclasses import dataclass
 
 from hmrec.config import SelectionRule
@@ -166,6 +171,65 @@ def choose_winner(
         f"passing score {best_score:.6f}; {winner.trial_id} has the highest priority among them"
     )
     return StepDecision(winner.trial_id, SWITCH, checks, reason)
+
+
+# ---------------------------------------------------------------- Ranker: number of trees
+
+
+@dataclass(frozen=True)
+class NumTreesChoice:
+    """The number of trees chosen for one Ranker configuration.
+
+    Attributes:
+        num_trees: k*, the chosen number of trees.
+        score: Pooled score with k* trees.
+        best_num_trees: The smallest k with the highest pooled score.
+        best_score: The highest pooled score of the curve.
+        uses_all_trees: True if k* is the last checkpoint: the curve may still be
+            rising, so more trees could be better.
+    """
+
+    num_trees: int
+    score: float
+    best_num_trees: int
+    best_score: float
+    uses_all_trees: bool
+
+
+def choose_num_trees(curve: Mapping[int, float], tolerance: float) -> NumTreesChoice:
+    """Pick a configuration's number of trees from its pooled score curve.
+
+    The rule (configs/hpo/v_phase.yaml): with P(k) the pooled score with k trees,
+
+        k* = the smallest k with (max P - P(k)) / max P < tolerance
+
+    So among all k that are "about equal" to the best one, the cheapest wins. A k
+    whose score is EXACTLY tolerance below the best is not about equal.
+
+    Args:
+        curve: number of trees -> pooled score (e.g. MAP@12 of the 4 folds).
+        tolerance: Relative tolerance (min_relative_improvement of
+            configs/selection_rule.yaml, 0.01).
+
+    Returns:
+        The choice.
+    """
+    if not curve:
+        raise ValueError("the curve is empty: there is no number of trees to choose from")
+    if tolerance <= 0:
+        raise ValueError(f"tolerance must be > 0, got {tolerance}")
+    tree_counts = sorted(curve)
+    best_score = max(curve.values())
+    best_num_trees = next(k for k in tree_counts if curve[k] == best_score)
+    about_equal = [k for k in tree_counts if -relative_change(best_score, curve[k]) < tolerance]
+    chosen = about_equal[0]
+    return NumTreesChoice(
+        num_trees=chosen,
+        score=curve[chosen],
+        best_num_trees=best_num_trees,
+        best_score=best_score,
+        uses_all_trees=chosen == tree_counts[-1],
+    )
 
 
 # ---------------------------------------------------------------- R5 iterations
