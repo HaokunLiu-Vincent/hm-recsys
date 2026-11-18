@@ -1,0 +1,2 @@
+run,csv_file,n_rows,csv_bytes,csv_sha256,gzip_file,gzip_bytes,gzip_sha256,n_checks,failed_checks,passed,git_commit,git_dirty,written_at
+rehearsal,artifacts/kaggle/rehearsal/submission.csv,118984,23439871,6a6da4b9305978732439c2b7790203e6668a091992833a59c298f759fdf808be,artifacts/kaggle/rehearsal/submission.csv.gz,8418452,6f6071b1f12b2be6abcd386fc77f783a30dfa0a78d240ea67e18dc81d0d8a197,9,,True,4931e9e2f9933045e26fc08eddfd0c25a0306282,False,2026-11-19T04:27:00

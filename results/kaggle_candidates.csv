@@ -1,0 +1,2 @@
+run,week,anchor,n_customers,n_shards,shard_customers,r1_popularity_rows,r2_repurchase_rows,r3_sibling_rows,r4_itemcf_rows,r5_wals_rows,r6_twotower_rows,candidate_rows,candidates_per_customer_mean,candidates_per_customer_p50,candidates_per_customer_p90,no_history_share,git_commit,git_dirty,recorded_at
+rehearsal,T4,2020-09-16,118984,2,70000,11898400,1503913,2399460,9697682,8294200,11898400,34192251,287.3684781147045,309.0,354.0,0.04993108317084649,4931e9e2f9933045e26fc08eddfd0c25a0306282,False,2026-11-19T04:27:00
