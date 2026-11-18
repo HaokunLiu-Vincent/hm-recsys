@@ -57,13 +57,22 @@ H&M 个性化时尚推荐（Kaggle H&M 数据集）。目标：预测每个用�
 - `configs/fold_manifest.yaml` 里的日期。
 - `configs/locks/` 下的任何文件。只能新增，不能修改或删除。
 - `configs/selection_rule.yaml`（选择规则在看分数之前就已提交）。
+- `configs/m8_final.yaml`（M8 的目标周、彩排周和 G1–G3 的判定标准，在读取任何 T 周 label 之前提交）。
+- M8 正式运行开始之后：`results/t_phase*.csv`、`results/m8_*.csv` 里已有的行，以及 M8 的代码逻辑（`src/hmrec/final/`、`eval/final_eval.py`、`ranker/final_window.py`、`scripts/m8_*.py`）。正式运行只做一次；发现 bug 只记录、不修复，停下由用户决定。
 - `docs/decisions.md` 的历史记录。只能追加。
 
 需要改动以上内容时，停下来说明原因，等用户确认。
 
+**M8（T1–T4 的最终评估）的规则**（细节见 proposal §10.1）：
+
+- T 周的 label 只能通过 `src/hmrec/eval/final_eval.py` 读取，并且要带 `src/hmrec/final/gate.py` 签发的 `FormalRunPermit`。M6、M7 的入口对 T fold 的保护保持不变。不要在别处构造许可，也不要绕过它直接打开 T 周的 label 文件。
+- 正式运行之前必须先彩排（`scripts/m8_final_eval.py --stage rehearsal`，目标周 V4，不读 T label），结果要与 M7 的记录逐位相同。彩排没有通过、彩排之后改过代码或配置、或者工作区不干净，正式运行都会被代码拒绝。**不要为了让正式运行开始而修改或删除彩排的记录。**
+- 正式运行（`--stage formal`）只做一次。它中断后可以用同一条命令续跑；代码或配置变了就不能续跑。
+- "HPO 代码路径里不能出现 T fold"在 M8 的含义：做调参和选择的模块（`hpo/v_phase.py`、`hpo/v_lock.py`、`hpo/speed_test.py`、`hpo/runner.py`、`hpo/d_phase.py`）里不能出现 T fold，M8 也不能 import 它们。`hpo/v_trial.py` 里与预测哪一周无关的步骤（训练一个模型、打分、保存）和 `hpo/v_records.py` 的结果表读写，M7 和 M8 共用；它们不做 fold 检查，也不做选择，fold 检查在各自的入口。
+
 **M5 之后，六路 recall 的配置只能通过 `src/hmrec/recall/locked.py` 获取**（它只读 `configs/locks/`；锁定文件的解析在 `src/hmrec/locks.py`）。M6 及之后的代码不能再读 `configs/recall/` 的默认值，也不能从 `results/d_phase.csv` 重放选择来得到配置。R6 的模型文件必须通过这个入口加载：它在加载权重之前核对 sha256，不一致就报错。`tests/unit/test_locked.py` 会扫描 M6–M8 的脚本和 `fusion/`、`features/`、`ranker/`。
 
-**M7 之后，Ranker 的配置只能通过 `src/hmrec/ranker/locked.py` 的 `load_locked_ranker` 获取**（它读 `configs/locks/ranker.lock.yaml`；`configs/ranker.yaml` 只提供两个只影响内存和日志的值）。M8 的代码不能再读 `configs/ranker.yaml` 的调参默认值和固定参数、`configs/hpo/v_phase.yaml`，也不能在 `results/v_phase*.csv` 上重放选择来得到配置（`src/hmrec/hpo/v_lock.py` 只是给测试用的核对，M8 不调用）。这个入口在返回配置之前核对：锁定文件里的设置算出的 `config_id` 与记录一致、引用的 features / channels / twotower 锁定文件的 sha256 一致、本进程的 LightGBM 版本、libomp 版本和 `num_threads` 与记录一致；不一致就报错。`tests/unit/test_ranker_locked.py` 会扫描 M8 的代码，**新写的 M8 模块要加进它的 `M8_FILES`**。
+**M7 之后，Ranker 的配置只能通过 `src/hmrec/ranker/locked.py` 的 `load_locked_ranker` 获取**（它读 `configs/locks/ranker.lock.yaml`；`configs/ranker.yaml` 只提供两个只影响内存和日志的值）。M8 的代码不能再读 `configs/ranker.yaml` 的调参默认值和固定参数、`configs/hpo/v_phase.yaml`，也不能在 `results/v_phase*.csv` 上重放选择来得到配置（`src/hmrec/hpo/v_lock.py` 只是给测试用的核对，M8 不调用）。这个入口在返回配置之前核对：锁定文件里的设置算出的 `config_id` 与记录一致、引用的 features / channels / twotower 锁定文件的 sha256 一致、本进程的 LightGBM 版本、libomp 版本和 `num_threads` 与记录一致；不一致就报错。`tests/unit/test_final_code_rules.py` 会扫描 M8 的代码，**新写的 M8 模块要加进它的 `M8_FILES`**。
 
 ### 3.4 其他禁止事项
 
@@ -108,7 +117,7 @@ H&M 个性化时尚推荐（Kaggle H&M 数据集）。目标：预测每个用�
 完整目录见 `docs/proposal.md` §14。关键规则：
 
 ```
-scripts/  →  src/hmrec/{recall, fusion, features, ranker, hpo, pipeline}  →  src/hmrec/{data, eval, vectors, locks, csv_records, run_records, feature_files, git_state}  →  config / paths
+scripts/  →  src/hmrec/{recall, fusion, features, ranker, hpo, final, pipeline}  →  src/hmrec/{data, eval, vectors, locks, csv_records, run_records, feature_files, git_state}  →  config / paths
 ```
 
 - 上层可以 import 下层，**下层不能 import 上层**。
@@ -119,7 +128,8 @@ scripts/  →  src/hmrec/{recall, fusion, features, ranker, hpo, pipeline}  → 
 - `src/hmrec/csv_records.py`（只追加、表头固定的结果表 `results/*.csv` 的读写）和 `src/hmrec/run_records.py`（每个进程一行的运行记录：耗时、采样峰值、真实峰值）也属于底层，只依赖标准库和 `memory.py`；任何上层模块和 `eval/` 都可以 import 它们。
 - `src/hmrec/feature_files.py`（每个 fold 特征文件的记录 `features.json` 和核对函数）也属于底层，只依赖标准库、polars 和 `locks.py`：`features/` 写记录，`ranker/` 在读取特征之前调用 `verify_feature_files` 核对，两者互不 import。
 - `src/hmrec/git_state.py`（读取 HEAD commit 和工作区是否有未提交的改动）也属于底层，只依赖标准库和 `logging_utils.py`。`hpo/runner.py` 仍然转出这两个函数，M2–M6 的脚本不用改。
-- **M7 的代码不能 import torch**：`ranker/`、`hpo/v_records.py`、`hpo/v_trial.py`、`hpo/v_phase.py`、`hpo/speed_test.py`、`eval/ranker_eval.py` 和 `scripts/m7_*.py`，不能 import torch，也不能 import 会加载 torch 的模块（`recall/`、`hpo/runner.py`、`hpo/d_phase.py` 等）。原因：torch 和 LightGBM 各自加载一份 OpenMP 运行库（libomp），两份在同一个进程里会直接退出（`OMP: Error #15`）、卡死或段错误。`tests/unit/test_m7_code_rules.py` 检查这一条。
+- `src/hmrec/final/`（M8 的最终评估：闸门、trial、彩排比较、recall 监控、G1–G3 判定、驱动）属于上层，与 `hpo/` 同层。它可以 import `eval/`、`ranker/`、`fusion/`、底层模块，以及 `hpo/v_records.py` 和 `hpo/v_trial.py`（见 §3.3 的 M8 规则）；不能 import `recall/`、torch 和做选择的 `hpo` 模块。M6、M7 的代码不能 import `final/`、`eval/final_eval.py`、`ranker/final_window.py`。`tests/unit/test_final_code_rules.py` 检查这些，**新写的 M8 模块要加进它的 `M8_FILES`**。
+- **M7 的代码不能 import torch**（M8 的代码同样不能）：`ranker/`、`hpo/v_records.py`、`hpo/v_trial.py`、`hpo/v_phase.py`、`hpo/speed_test.py`、`eval/ranker_eval.py` 和 `scripts/m7_*.py`，不能 import torch，也不能 import 会加载 torch 的模块（`recall/`、`hpo/runner.py`、`hpo/d_phase.py` 等）。原因：torch 和 LightGBM 各自加载一份 OpenMP 运行库（libomp），两份在同一个进程里会直接退出（`OMP: Error #15`）、卡死或段错误。`tests/unit/test_m7_code_rules.py` 检查这一条。
 - `src/hmrec/pipeline.py`（把一个 fold 的各步各用一个独立进程依次运行，并写每个 fold 的摘要）属于上层，与 `recall/`、`hpo/` 同层：它可以 import `eval/` 和底层模块，但 `recall/`、`features/`、`ranker/` 不能 import 它。
 - `scripts/` 只做三件事：解析命令行参数、调用 `src/` 里的函数、写结果。**不在 scripts 里写业务逻辑。**
 - `notebooks/` 只做探索和画图，`src/` 不能依赖 notebook 中的任何代码。
@@ -223,7 +233,7 @@ history = transactions.filter(pl.col("t_dat") < anchor_date)
   4. **负采样测试**：所有正样本都保留，每个 query 的负样本数正确，固定 seed 时结果可复现。
   5. **集成测试**：用小数据把一个 fold 从候选生成跑到评估。
 - 测试要快：整个 `make test-fast` 应在 1 分钟内完成。
-- **测试分两个进程运行**（原因同 §5 的"M7 的代码不能 import torch"）：`uv run pytest tests/unit` 只运行 torch 一侧的测试，`uv run pytest tests/unit --lightgbm-side` 只运行 LightGBM 一侧的测试（文件名以 `test_ranker_`、`test_v_`、`test_speed_test`、`test_m7_` 开头，见 `tests/conftest.py`）。`make test-fast` 和 `make test` 两个都跑。新写的测试如果要训练 LightGBM 模型，文件名必须用这些前缀之一，并且不能 import torch；一个测试进程里同时出现 torch 和 lightgbm 时，`tests/conftest.py` 会让这次运行失败。
+- **测试分两个进程运行**（原因同 §5 的"M7 的代码不能 import torch"）：`uv run pytest tests/unit` 只运行 torch 一侧的测试，`uv run pytest tests/unit --lightgbm-side` 只运行 LightGBM 一侧的测试（文件名以 `test_ranker_`、`test_v_`、`test_speed_test`、`test_m7_`、`test_final_` 开头，见 `tests/conftest.py`）。`make test-fast` 和 `make test` 两个都跑。新写的测试如果要训练 LightGBM 模型，文件名必须用这些前缀之一，并且不能 import torch；一个测试进程里同时出现 torch 和 lightgbm 时，`tests/conftest.py` 会让这次运行失败。
 
 ---
 

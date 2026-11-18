@@ -831,3 +831,34 @@
 - **顺带的代码移动**（不改变任何结果）：`model_config` 和 `ranker_config_id` 从 `hpo/v_trial.py` 移到 `ranker/identity.py`，因为锁定入口在 `ranker/`，不能 import `hpo/`；`config.py` 的 `_parse_lightgbm_params` 改为公开的 `parse_lightgbm_params`，供 `locks.py` 解析锁定文件里的 LightGBM 参数。
 - **没有做的**：没有运行任何数据任务；T1–T4 的任何文件都没有读；M8 的代码还没有写（`scripts/m8_final_eval.py` 仍是空壳）。建议的 tag：`lock-ranker-v1`（由用户打）。
 - **proposal 已同步**：§9.6（锁定的内容、入口和核对）、§9.7（V 阶段的结果）、§11（M7 完成）、§14（目录和分层）。AGENTS.md §3.3、§5 写明 Ranker 配置的唯一入口。
+
+## 2026-11-18 M8（T1–T4 的最终评估）：只运行一次；彩排；判定标准；预先登记的次要分析（写于读取任何 T 周 label 之前）
+
+- **时间点**：这条记录、`configs/m8_final.yaml` 和 M8 的全部代码写于任何 T 周的 label 被读取之前。写的过程中只用了小数据（测试里随机生成的 9 个 fold，每个 40 个 query），没有在全量数据上运行任何东西，也没有打开 `artifacts/labels/` 下任何 T 周的文件。
+- **最重要的规则（用户）**：T1–T4 的 label 至今没有被读取过。M8 的正式运行只做一次，看到 T 的结果之后不再修改任何配置、代码逻辑或选择。顺序：写代码和测试（只用小数据）→ 用户 commit → 彩排 → 正式运行。发现 bug 只记录、不修复，停下由用户决定。
+- **配置和输入**：
+  1. Ranker 的配置只通过 `ranker/locked.py` 的 `load_locked_ranker` 取得；候选和特征用 M6 冻结的文件，读取前调用 `verify_feature_files`。
+  2. 训练窗口：T1 ← V1–V4，T2 ← V2、V3、V4、T1，T3 ← V3、V4、T1、T2，T4 ← V4、T1、T2、T3；每次从头训练到锁定的 500 棵。
+  3. 采样：V1–V3 复用 M7 的 r = 40 采样文件并核对 sha256；V4、T1、T2、T3 新采样，方法、seed、比例来自锁定文件。
+  4. T 周的 label 只允许 M8 的入口读取（`eval/final_eval.py`，要带许可）；M6、M7 对 T fold 的保护没有改。
+- **彩排**（不读任何 T 周的 label）：用 M8 的代码路径和锁定配置把 V4 当作目标周跑一遍（训练周 F4、V1、V2、V3）。500 棵时的 MAP@12、Recall@12、NDCG@12 必须与 `results/v_phase_metrics.csv` 中选中配置在 V4 的记录逐位相同，模型的前 500 棵也要与 M7 的模型相同。彩排不通过，正式运行不能开始，用代码强制（`final/gate.py`）。
+- **彩排里 agent 加的比较**（用户要求的是上面两项；下面几项用的是同一条代码路径上的其他部分，任何一项不同都算彩排不通过）：100–400 棵时的三个指标和 query 数；RRF baseline 的指标；去掉 R6 的系统的指标、模型前 500 棵和 Top-12；完整系统保存的 Top-12（500 棵）与 M7 保存的逐行相同；V4 的 recall 监控行与 M6 的记录相同；彩排的 trial 是用当前代码、在干净的工作区里跑的。原因：正式运行里 G2 靠监控的 union recall 判定，G3 靠 baseline 判定，次要分析靠去掉 R6 的路径，这三条路径也应当先在 V4 上被证明与 M7 / M6 一致。
+- **正式运行的内容**：(1) 主结果：T1–T4 每周和合并（query-weighted）的 MAP@12、Recall@12、NDCG@12，以及四周等权平均；(2) RRF baseline 的同样指标；(3) recall 层在 T 周的监控（M6 留到现在的）：每一路的 Recall@quota、六路 union recall、每个 query 的候选数、没有任何一路命中的 query 比例；(4) 预先登记的次要分析：T 上去掉 R6 的 ablation，做法与 M7 相同，只用于报告，不影响任何结论的判定；(5) 判定标准见下；(6) 每个 trial 一个独立进程，记录耗时、真实内存峰值、LightGBM 和 libomp 的版本、git commit，结果写入 `results/t_phase.csv`、`results/t_phase_metrics.csv`，保存每周的 Top-12；(7) 正式运行开始时，在读任何 T label 之前，把"T 周 label 首次读取"的时间和 git commit 记入 `results/t_phase_label_access.csv`。
+- **判定标准**（写在 `configs/m8_final.yaml`，运行后不能改）：
+  - **G1**：T1–T4 合并 MAP@12 ≥ 0.032；
+  - **G2**：T1–T4 **每一周**的六路 union recall ≥ 24%；
+  - **G3**：LambdaMART 的 MAP@12 在 4 周中至少 3 周**严格高于** RRF baseline。
+  判定由 `final/goals.py` 的纯函数完成，结论由代码写入 `results/t_phase_goals.csv`，只写一次；表里已有结论时，再算出不同的结论会报错，不会追加第二组。
+- **闸门怎么强制"彩排通过才能正式运行"和"只运行一次"**（`final/gate.py`）：
+  1. 最近一次彩排比较必须是 `passed`，在干净的工作区里运行，并且 HEAD 的代码和配置（`src/`、`scripts/`、`configs/`、`pyproject.toml`、`uv.lock`）与那次彩排的 commit 相同（`git diff --quiet`）。在两次运行之间提交结果表或文档不算改代码。
+  2. 驱动在启动任何一步之前写下"首次读取"的记录；每个工作进程自己再过一次闸门，没有这条记录就拒绝（所以手工启动的一步不可能成为第一个读 T label 的程序）。
+  3. 这条记录存在之后，HEAD 的代码或配置与它的 commit 不同，任何进程都拒绝。中断的正式运行可以用同一条命令续跑（已记录的步骤跳过）。
+  4. M8 的每个进程都要求工作区干净（比 M7 严格：M7 只警告并记 `git_dirty=True`）。
+  代码做不到的：不能阻止有人手工删除记录或绕开入口直接读文件。这一条写进了 AGENTS.md §3.3。
+- **T 周只在 500 棵处评估**（agent 的做法，已在汇报里标出）：彩排评估 100–500 棵的每个检查点，为了与 M7 比较；正式运行只评估并保存锁定的 500 棵。T 周在其他棵数上的指标用不到，不算出来，事后也就没有可供挑选的东西。500 棵时的分数与是否保留其他检查点无关。
+- **与 proposal §10 原文的冲突**：原文要求报告 Recall@12/20 和 NDCG@12/20；用户这次的要求只列了 @12 的三个指标。锁定文件规定每个 query 只保留 Top-12，算不出 @20。按用户这次的要求实现，§10 已改为只报告 @12，并在 §10.1 写明这一处不同；汇报里向用户指出，由用户在 commit 之前确认。
+- **"HPO 代码路径里不能出现 T fold"在 M8 的落实**（需要用户确认，已在汇报里标出）：M8 没有 import 任何做调参和选择的模块（`hpo/v_phase.py`、`hpo/v_lock.py`、`hpo/speed_test.py`、`hpo/runner.py`、`hpo/d_phase.py`），测试会扫描。但它复用了 `hpo/v_trial.py` 里与预测哪一周无关的四个步骤（Dataset 的计划、训练、打分和保存、RRF baseline 的计算）和 `hpo/v_records.py` 的结果表读写，T fold 会经过这些函数。这样做是为了让彩排和正式运行走的就是 M7 走过的那几个函数；这些函数不做 fold 检查，也不做任何选择。为此 `hpo/v_trial.py` 做了不改变行为的拆分：`plan_dataset` 拆出 `plan_dataset_for_folds`，`_train` 改名为 `train_planned_model`，`_score_and_save` 改为接收评估器的 `score_and_save`，`rrf_baseline_row` 拆出 `rrf_baseline_metric_row`；M7 的入口照旧先做自己的检查再调用它们，M7 的全部测试通过。另一种做法是把这些通用函数移出 `hpo/` 包，改动面更大，没有做。
+- **其他改动**：`eval/monitor.py` 把计算监控行的部分拆成 `build_monitor_rows`（不做阶段检查），M6 的 `monitor_rows` 照旧先检查再调用它；`git_state.py` 新增 `code_changed_since`；`hpo/v_records.py` 的 `results_files` 认识 `t_phase` 和 `m8_rehearsal` 两个新的区域（M7 的脚本不接受它们）；`scripts/checks/check_ranker_eval.py` 可以核对 T 周的 trial，读 T label 也要先过闸门。
+- **测试**（只用小数据）：训练窗口的四种情况；T 周 label 只能从 M8 入口读取（没有许可时文件根本不会被打开；M6、M7 的入口仍然拒绝 T fold）；彩排不通过、没有彩排、彩排之后代码变了、工作区不干净时，正式运行被拒绝且没有任何一步被启动；复用的采样文件 sha256 不一致时报错、Dataset 不会被构建；G1–G3 判定函数的手算例子（恰好等于阈值、差一个浮点数、G2 平均达标但有一周不达标、G3 相等不算）；M8 的模块进了"只能通过锁定入口取配置"的扫描；一个小数据的集成测试走完彩排和正式运行，并确认再次运行不启动任何一步、不改任何结果表。小数据的工作区里，M7 的参照结果是用 M7 自己的代码生成的。
+- **还没有做的**：彩排和正式运行都还没有运行；最终报告不在这一步写。
+- **proposal 已同步**：§10（新增 §10.1）、§11（M8 的状态）、§14（目录、分层、交接的数据）。AGENTS.md §3.3、§5、§7 写明 M8 的规则。
