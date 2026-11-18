@@ -1,17 +1,67 @@
 # hmrec — H&M personalized fashion recommendation
 
-Predict the 12 articles each customer buys next week (Kaggle H&M dataset), main metric MAP@12.
+**Full write-up: [`docs/final_report.md`](docs/final_report.md)** (in Chinese). This page is its
+summary.
+
+## Summary
+
+**System.** Predict the 12 articles each customer buys next week (Kaggle H&M dataset,
+transactions from 2018-09-20 to 2020-09-22); the main metric is MAP@12. Two stages: six recall
+channels each return candidates, which are merged into one row per (customer, article); then
+71 features and one LightGBM LambdaMART model rank them, and the top 12 are kept.
 
 ```
 6 recall channels (R1 Popularity, R2 Repurchase, R3 Sibling, R4 ItemCF, R5 WALS, R6 Two-Tower)
   → union + dedup (one row per (query, article))
-  → wide feature table
+  → wide feature table (71 features)
   → LightGBM LambdaMART
   → Top-12
 ```
 
+**Evaluation.** The last 16 weeks of the data are 16 folds in four phases, and each phase selects
+only what it is meant to select:
+
+| Phase | Weeks | What happens |
+|---|---|---|
+| D | D1–D4 | the configuration of the six recall channels is selected, then locked |
+| F | F1–F4 | candidates are generated with the locked configuration; training data of the Ranker only, nothing is selected |
+| V | V1–V4 | the configuration of the Ranker is selected, then locked |
+| T | T1–T4 | final evaluation with everything locked, **run once** |
+
+Every week is predicted from data before its first day (the anchor) only. The labels of the T
+weeks were never read before the final evaluation; the code enforces this.
+
+**Final result** (T1–T4, 2020-08-26 to 2020-09-22, 297,078 queries):
+
+| | T1 | T2 | T3 | T4 | 4 weeks pooled |
+|---|---|---|---|---|---|
+| **LambdaMART MAP@12** | 0.034960 | 0.040270 | 0.039673 | 0.042435 | **0.039194** |
+| RRF baseline MAP@12 (no trained model) | 0.019151 | 0.021471 | 0.021848 | 0.022411 | 0.021154 |
+| Union recall of the six channels | 27.88% | 29.08% | 29.09% | 30.69% | — |
+
+Sources: `results/t_phase_metrics.csv`, `results/t_phase_recall.csv`. "Pooled" averages over all
+queries of the 4 weeks. The 95% interval of the pooled MAP@12 is 0.038672–0.039721
+(`results/t_diag_bootstrap.csv`); it covers the sampling of customers only.
+
+**The three goals** (the criteria were committed in `configs/m8_final.yaml` before any T label was
+read; the verdict was written by code to `results/t_phase_goals.csv`):
+
+| Goal | Criterion | Result | Verdict |
+|---|---|---|---|
+| G1 | pooled MAP@12 on T1–T4 ≥ 0.032 | 0.039194 | **met** |
+| G2 | union recall of the six channels ≥ 24% on every one of T1–T4 | lowest week (T1) 27.88% | **met** |
+| G3 | LambdaMART MAP@12 strictly above the RRF baseline on at least 3 of the 4 weeks | above on all 4 | **met** |
+
+These numbers come from one run with one seed, offline only, on four weeks of late summer; T is
+19.8% above V. The report explains what is and is not known about that (§5) and lists the
+deviations and limits (§7).
+
+## Documents
+
 The only design reference is [`docs/proposal.md`](docs/proposal.md). Design changes are logged in
-[`docs/decisions.md`](docs/decisions.md). Rules for coding agents are in [`AGENTS.md`](AGENTS.md).
+[`docs/decisions.md`](docs/decisions.md). Results and their limits are in
+[`docs/final_report.md`](docs/final_report.md). Rules for coding agents are in
+[`AGENTS.md`](AGENTS.md).
 
 ## Install
 
