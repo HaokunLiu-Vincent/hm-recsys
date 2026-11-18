@@ -1,0 +1,2 @@
+event,recorded_at,purpose,script,git_commit,git_dirty,formal_run_commit
+t_labels_read_for_diagnostics,2026-11-19T01:55:42,descriptive diagnostics,scripts/m8_diagnostics.py,cd076871a48cb334efd7b1d7ebd8dad4ab8fc9ab,False,18d957fa835b72dfc5240a235cfcb420937deb0a
