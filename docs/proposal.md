@@ -996,7 +996,7 @@ Feature importance（最终配置的 4 个模型，前 500 棵，gain 占比的�
 - Ranker 的配置只通过 `ranker/locked.py` 的 `load_locked_ranker` 取得（§9.6）；候选和特征是 M6 冻结的文件，读取前调用 `verify_feature_files`。
 - 训练窗口（`ranker/final_window.py`）：T1 ← V1–V4，T2 ← V2、V3、V4、T1，T3 ← V3、V4、T1、T2，T4 ← V4、T1、T2、T3；每次从头训练到锁定的 500 棵。所以 T1–T3 的 label 也是后面几周的训练 label；每个训练周都在预测周开始之前结束。
 - 采样：V1–V3 复用 M7 的 r = 40 采样文件，**不重新采样**；正式运行逐个核对它们的 sha256 与"通过的那次彩排训练时用的文件"一致（记在 `results/m8_rehearsal_check.csv`）。V4、T1、T2、T3 新采样，方法、seed 和比例来自锁定文件。T4 不训练任何模型，不采样。
-- **T 周 label 的唯一入口**是 `eval/final_eval.py`：评估用 `load_final_evaluator`，采样用 `final_training_label_phases`，两者都要求一个 `FormalRunPermit`；许可只由 `final/gate.py` 签发（见下）。
+- **T 周 label 的唯一入口**（M8 之后的描述性诊断另有第二个入口，见 §10.2）是 `eval/final_eval.py`：评估用 `load_final_evaluator`，采样用 `final_training_label_phases`，两者都要求一个 `FormalRunPermit`；许可只由 `final/gate.py` 签发（见下）。
 
 **彩排**（`scripts/m8_final_eval.py --stage rehearsal`，不读任何 T 周的 label）：用 M8 的代码路径和锁定配置，把 V4 当作目标周跑一遍（训练周 F4、V1、V2、V3，用 M7 的窗口函数，所以够不到 T fold）。结果必须与 M7、M6 的记录**逐位相同**（`final/rehearsal.py`）：
 
@@ -1033,6 +1033,37 @@ Feature importance（最终配置的 4 个模型，前 500 棵，gain 占比的�
 **独立核对**：`scripts/checks/check_ranker_eval.py --area t_phase` 用朴素循环从保存的 Top-12 重算一个 T 周 trial 的三个指标。它读 T 周 label 也要先过闸门，所以不可能成为第一个读 T label 的程序。
 
 ---
+
+### 10.2 M8 之后的描述性诊断（2026-11-19）
+
+T 上的结果高于 V（§11），原因没有查。这一节的诊断只是**描述**已经记录的结果，帮助理解这个差别。它不训练任何模型，不重跑 M8，不改任何配置和锁定文件，也**不用来选择或修改任何东西**；之后的任何改动仍然只能在 V1–V4 上比较和选择。
+
+**代码**：`scripts/m8_diagnostics.py`、`src/hmrec/diagnostics/`，配置在 `configs/m8_diagnostics.yaml`。结果写到 `results/t_diag_*.csv`（只追加；每一行带 `git_commit` 和 `run_started_at`）。`results/t_phase*.csv` 和 `results/m8_*.csv` 只读不写。
+
+**读 T label 的第二个入口**。M8 的入口（`eval/final_eval.py` + `final/gate.py`）要求代码与正式运行的 commit 完全相同，诊断代码是新代码，所以过不了那道闸门，这是它应有的行为。诊断用另一个入口 `eval/diagnostic_labels.py`：读 T 周的 label 要带 `DiagnosticAccess`，只由 `diagnostics/access.py` 签发，条件是：
+
+1. 正式运行已经结束：`results/t_phase_goals.csv` 里有 G1–G3 三条判定（再读 label 改变不了结论）。
+2. 工作区干净。
+3. 正式运行那个 commit 时已有的 M8 文件（`src/hmrec/final/`、`eval/final_eval.py`、`ranker/final_window.py`、`scripts/m8_final_eval.py`、`scripts/m8_step.py`）和 `configs/` 下已有文件的内容没有变；允许新增文件。
+4. 在打开任何 T label 文件**之前**，先在 `results/t_diag_label_access.csv` 追加一行：时间、git commit、用途（`descriptive diagnostics`）、脚本名。每运行一次一行。
+
+D、F、V 周的 label 之前已经读过很多次，不需要这个对象。只有诊断代码能用这个入口，诊断代码不 import 训练、采样、打分和 M8 的 trial 代码（`tests/unit/test_diag_code_rules.py`）。
+
+**一个后果**：诊断代码提交之后，`scripts/checks/check_ranker_eval.py --area t_phase` 在当前的 HEAD 上不能再运行（它要过 M8 的闸门）。需要重跑时先切回 tag `m8-run-v1`。
+
+**四张表**：
+
+| 表 | 文件 | 范围 | 内容 | 数据来源 |
+|---|---|---|---|---|
+| A 分解 | `t_diag_decomposition.csv` | V1–T4，每周一行 | union recall、Recall@12、Recall@12 ÷ union recall、MAP@12；LambdaMART 和 RRF baseline 各一组 | 只用结果表，不读 label |
+| B 集中度 | `t_diag_concentration.csv` | D1–T4，每周一行 | 购买量最高的 100 个、1000 个商品各占该周购买的比例；首次销售在 `[anchor − 28, anchor)` 的商品、anchor 之前没有任何销售的商品，各自的个数和占该周购买的比例 | label 文件；anchor 之前的交易（通过 `data/asof.py`） |
+| C 分组 | `t_diag_query_groups.csv` | V1–T4，每周三行 | 按 anchor 之前的历史把 query 分成"无历史 / 最近 30 天内买过 / 其他"，每组的 query 数和占比、union recall、两个系统的 MAP@12 | 宽表、候选文件、保存的逐 query 指标、label |
+| D 区间 | `t_diag_bootstrap.csv` | T 合并、V 合并，各三行 | 合并 MAP@12 的 95% 区间（LambdaMART、RRF baseline、两者之差） | C 的逐 query 值 |
+
+- **B 的"购买"**是 label 文件里去重后的（顾客, 商品）对，不是购买行。"anchor 当天及之后首次销售的商品"定义为：出现在该周的 label 文件里，而 `t_dat < anchor` 的交易里没有它；不读 anchor 之后的交易表。这只是对 label 周本身的统计，**不进入任何模型或特征**。
+- **C 的分组**用宽表里已保存的 `user_days_since_last_purchase`（每个 query 一个值）：NaN 是"无历史"，1–30 是"最近 30 天内买过"（昨天是 1，anchor 当天不算历史），其余是"其他"。
+- **重算和核对**：LambdaMART 的逐 query AP 是保存下来的；RRF baseline 的逐 query AP 和逐 query 的 union recall 当时没有保存，用冻结的宽表、候选文件和 label 重新算（用项目自己的函数）。每一周重算出的平均值必须与结果表里的记录相同（容差 1e-12，`hpo/selection.py` 的 `SCORE_EQUALITY_TOLERANCE`），三组的 query 数之和必须等于记录的 query 数；任何一项不符就报错，四张表都不写。
+- **D 的做法（按顾客的 cluster bootstrap）**：把一个阶段的 4 周合在一起，以顾客为单位有放回地抽；被抽中的顾客带上他在这 4 周里的全部 query；合并 MAP@12 = 被抽中 query 的 AP 之和 ÷ query 数。1000 次，seed 写在配置里，取 2.5% 和 97.5% 分位。"LambdaMART 减 baseline"用同一批抽样（配对）。T 和 V 各做一次。**这个区间只反映顾客抽样的不确定性，不反映周与周之间的差别**：每一次重抽里都是同样的 4 周。
 
 ## 11. 实施顺序（Milestones）
 
@@ -1108,6 +1139,7 @@ hm-recsys/
 │   ├── m4_union_check.yaml      # M4：union recall 目标、R3 活跃池规则的阈值（预先登记）、人工选择
 │   ├── m6_candidates.yaml       # M6：监控和停止条件（前 4 周对比、fine-tune loss 上限）；不影响任何候选
 │   ├── m8_final.yaml            # M8：目标周、彩排周、G1–G3 的判定标准（读取 T label 之前提交，之后不能改）
+│   ├── m8_diagnostics.yaml      # M8 之后的描述性诊断：四张表各覆盖哪些阶段、Top-N、天数、bootstrap 的次数和 seed
 │   ├── recall/                  # 每路的默认配置
 │   │   ├── r1_popularity.yaml
 │   │   ├── r2_repurchase.yaml
@@ -1205,6 +1237,7 @@ hm-recsys/
 │   │   ├── metrics.py           # Recall@K、AP@12、NDCG@K、union recall
 │   │   ├── ranker_eval.py       # M7：只给 V 周的 label；Top-12 表的 MAP / Recall / NDCG
 │   │   ├── final_eval.py        # M8：T 周 label 的唯一入口，必须带 FormalRunPermit；彩排只给配置的 V 周
+│   │   ├── diagnostic_labels.py # M8 之后的描述性诊断读 label 的入口；T 周必须带 DiagnosticAccess（§10.2）
 │   │   ├── monitor.py           # M6 监控：候选数（不需要 label）；F、V 周的 recall / union recall；拒绝读 T 周的 label
 │   │   └── report.py            # 汇总每周 / 4 周结果，写 results/*.csv
 │   │
@@ -1225,6 +1258,7 @@ hm-recsys/
 │       └── v_lock.py            # M7：在结果表上重放选择，逐项核对 ranker.lock.yaml（只是核对，不是配置的来源）
 │   │
 │   ├── final/                   # M8：最终评估。不 import torch、recall/、hpo 的选择模块
+│   ├── diagnostics/             # M8 之后的描述性诊断（§10.2）：access（记录并签发）、四张表的计算、inputs（读文件）、run（驱动）
 │   │   ├── context.py           # 配置和锁定的 Ranker；rehearsal / formal 两种模式
 │   │   ├── gate.py              # 闸门：彩排通过才能正式运行；记录"T label 首次读取"；只运行一次；签发 FormalRunPermit
 │   │   ├── trial.py             # 复用 / 新采样、Dataset、一个 trial、RRF baseline（两种模式同一条代码路径）
@@ -1258,6 +1292,7 @@ hm-recsys/
 │   ├── m7_ranker_hpo.py            # --stage baseline / grid / minus_r6 / importance / report
 │   ├── m8_final_eval.py            # --stage rehearsal / formal / report
 │   └── m8_step.py                  # M8 的一步（monitor / baseline / sample / dataset / trial），一个进程
+│   （另有 m8_diagnostics.py：M8 之后的描述性诊断，不属于 M8 的运行，见 §10.2）
 │
 ├── tests/
 │   ├── conftest.py              # 测试分两个进程：torch 一侧和 LightGBM 一侧（--lightgbm-side）
@@ -1333,6 +1368,8 @@ hm-recsys/
     ├── m8_rehearsal_recall.csv       # M8 彩排的 recall 监控行
     ├── m8_rehearsal_check.csv        # M8：每次彩排与 M7 比较的结果（passed / failed）和采样文件的 sha256
     ├── m8_runs.csv                   # M8：采样、Dataset、baseline、监控各进程的耗时和真实峰值
+    ├── t_diag_label_access.csv       # 诊断：每次再读 T 周 label 的时间、git commit、用途
+    ├── t_diag_*.csv                  # 诊断的四张表：decomposition / concentration / query_groups / bootstrap
     ├── t_phase_label_access.csv      # M8：T 周 label 首次读取的时间和 git commit
     ├── t_phase.csv                   # M8：T 周每个 trial 一行
     ├── t_phase_metrics.csv           # M8：每个 (系统, T 周) 的指标
@@ -1343,11 +1380,12 @@ hm-recsys/
 ### 14.1 分层规则
 
 ```
-scripts/  →  src/hmrec/{recall, fusion, features, ranker, hpo, final, pipeline}  →  src/hmrec/{data, eval, vectors, locks, csv_records, run_records, feature_files, git_state}  →  config / paths
+scripts/  →  src/hmrec/{recall, fusion, features, ranker, hpo, final, diagnostics, pipeline}  →  src/hmrec/{data, eval, vectors, locks, csv_records, run_records, feature_files, git_state}  →  config / paths
 ```
 
 - 上层可以调用下层，**下层不能 import 上层**。例如 `data/` 不能 import `recall/`。
 - `final/`（M8）与 `hpo/` 同层。它可以 import `eval/`、`ranker/`、`fusion/` 和底层模块，以及 `hpo/v_records.py`（结果表的读写）和 `hpo/v_trial.py` 里**与预测哪一周无关**的步骤（`plan_dataset_for_folds`、`train_planned_model`、`score_and_save`、`rrf_baseline_metric_row`：训练周或评估器由调用方传入，自己不做任何 fold 检查，也不做任何选择）。它不能 import 做调参和选择的模块（`hpo/v_phase.py`、`hpo/v_lock.py`、`hpo/speed_test.py`、`hpo/runner.py`、`hpo/d_phase.py`）、`recall/` 和 torch。反过来，M6、M7 的代码不 import `final/`、`eval/final_eval.py`、`ranker/final_window.py`（`tests/unit/test_final_code_rules.py` 检查）。
+- `diagnostics/`（M8 之后的描述性诊断，§10.2）也与 `hpo/` 同层。它可以 import `eval/`、`fusion/`、`data/`、底层模块、`hpo/v_records.py`、`hpo/selection.py`（容差常数）、`ranker/locked.py`、`ranker/runtime.py`、`ranker/ablation.py` 和 `final/goals.py`（判定表的列名）；不能 import 训练、采样、打分的代码、`final/` 的其他模块、`eval/final_eval.py`、`recall/`、`features/` 和 torch。其他代码不 import 它（`tests/unit/test_diag_code_rules.py` 检查）。
 - `recall/`、`features/`、`ranker/` 之间互不 import，通过 `artifacts/` 里的文件交接。
 - `fusion/` 不在上一条的限制里：`features/` 和 `ranker/` 都可以 import `fusion/`，`fusion/` 不 import 这三者。宽表、−R6 的重算和 RRF baseline 因此用同一组表达式。
 - `git_state.py`（HEAD commit、工作区是否干净）属于底层，只依赖标准库和 `logging_utils.py`。
@@ -1376,7 +1414,7 @@ scripts/  →  src/hmrec/{recall, fusion, features, ranker, hpo, final, pipeline
 | `ranker/dataset.py` | `artifacts/lgb_datasets/{experiment}/{目标周}_r{r}/train.bin`、`dataset.json` | 4 个训练周的分箱数据、label、group；`dataset.json` 记录 4 个采样文件的 sha256 和分箱参数 | `hpo/v_trial.py`（先核对，再训练） |
 | `hpo/v_trial.py`（用 `ranker/predict.py`） | `artifacts/predictions/{area}/{experiment}/{config_id}/{fold}.parquet`、`{fold}_per_query.parquet` | Top-12：`num_trees, query_id, rank, article_idx, score`；每个 query 的指标：`query_id, fold, map@12, recall@12, ndcg@12, num_trees` | `scripts/checks/check_ranker_eval.py`、分析 |
 
-Label 只在 `eval/` 和 `ranker/sampling.py` 中读取，**recall 和特征代码永远不读 label**。T 周的 label 另有一层：只能通过 `eval/final_eval.py` 并带着 `final/gate.py` 签发的许可读取（§10.1）。
+Label 只在 `eval/` 和 `ranker/sampling.py` 中读取，**recall 和特征代码永远不读 label**。（M8 之后的描述性诊断通过 `eval/diagnostic_labels.py` 读 label，再读 T 周的 label 要先记录，见 §10.2。）T 周的 label 另有一层：只能通过 `eval/final_eval.py` 并带着 `final/gate.py` 签发的许可读取（§10.1）。
 
 ---
 

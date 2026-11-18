@@ -942,3 +942,37 @@
 - **之后的规则（用户）**：不重跑 M8，不训练任何模型，不改任何配置和锁定文件；`results/t_phase*.csv` 和 `results/m8_*.csv` 是原始记录，不修改；接下来的诊断只做描述，不用来选择或修改任何东西。T1–T4 已经用过一次，之后的任何改动只能在 V1–V4 上比较和选择（已写进 AGENTS.md §3.2）。
 - **还没有做的**：描述性诊断（`scripts/m8_diagnostics.py`）还没有写；最终报告还没有写。
 - **proposal 已同步**：§11（M8 的结果）。AGENTS.md §3.2 加了"T1–T4 已经用过一次"的规则。
+
+## 2026-11-19 M8 之后的描述性诊断：第二个读 T label 的入口；四张表的定义；区间的含义（代码已写，还没有在全量数据上运行）
+
+- **背景**：T 上的合并 MAP@12 比 V 高 19.8%，与事先的预期相反，原因没有查（上一条记录）。用户要求做描述性诊断。**规则（用户）**：不重跑 M8，不训练任何模型，不改任何配置和锁定文件；`results/t_phase*.csv` 和 `results/m8_*.csv` 是原始记录，不修改；诊断只做描述，不用来选择或修改任何东西。
+- **现有的单一入口不允许诊断读 T label**。`final/gate.py` 要求 HEAD 的代码和配置（`src/`、`scripts/`、`configs/`、`pyproject.toml`、`uv.lock`）与彩排、正式运行的 commit `18d957f` 完全相同；诊断代码是新代码，一提交就不同了。这是闸门应有的行为。按用户的要求先停下说明了方案，用户同意后才写代码。
+- **决定：加第二个入口，只给描述性诊断用；M8 的代码一行不改。**
+  - 入口：`src/hmrec/eval/diagnostic_labels.py` 的 `load_diagnostic_evaluator`。读 T 周的 label 必须带 `DiagnosticAccess`；D、F、V 周不需要（它们的 label 之前读过很多次）。
+  - `DiagnosticAccess` 只由 `src/hmrec/diagnostics/access.py` 签发，条件是：
+    1. `results/t_phase_goals.csv` 里有 G1、G2、G3 各一条判定（正式运行已结束，再读 label 改变不了结论）。
+    2. 工作区干净。
+    3. 正式运行那个 commit（从判定表的 `git_commit` 读出，`18d957f`，tag `m8-run-v1`）时已有的 M8 文件和 `configs/` 下已有文件的内容没有变；**允许新增文件**（用户的决定：诊断的配置放在新文件 `configs/m8_diagnostics.yaml`）。M8 文件指 `src/hmrec/final/`、`eval/final_eval.py`、`ranker/final_window.py`、`scripts/m8_final_eval.py`、`scripts/m8_step.py`。比较用 `git diff --name-status --no-renames`（新函数 `git_state.changed_existing_files`）：状态不是"新增"的文件都算改动，改名算删除。
+    4. 在打开任何 T label 文件之前，先在 `results/t_diag_label_access.csv` 追加一行：时间、git commit、用途、脚本名。每运行一次追加一行。
+  - `eval/final_eval.py` 不动（用户的决定）。它的说明里写着"唯一入口"，从今天起不再准确；AGENTS.md §3.2 和 proposal §10.2 写明了有第二个入口。
+  - 用测试限制（`tests/unit/test_diag_code_rules.py`）：只有诊断代码 import 这个入口；`DiagnosticAccess` 只在一处创建，而且在记录写入之后；诊断代码不 import 训练、采样、打分的代码和 M8 的 trial、闸门、`eval/final_eval.py`；只写 `results/t_diag_*.csv`；其他代码不 import 诊断代码。
+- **一个后果：诊断代码提交之后，`scripts/checks/check_ranker_eval.py --area t_phase` 在当前的 HEAD 上不能再运行。** 它读 T label 要过 M8 的闸门。需要重跑时先切回 tag `m8-run-v1`。这个核对在正式运行之后、任何代码改动之前已经跑过，结果在上一条记录里。
+- **四张表**（`scripts/m8_diagnostics.py`，配置 `configs/m8_diagnostics.yaml`，结果 `results/t_diag_*.csv`，只追加，每行带 `git_commit` 和 `run_started_at`）：
+  - **A 分解**（V1–T4 每周一行）：union recall、Recall@12、Recall@12 ÷ union recall、MAP@12，LambdaMART 和 RRF baseline 各一组。只用结果表，不读 label。
+  - **B 集中度**（D1–T4 共 16 周，每周一行）：购买量最高的 100 个、1000 个商品各占该周购买的比例；首次销售在 `[anchor − 28, anchor)` 的商品、anchor 之前没有任何销售的商品，各自的个数和占该周购买的比例。
+    - "购买"按 label 文件里去重后的（顾客, 商品）对统计，不是购买行（用户的决定）。
+    - 首次销售日从 `t_dat < anchor` 的交易算出（通过 `data/asof.py` 的 `history_window`，每一周单独读一次）。这超出了最初"只用已保存的 Top-12、候选和 label 文件"的要求：这三类文件里没有商品的首次销售日（宽表里的 `item_days_since_first_sale` 只覆盖 F–T 周的候选商品，D 周没有宽表）。用户同意。
+    - "anchor 当天及之后首次销售的商品"定义为：出现在该周的 label 文件里，而 anchor 之前的交易里没有它。不读 anchor 之后的交易表。这只是对 label 周本身的统计，不进入任何模型或特征。
+  - **C 分组**（V1–T4 每周三行）：按宽表里已保存的 `user_days_since_last_purchase` 分组：NaN 是"无历史"，1–30 是"最近 30 天内买过"，其余是"其他"。每组报告 query 数和占比、union recall、两个系统的 MAP@12。
+  - **D 区间**（T 合并、V 合并）：合并 MAP@12 的 95% 区间，LambdaMART、RRF baseline 和两者之差各一行。
+- **重算和核对**：LambdaMART 的逐 query AP 用保存下来的文件（`artifacts/predictions/.../{fold}_per_query.parquet`，取锁定的 500 棵那一组）。RRF baseline 的逐 query AP 和逐 query 的 union recall 当时没有保存，用冻结的宽表（先核对 sha256）、候选文件和 label 重新算，用的是项目自己的函数（`fusion/rrf.py` 的 `rrf_baseline`、`FoldEvaluator`）。每一周重算出的平均值必须与结果表里的记录相同（容差 1e-12，沿用 `hpo/selection.py` 的 `SCORE_EQUALITY_TOLERANCE`）；三组的 query 数之和必须等于结果表里记录的 query 数；合并值也核对。任何一项不符就报错，四张表都不写（读取记录那一行会留下，因为 label 确实读过了）。
+- **D 的做法：按顾客的 cluster bootstrap（用户的决定，替换了最初"按 query 重抽"的要求）。** 把一个阶段的 4 周合在一起，以顾客（`customer_idx`）为单位有放回地抽，抽的个数等于顾客数；被抽中的顾客带上他在这 4 周里的全部 query；合并 MAP@12 = 被抽中 query 的 AP 之和 ÷ query 数。1000 次，seed 42（写在配置里），取 2.5% 和 97.5% 分位（numpy 默认的线性插值）。"LambdaMART 减 baseline"用同一批抽样（配对）。T 和 V 各做一次，各用同一个 seed 重新开始。原因：同一个顾客在几周里的 query 不是独立的，按 query 重抽会把区间算窄。
+  - **这个区间只反映顾客抽样的不确定性，不反映周与周之间的差别。** 每一次重抽里都是同样的 4 周；它回答的是"换一批顾客，这 4 周的合并分数会差多少"，不回答"换 4 周会差多少"。所以它不能用来判断 T 与 V 的差别是不是偶然。
+- **几处实现上的选择（agent 定的，用户可以改）**：
+  - 用途一栏写的是英文 `descriptive diagnostics`（项目的记录都是英文），不是中文"描述性诊断"。
+  - 诊断的全部计算做完、所有核对通过之后才写四张表；写表之前先写读取记录。重复运行会追加新的行（用 `run_started_at` 区分），不覆盖旧的行。
+  - 四张表各覆盖哪些周，配置里写的是阶段（`[V, T]` 等），不是 fold 名。A、C、D 只允许 V 和 T（只有这两个阶段有 Ranker 的记录）。
+  - 诊断进程会加载 lightgbm（读锁定配置和结果表的模块 import 了它），但不训练也不加载任何模型。它的测试文件以 `test_diag_` 开头，归在 LightGBM 一侧（`tests/conftest.py`）。
+  - `tests/unit/test_final_code_rules.py` 里 M8 脚本的清单从 `scripts/m8_*.py` 的通配改成了两个脚本名（`m8_final_eval.py`、`m8_step.py`）。原来的通配会把 `scripts/m8_diagnostics.py` 也当成 M8 的代码，这是不对的：它是正式运行之后写的诊断，不是 M8 的一部分。M8 文件的预期清单没有变。AGENTS.md §3.3 里 M8 代码的范围也相应写成了这两个脚本名。
+- **没有做的**：没有在全量数据上运行（等用户 commit）；没有读任何 T 周的 label（`results/t_diag_label_access.csv` 还不存在）；最终报告没有写。
+- **proposal 已同步**：新增 §10.2；§10.1、§14、§14.1、§14.2 加了指向。AGENTS.md：§3.2（第二个入口、`check_ranker_eval.py` 要切回 tag）、§3.3、§5、§7。
