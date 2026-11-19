@@ -1,0 +1,44 @@
+# The rules of the DeepFM study (stage 2, M9; proposal §16.5). Committed BEFORE any
+# DeepFM result existed (docs/decisions.md 2026-11-19). Read by
+# hmrec.config.load_deepfm_study_config.
+#
+# Everything is compared and selected on V1-V4 only (AGENTS.md §3.2). The code refuses
+# T folds. One evaluation on T1-T4 is planned AFTER the configuration is locked on V:
+# run once, reported only, never used to select anything; it is not implemented yet.
+
+phase: V
+target_folds: [V1, V2, V3, V4]
+metric: map@12                 # pooled over the four folds, weighted by queries (as in M7)
+
+# Epoch rule, the same as the number-of-trees rule of M7 (hmrec.hpo.selection.choose_num_trees):
+# for each configuration, the smallest epoch whose pooled MAP@12 is within this relative
+# tolerance of the configuration's best epoch.
+epoch_tolerance: 0.01
+
+# Step 0, noise. The default configuration with these seeds. For every seed the epoch
+# rule gives its pooled MAP@12; if (max - min) / min over the seeds is above
+# max_seed_range, the study STOPS before any tuning and the user decides.
+noise:
+  seeds: [42, 43, 44]
+  max_seed_range: 0.01
+
+# Tuning, one factor at a time, with the existing selection rule of
+# configs/selection_rule.yaml (at least 1% relative gain of the pooled MAP@12 and strictly
+# better in at least 3 of the 4 weeks). Selection uses this seed only.
+selection_seed: 42
+steps:
+  # Candidates in priority order: the value closer to the default first; at equal
+  # distance the smaller value first. The first entry is the current value.
+  - {name: learning_rate, parameter: learning_rate, candidates: [0.001, 0.0003, 0.003]}
+  - {name: embedding_dim, parameter: embedding_dim, candidates: [16, 8, 32]}
+  - {name: dropout, parameter: dropout, candidates: [0.0, 0.1, 0.3]}
+
+# Ablations at the selected configuration, without separate tuning (reported only).
+ablations:
+  components: [first_order, fm, deep, full]
+  numeric_input: [standardised]
+  loss: [listwise_softmax]
+
+# Final report: the selected configuration with these seeds, and a 95% interval of
+# DeepFM minus LightGBM on V with the customer-level bootstrap of the diagnostics.
+final_seeds: [42, 43, 44]

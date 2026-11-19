@@ -1,0 +1,61 @@
+# DeepFM as an alternative ranker (stage 2, M9; proposal §16). Read by
+# hmrec.config.load_deepfm_config.
+#
+# The comparison with LightGBM is controlled: the same candidates, the same 71 locked
+# features, the same 4-week training window and the same training rows (the M7 sample
+# files with 40 negatives per positive). Only the model differs. Nothing here changes
+# the locked system; DeepFM is not a replacement for the LightGBM ranker.
+
+experiment: full               # all six channels and all 71 features
+negatives_per_positive: 40     # the M7 sample files of the locked ratio (not sampled again)
+window_weeks: 4                # training weeks before the target week, as for LightGBM
+top_k: 12
+metric: map@12                 # the main metric
+extra_metrics: [recall@12, ndcg@12]
+
+model:
+  embedding_dim: 16            # shared by the FM part and the deep part
+  hidden_units: [256, 128, 64] # the deep part: MLP with ReLU, then one output unit
+  dropout: 0.0                 # after every hidden layer
+  # first_order = bias + first-order weights only; fm = first + second order;
+  # deep = the MLP only; full = first + second order + MLP (the default).
+  components: full
+  # binned = quantile bins (one embedding per bin); standardised = the value itself,
+  # standardised and clipped, with a separate indicator for missing values (§16.3).
+  numeric_input: binned
+  embedding_init_std: 0.01     # normal(0, std) for every embedding; first-order weights start at 0
+
+binning:
+  n_bins: 32                   # quantile bins of a numeric feature; one more bin holds missing values
+
+standardise:
+  # Percentiles of the non-missing training values; a value outside them is clipped.
+  clip_low_percentile: 0.1
+  clip_high_percentile: 99.9
+
+training:
+  loss: pointwise_bce          # or listwise_softmax (batches of whole queries, §16.3)
+  learning_rate: 0.001         # Adam, default betas
+  batch_rows: 4096             # rows per batch (listwise: at most this many rows of whole queries)
+  weight_decay: 0.0
+  epochs: 5                    # a checkpoint and an evaluation after every epoch
+  seed: 42
+  # cpu, mps or undecided. It is decided by the device rule below from the device
+  # benchmark (results/deepfm_benchmark.csv) and written here afterwards. A training
+  # refuses to start while it is undecided.
+  device: undecided
+
+scoring:
+  rows_per_chunk: 262144       # candidate rows scored per forward pass (memory only)
+
+device_rule:
+  # MPS is used only if one training step on MPS is at least this many times faster
+  # than on CPU with num_threads threads; otherwise CPU.
+  min_mps_speedup: 1.5
+
+speed_test:
+  target_fold: V1
+  benchmark_steps: 300         # training steps of the device benchmark, default model, batch_rows rows
+  benchmark_discard_steps: 20  # the first steps are not timed (warm-up)
+  benchmark_scoring_rows: 1000000
+  epochs: 1                    # the V1 training of the speed test

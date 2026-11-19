@@ -1140,6 +1140,7 @@ hm-recsys/
 │   ├── m6_candidates.yaml       # M6: monitoring and stop conditions (comparison with the previous 4 weeks, fine-tune loss limit); affects no candidate
 │   ├── m8_final.yaml            # M8: target weeks, rehearsal week, criteria of G1–G3 (committed before T labels were read; not to be changed afterwards)
 │   ├── m8_diagnostics.yaml      # Descriptive diagnostics after M8: which phases each of the four tables covers, Top-N, days, bootstrap replicates and seed
+│   ├── deepfm.yaml              # Stage 2 (§16): the default DeepFM model, its training, the variants, the device rule and the speed test
 │   ├── recall/                  # Default configuration of each channel
 │   │   ├── r1_popularity.yaml
 │   │   ├── r2_repurchase.yaml
@@ -1149,7 +1150,8 @@ hm-recsys/
 │   │   └── r6_twotower.yaml
 │   ├── hpo/                     # Search grids of the D phase and the V phase
 │   │   ├── d_phase.yaml
-│   │   └── v_phase.yaml         # M7: steps, priority order and selection rule of the ranker (committed before scores were seen)
+│   │   ├── v_phase.yaml         # M7: steps, priority order and selection rule of the ranker (committed before scores were seen)
+│   │   └── deepfm.yaml          # Stage 2 (§16.5): the rules of the DeepFM study (committed before any DeepFM result)
 │   ├── features.yaml            # The 71 features of the wide table, dtypes, which are categorical, and settings such as windows and decay τ (§8)
 │   ├── ranker.yaml              # Fixed LightGBM parameters (§9.3), defaults of the tuned items, sampling settings, rule for the histogram mode, speed-test settings
 │   └── locks/                   # Locked configurations; files may only be added, never modified
@@ -1268,6 +1270,7 @@ hm-recsys/
 │   │   ├── run.py               # Driver: one process per step, resumable
 │   │   └── process.py           # One step in one process: pass the gate first, then run, then record
 │   ├── diagnostics/             # Descriptive diagnostics after M8 (§10.2): access (records and issues), computing the four tables, inputs (reads files), run (driver)
+│   ├── deepfm/                  # Stage 2, M9 (§16): DeepFM as an alternative ranker. Torch side; V folds only; inputs, model, loss, train, score, data, trial, benchmark, records, process
 │
 ├── scripts/                     # Command-line entry points; they only "read arguments → call src → write results"
 │   ├── m0_preprocess.py
@@ -1291,6 +1294,7 @@ hm-recsys/
 │   ├── m8_final_eval.py            # --stage rehearsal / formal / report
 │   └── m8_step.py                  # One step of M8 (monitor / baseline / sample / dataset / trial), one process
 │   (there is also m8_diagnostics.py: the descriptive diagnostics after M8, not part of the M8 run, see §10.2)
+│   (stage 2, §16: m9_deepfm_benchmark.py --device cpu / mps, and m9_deepfm_trial.py: one DeepFM training for one V fold)
 │
 ├── tests/
 │   ├── conftest.py              # Tests run in two processes: the torch side and the LightGBM side (--lightgbm-side)
@@ -1378,12 +1382,13 @@ hm-recsys/
 ### 14.1 Layering rules
 
 ```
-scripts/  →  src/hmrec/{recall, fusion, features, ranker, hpo, final, diagnostics, pipeline}  →  src/hmrec/{data, eval, vectors, locks, csv_records, run_records, feature_files, git_state}  →  config / paths
+scripts/  →  src/hmrec/{recall, fusion, features, ranker, hpo, final, diagnostics, deepfm, pipeline}  →  src/hmrec/{data, eval, vectors, locks, csv_records, run_records, feature_files, git_state}  →  config / paths
 ```
 
 - An upper layer may call a lower layer; **a lower layer may not import an upper layer**. For example, `data/` may not import `recall/`.
 - `final/` (M8) is on the same level as `hpo/`. It may import `eval/`, `ranker/`, `fusion/` and the bottom-layer modules, as well as `hpo/v_records.py` (reading and writing result tables) and the steps of `hpo/v_trial.py` that **do not depend on which week is predicted** (`plan_dataset_for_folds`, `train_planned_model`, `score_and_save`, `rrf_baseline_metric_row`: the training weeks or the evaluator are passed in by the caller, and these functions do no fold check and make no selection themselves). It may not import the modules that tune and select (`hpo/v_phase.py`, `hpo/v_lock.py`, `hpo/speed_test.py`, `hpo/runner.py`, `hpo/d_phase.py`), `recall/` or torch. Conversely, the code of M6 and M7 does not import `final/`, `eval/final_eval.py` or `ranker/final_window.py` (checked by `tests/unit/test_final_code_rules.py`).
 - `diagnostics/` (the descriptive diagnostics after M8, §10.2) is on the same level as `hpo/` too. It may import `eval/`, `fusion/`, `data/`, the bottom-layer modules, `hpo/v_records.py`, `hpo/selection.py` (the tolerance constant), `ranker/locked.py`, `ranker/runtime.py`, `ranker/ablation.py` and `final/goals.py` (the column names of the verdict table); it may not import code that trains, samples or scores, the other modules of `final/`, `eval/final_eval.py`, `recall/`, `features/` or torch. No other code imports it (checked by `tests/unit/test_diag_code_rules.py`).
+- `deepfm/` (stage 2, M9; §16) is on the same level as `hpo/` and on the torch side. It may import `eval/`, `ranker/window.py`, `ranker/sampling.py`, `ranker/ablation.py`, `hpo/selection.py` and the bottom-layer modules; it may not import lightgbm or any module that does, and no code of M0–M8 imports it (checked by `tests/unit/test_deepfm_code_rules.py`).
 - `recall/`, `features/` and `ranker/` do not import one another and hand over through files in `artifacts/`.
 - `fusion/` is outside the restriction of the previous rule: both `features/` and `ranker/` may import `fusion/`, and `fusion/` imports none of the three. The wide table, the recomputation for −R6 and the RRF baseline therefore use the same set of expressions.
 - `git_state.py` (HEAD commit, whether the working tree is clean) belongs to the bottom layer and depends only on the standard library and `logging_utils.py`.
@@ -1430,3 +1435,67 @@ The reader is a junior MLE, so **readability comes before cleverness**. The full
 8. **Use a logger, not print**; a long task prints progress, run time and memory peak.
 9. **Every module has unit tests**, with test data small enough to compute by hand.
 10. Code comments and docstrings are in English, with words as simple as possible; the design documents (`docs/`) were in Chinese up to tag `v0.1` and are in English from 2026-11-19 on (`AGENTS.md` §11).
+
+---
+
+## 16. DeepFM as an alternative ranker (stage 2, M9)
+
+**Purpose.** To understand the difference between a pointwise deep model and a listwise GBDT on the same inputs. **Replacing the LightGBM ranker is not the goal**: the locked system of §9 and its results stay as they are, and nothing of this section changes a lock file, an existing result or an existing artifact.
+
+### 16.1 The controlled comparison (fixed)
+
+| Item | Value |
+|---|---|
+| Candidates | The frozen candidates of M6 (the same as for LightGBM) |
+| Features | The 71 locked features of §8, read from the frozen wide tables after `feature_files.verify_feature_files` |
+| Training window | The 4 folds before the target week (§9.2) |
+| Training rows | **The same rows as LightGBM**: the M7 sample files with 40 negatives per positive (`artifacts/ranker/samples/full/{fold}/r40.parquet`). Each file is used only if its sha256 equals both its own record and the one in the record of the LightGBM Dataset of that target week (`artifacts/lgb_datasets/full/{target}_r40/dataset.json`). Nothing is sampled again |
+| Target weeks | V1–V4 only. Every entry point checks the folds with the M7 window function and reads labels through `eval/ranker_eval.load_m7_evaluator`: **a T fold is refused** |
+| Scoring | All candidates of the target week (no sampling); Top-12 by `score DESC, article_idx ASC` |
+| Main metric | MAP@12 on the Top-12, with the existing evaluation code (`eval/ranker_eval.ranking_scores`); Recall@12 and NDCG@12 are reported too |
+| Reference | The recorded LightGBM and RRF results on V (`results/v_phase_metrics.csv`); they are not recomputed |
+
+### 16.2 The default model
+
+- **Fields.** Every feature is one field: 71 fields. The 8 categorical features use their integer codes as they are (0 = missing; the vocabulary of a field is the shared code table `artifacts/features/category_codes.json`).
+- **Numeric features: quantile bins.** For each of the 63 numeric features, the bin edges are the quantiles `k / 32` (k = 1 … 31) of its non-missing values **in the training rows of the window** (the 4 sample files together; numpy's linear interpolation, in float64). Equal edges are merged, so a feature with many equal values has fewer bins. Bin of a value x: `1 + (number of edges <= x)`, i.e. 1 … 32; **a missing value (NaN) is bin 0**. The edges are computed from the training rows only and then applied to the target week unchanged. Binned inputs are stored as uint8.
+- **Embeddings.** Dimension 16, one vector per (field, value), shared by the FM part and the deep part. Initial values: normal with standard deviation 0.01; first-order weights and the bias start at 0.
+- **FM part.** `b + Σ_f w_f[x_f] + ½ Σ_k [ (Σ_f e_{f,k})² − Σ_f e_{f,k}² ]`, where `e_f` is the embedding of field f's value: first-order weights plus the second-order interactions between all pairs of fields.
+- **Deep part.** The 71 embeddings concatenated (1,136 values) → 256 → 128 → 64 with ReLU → 1 (dropout after each hidden layer; 0 by default).
+- **Output and loss.** `logit = FM logit + deep logit`; pointwise binary cross-entropy on the label (1 = bought in the label week), mean over the rows of a batch.
+- **Training.** Adam (default betas), learning rate 1e-3, batches of 4,096 rows in a new random order every epoch, no weight decay, 5 epochs, seed 42. After every epoch the model is saved, the target week is scored and evaluated. The seed fixes the initial weights, the row order and the dropout.
+- **Device.** MPS is used only if a training step on MPS is at least 1.5 times faster than on CPU (6 threads); otherwise CPU. The outcome of the speed test (§16.6) is written to `configs/deepfm.yaml`.
+
+### 16.3 Variants (switchable by config)
+
+- **Components**: `first_order` (bias and first-order weights only), `fm` (first plus second order), `deep` (the MLP only), `full` (the default).
+- **Numeric input without binning (`standardised`).** For each numeric feature, from the non-missing training values of the window: `lo` and `hi` = the 0.1st and 99.9th percentiles; a value is clipped to `[lo, hi]`; `mean` and `std` are those of the clipped training values; `z = (clip(x) − mean) / std` (`z = 0` if `std = 0`). A missing value has `z = 0` and the indicator `m = 1` (otherwise `m = 0`). The field's embedding is `z · v_f + m · u_f` and its first-order term `w_f · z + c_f · m`, with one learned vector `v_f`, `u_f` and one weight `w_f`, `c_f` per feature. The categorical fields are unchanged. The statistics come from the training rows only.
+- **Listwise loss (`listwise_softmax`).** A batch is made of whole queries: the queries are put in a new random order every epoch and packed into batches of at most 4,096 rows (a larger query is a batch of its own). Loss of a query: `− (1 / |P_q|) Σ_{i ∈ P_q} log softmax(s_q)_i`, with `s_q` the logits of the query's rows and `P_q` its positive rows; the batch loss is the mean over its queries. Every query of a sample file has at least one positive.
+
+### 16.4 Outputs
+
+- `artifacts/deepfm/`: the input transform of a training (bin edges or standardisation statistics), the model after every epoch, the Top-12 and the per-query metric values of every epoch.
+- `results/deepfm_benchmark.csv` (device benchmark), `results/deepfm_trials.csv` (one row per training: time, true memory peak, device, torch version, commit), `results/deepfm_metrics.csv` (one row per configuration, seed, fold and epoch).
+- The true memory peak of every process is recorded and must stay under 12 GB (§1.3).
+
+### 16.5 Rules of the study (recorded before any result existed)
+
+All comparisons and selections are on V1–V4, with the pooled MAP@12 (weighted by queries, as in M7).
+
+1. **Epoch rule.** For each configuration: the smallest epoch whose pooled MAP@12 is within 1% of the configuration's best epoch (the number-of-trees rule of §9.4, `hpo/selection.choose_num_trees`).
+2. **Step 0, noise.** The default configuration with seeds 42, 43, 44. For each seed the epoch rule gives its pooled MAP@12. If `(max − min) / min` over the three seeds is above 1%, **stop and report before any tuning**.
+3. **Tuning, one factor at a time**, with the existing selection rule (§4.2: at least 1% relative gain of the pooled MAP@12 and strictly better in at least 3 of the 4 weeks): learning rate {3e-4, 1e-3, 3e-3}, then embedding dimension {8, 16, 32}, then dropout {0, 0.1, 0.3}. Priority: the value closer to the default first, the smaller value first at equal distance (learning rate and dimension: distance on a log scale). Selection uses seed 42.
+4. **Ablations at the selected configuration**, without separate tuning, reported only: the four component variants, the standardised numeric input, the listwise loss.
+5. **Final report.** The selected configuration with 3 seeds, and a 95% interval of DeepFM minus LightGBM on V with the customer-level bootstrap of §10.2.
+6. **One evaluation on T1–T4** after the configuration is locked on V: run once, reported only, never used to select anything. It reads the labels of the T weeks again; the user has consented, and the read is recorded when it happens (AGENTS.md §3.2). It is not implemented yet.
+
+### 16.6 Speed test (before the study)
+
+- **Device benchmark**: the default model at batch 4,096, on CPU (6 threads) and on MPS, each in its own process; 300 training steps, the first 20 not timed. Also: whether two runs with the same seed give identical losses on each device, and the scoring throughput on 1 million rows.
+- **One training** on the chosen device: the default configuration, target V1, 1 epoch, evaluated on V1. If its MAP@12 is below the RRF baseline of V1, stop and report; the model is not changed to investigate.
+- Reported: time per epoch, scoring time, true peaks, and the projected total of the study (about 60 trainings of 5 epochs). If the projection is above 12 hours, the dropout step is dropped.
+
+### 16.7 Code
+
+- `src/hmrec/deepfm/` (torch side): `inputs.py` (bin edges, standardisation, encoding), `model.py`, `loss.py`, `train.py`, `score.py`, `data.py` (sample files and wide tables), `trial.py` (one training with its evaluations), `benchmark.py`, `records.py`; scripts `scripts/m9_deepfm_*.py`.
+- The package may import `eval/`, `ranker/window.py`, `ranker/sampling.py`, `ranker/ablation.py` (none of which loads LightGBM), `hpo/selection.py` and the bottom-layer modules. **It must not import lightgbm or any module that does** (two OpenMP runtimes in one process abort or hang, §9.7); `tests/unit/test_deepfm_code_rules.py` checks this. Its tests run on the torch side.
