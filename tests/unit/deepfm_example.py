@@ -164,3 +164,30 @@ def build_workspace(root: Path, target_seed: int = 100, **training: object) -> T
     write_lightgbm_record(paths)
     write_category_codes(paths)
     return TrialInputs(paths, BASE, tiny_config(**training), MANIFEST, LOCK)
+
+
+STUDY_FOLDS = ("F1", "F2", "F3", "F4", "V1", "V2", "V3", "V4")
+STUDY_TARGETS = ("V1", "V2", "V3", "V4")
+
+
+def build_study_workspace(root: Path, **training: object) -> TrialInputs:
+    """A workspace for the whole study: folds F1 ... V4, every V fold a target.
+
+    Each target's window is the 4 folds before it; all folds but V4 have a sample
+    file, and every target has a stand-in for LightGBM's Dataset record.
+    """
+    paths = build_paths(BASE, root)
+    for seed, fold in enumerate(STUDY_FOLDS):
+        write_fold(paths, fold, *make_wide(fold, seed))
+        if fold != STUDY_FOLDS[-1]:
+            write_sample(paths, fold)
+    for position, target in enumerate(STUDY_TARGETS):
+        window = STUDY_FOLDS[position : position + 4]
+        sha256 = {
+            fold: file_sha256(paths.ranker_sample_file("full", fold, RATIO)) for fold in window
+        }
+        directory = paths.ranker_dataset_dir("full", target, RATIO)
+        directory.mkdir(parents=True)
+        (directory / "dataset.json").write_text(json.dumps({"sample_sha256": sha256}))
+    write_category_codes(paths)
+    return TrialInputs(paths, BASE, tiny_config(**training), MANIFEST, LOCK)

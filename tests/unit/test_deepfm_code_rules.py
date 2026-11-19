@@ -24,10 +24,16 @@ from hmrec.paths import get_paths
 
 REPO = Path(__file__).resolve().parents[2]
 PACKAGE = REPO / "src" / "hmrec" / "deepfm"
-SCRIPTS = ("scripts/m9_deepfm_benchmark.py", "scripts/m9_deepfm_trial.py")
+SCRIPTS = (
+    "scripts/m9_deepfm_benchmark.py",
+    "scripts/m9_deepfm_compare.py",
+    "scripts/m9_deepfm_study.py",
+    "scripts/m9_deepfm_trial.py",
+)
 MODULES = (
     "__init__.py",
     "benchmark.py",
+    "compare.py",
     "data.py",
     "inputs.py",
     "loss.py",
@@ -35,6 +41,8 @@ MODULES = (
     "process.py",
     "records.py",
     "score.py",
+    "study.py",
+    "study_run.py",
     "train.py",
     "trial.py",
 )
@@ -183,6 +191,9 @@ def test_rules_of_the_study_are_the_recorded_ones() -> None:
     assert study.ablation_numeric_inputs == ("standardised",)
     assert study.ablation_losses == ("listwise_softmax",)
     assert study.final_seeds == (42, 43, 44)
+    # The two additions of 2026-11-19: the epoch-cap extension, and no grid extension.
+    assert (study.extension_epochs, study.extend_grid_on_edge) == (10, False)
+    assert study.extension_epochs > load_deepfm_config(CONFIG_FILE).training.epochs
     # The first candidate of every step is the default of configs/deepfm.yaml.
     config = load_deepfm_config(CONFIG_FILE)
     defaults = {
@@ -234,5 +245,18 @@ def test_study_config_is_validated() -> None:
     repeated = [{"name": "x", "parameter": "dropout", "candidates": [0.1, 0.1]}]
     with pytest.raises(ValueError, match="at least 2 distinct numbers"):
         parse_deepfm_study_config({**raw, "steps": repeated})
+    with pytest.raises(ValueError, match="a grid is never extended"):
+        parse_deepfm_study_config({**raw, "extend_grid_on_edge": True})
     study = load_deepfm_study_config(STUDY_FILE)
     assert dataclasses.is_dataclass(study)
+
+
+def test_the_study_runs_on_cpu_and_the_torch_free_modules_stay_torch_free() -> None:
+    # A decision by the user (docs/decisions.md 2026-11-19): CPU, so that a seed repeats exactly.
+    assert load_deepfm_config(CONFIG_FILE).training.device == "cpu"
+    # The rules, the driver and the comparison need no model: they must not load torch.
+    for name in ("study.py", "study_run.py", "compare.py", "records.py", "data.py", "inputs.py"):
+        imports = _imports(PACKAGE / name)
+        assert "torch" not in imports, name
+        torch_modules = ("model", "train", "score", "trial", "benchmark", "process", "loss")
+        assert not [m for m in imports if m in {f"hmrec.deepfm.{t}" for t in torch_modules}], name

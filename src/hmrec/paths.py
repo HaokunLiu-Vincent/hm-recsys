@@ -658,6 +658,21 @@ class ProjectPaths:
         return self.results_root / "deepfm_trials.csv"
 
     @property
+    def deepfm_study_file(self) -> Path:
+        """results/deepfm_study.csv: what the study's rules decided, one row per configuration."""
+        return self.results_root / "deepfm_study.csv"
+
+    @property
+    def deepfm_compare_file(self) -> Path:
+        """results/deepfm_compare.csv: bootstrap intervals of DeepFM, LightGBM, their difference."""
+        return self.results_root / "deepfm_compare.csv"
+
+    @property
+    def deepfm_groups_file(self) -> Path:
+        """results/deepfm_groups.csv: MAP@12 of DeepFM and LightGBM in the three query groups."""
+        return self.results_root / "deepfm_groups.csv"
+
+    @property
     def deepfm_metrics_file(self) -> Path:
         """results/deepfm_metrics.csv: one row per (configuration, seed, fold, epoch)."""
         return self.results_root / "deepfm_metrics.csv"

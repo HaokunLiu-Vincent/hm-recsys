@@ -2625,6 +2625,10 @@ class DeepFMStudyConfig:
         ablation_numeric_inputs: Numeric-input variants run there.
         ablation_losses: Loss variants run there.
         final_seeds: Seeds of the selected configuration in the final report.
+        extension_epochs: Epochs the final configuration is trained for if the
+            epoch rule selects its last epoch (more than the default number).
+        extend_grid_on_edge: Always False: a selected value on the edge of its
+            grid is flagged, the grid is not extended.
     """
 
     phase: str
@@ -2639,6 +2643,8 @@ class DeepFMStudyConfig:
     ablation_numeric_inputs: tuple[str, ...]
     ablation_losses: tuple[str, ...]
     final_seeds: tuple[int, ...]
+    extension_epochs: int
+    extend_grid_on_edge: bool
 
 
 DEEPFM_STUDY_PHASE = "V"
@@ -2684,8 +2690,12 @@ def parse_deepfm_study_config(raw: Mapping[str, Any]) -> DeepFMStudyConfig:
         "steps",
         "ablations",
         "final_seeds",
+        "final_epoch_extension",
+        "extend_grid_on_edge",
     }
     check_keys(raw, keys, where)
+    extension = get_mapping(raw, "final_epoch_extension", where)
+    check_keys(extension, {"epochs"}, f"{where}.final_epoch_extension")
     noise = get_mapping(raw, "noise", where)
     check_keys(noise, {"seeds", "max_seed_range"}, f"{where}.noise")
     ablations = get_mapping(raw, "ablations", where)
@@ -2706,7 +2716,12 @@ def parse_deepfm_study_config(raw: Mapping[str, Any]) -> DeepFMStudyConfig:
         ablation_numeric_inputs=get_str_list(ablations, "numeric_input", f"{where}.ablations"),
         ablation_losses=get_str_list(ablations, "loss", f"{where}.ablations"),
         final_seeds=_get_positive_int_list(raw, "final_seeds", where),
+        extension_epochs=get_int(extension, "epochs", f"{where}.final_epoch_extension"),
+        extend_grid_on_edge=get_bool(raw, "extend_grid_on_edge", where),
     )
+    require_positive(config.extension_epochs, f"{where}.final_epoch_extension.epochs")
+    if config.extend_grid_on_edge:
+        raise ValueError(f"{where}.extend_grid_on_edge must be false: a grid is never extended")
     if config.phase != DEEPFM_STUDY_PHASE:
         raise ValueError(f"{where}.phase must be {DEEPFM_STUDY_PHASE!r}, got {config.phase!r}")
     require_positive(config.epoch_tolerance, f"{where}.epoch_tolerance")

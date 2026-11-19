@@ -70,7 +70,10 @@ LOGGER = get_logger("deepfm.trial")
 
 AREA_SPEED_TEST = "speed_test"
 AREA_V_PHASE = "v_phase"
-AREAS = (AREA_SPEED_TEST, AREA_V_PHASE)
+# The final configuration trained for more epochs (proposal §16.5 item 7). A separate
+# area, so that nothing of the runs with the default number of epochs is replaced.
+AREA_V_EXTENDED = "v_phase_extended"
+AREAS = (AREA_SPEED_TEST, AREA_V_PHASE, AREA_V_EXTENDED)
 EPOCH = "epoch"
 DONE_FILE = "trial.json"
 TRANSFORM_FILE = "transform.json"
@@ -102,7 +105,7 @@ class TrialSpec:
     """One training to run.
 
     Attributes:
-        area: "speed_test" or "v_phase".
+        area: "speed_test", "v_phase" or "v_phase_extended".
         target_fold: The V fold to predict.
         seed: The training seed.
         epochs: Epochs to train (a checkpoint and an evaluation after each).

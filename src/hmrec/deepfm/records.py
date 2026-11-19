@@ -15,6 +15,7 @@ here. That table is read as plain CSV, because the module that owns it
 import csv
 import hashlib
 import json
+import math
 from dataclasses import asdict, dataclass
 from datetime import datetime
 from pathlib import Path
@@ -186,3 +187,59 @@ def read_csv_rows(path: Path) -> list[dict[str, str]]:
         return []
     with path.open(newline="", encoding="utf-8") as handle:
         return list(csv.DictReader(handle))
+
+
+@dataclass(frozen=True)
+class PooledReference:
+    """The recorded reference scores pooled over several V folds (weighted by queries).
+
+    Attributes:
+        metric: The metric.
+        folds: The folds that were pooled.
+        rrf_baseline: Pooled value of the RRF baseline.
+        lightgbm: Pooled value of the locked LightGBM ranker.
+        lightgbm_by_fold: Fold -> the locked LightGBM ranker's value.
+        rrf_by_fold: Fold -> the RRF baseline's value.
+        n_queries: Fold -> its number of queries.
+    """
+
+    metric: str
+    folds: tuple[str, ...]
+    rrf_baseline: float
+    lightgbm: float
+    lightgbm_by_fold: dict[str, float]
+    rrf_by_fold: dict[str, float]
+    n_queries: dict[str, int]
+
+
+def read_pooled_reference(
+    paths: ProjectPaths, folds: tuple[str, ...], metric: str
+) -> PooledReference:
+    """Read the reference scores of several folds and pool them by their numbers of queries.
+
+    pooled = sum_f n_f * value_f / sum_f n_f, with n_f from the same recorded rows.
+    """
+    with paths.v_phase_metrics_file.open(newline="", encoding="utf-8") as handle:
+        rows = list(csv.DictReader(handle))
+    is_baseline = [row for row in rows if row["experiment"] == RRF_BASELINE]
+    n_queries, rrf, lightgbm = {}, {}, {}
+    for fold in folds:
+        reference = read_reference_scores(paths, fold, metric)
+        rrf[fold], lightgbm[fold] = reference.rrf_baseline, reference.lightgbm
+        n_queries[fold] = int(next(row for row in is_baseline if row["fold"] == fold)["n_queries"])
+    total = sum(n_queries.values())
+    return PooledReference(
+        metric=metric,
+        folds=folds,
+        rrf_baseline=math.fsum(n_queries[fold] * rrf[fold] for fold in folds) / total,
+        lightgbm=math.fsum(n_queries[fold] * lightgbm[fold] for fold in folds) / total,
+        lightgbm_by_fold=lightgbm,
+        rrf_by_fold=rrf,
+        n_queries=n_queries,
+    )
+
+
+def locked_lightgbm(paths: ProjectPaths) -> tuple[str, int]:
+    """(config_id, number of trees) of the locked LightGBM ranker, from its lock file."""
+    lock = load_ranker_lock(paths.ranker_lock_file)
+    return lock.selection.config_id, lock.model.num_trees
