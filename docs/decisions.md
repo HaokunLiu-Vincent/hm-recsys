@@ -1074,3 +1074,27 @@ Everything below was settled **before the features of any week were generated**.
   - The stop condition "the default configuration's pooled MAP@12 is below the RRF baseline" is checked for seed 42 at the epoch the epoch rule gives; the baseline is the query-weighted pooled value of the four recorded RRF rows of `results/v_phase_metrics.csv`.
   - A 10-epoch training is a new training from scratch with the same seed (its first 5 epochs repeat the 5-epoch run exactly on CPU); its files and rows carry the area `v_phase_extended`, so nothing of the 5-epoch runs is replaced.
   - The comparison with LightGBM uses the bootstrap settings of the diagnostics (`configs/m8_diagnostics.yaml`: 1,000 replicates, seed 42, 95%) and its query groups (30 days), and the per-query AP values both models saved; no label is read for it. The bootstrap is implemented again in the DeepFM package, because no other code may import `hmrec.diagnostics` (AGENTS.md §3.2); a test shows that it gives the same intervals as the diagnostics' function on the same input.
+
+## 2026-11-19 DeepFM study, step 0: the seed-to-seed range is 1.85%, above the 1% limit; the study stops before tuning
+
+- **Run** (`scripts/m9_deepfm_study.py --through step0`, commit `2ea317a`, clean tree; rows with area `v_phase` in `results/deepfm_trials.csv` and `results/deepfm_metrics.csv`): the default configuration (`653c29035939`), seeds 42, 43, 44, targets V1–V4, 5 epochs, on CPU, torch 2.15.0, one process per training (12 trainings).
+- **Pooled MAP@12 (query-weighted over V1–V4) per epoch**:
+
+  | Seed | Epoch 1 | Epoch 2 | Epoch 3 | Epoch 4 | Epoch 5 | Epoch by the rule |
+  |---|---|---|---|---|---|---|
+  | 42 | 0.030704 | 0.030313 | 0.029719 | 0.029003 | 0.028596 | 1 |
+  | 43 | 0.030222 | 0.030045 | 0.029481 | 0.029191 | 0.028717 | 1 |
+  | 44 | 0.030147 | 0.030126 | 0.029597 | 0.029268 | 0.028533 | 1 |
+
+- **MAP@12 per week at the epoch the rule gives (epoch 1 for all three seeds)**:
+
+  | Seed | V1 | V2 | V3 | V4 | Pooled |
+  |---|---|---|---|---|---|
+  | 42 | 0.027907 | 0.029928 | 0.032699 | 0.032756 | 0.030704 |
+  | 43 | 0.028259 | 0.029239 | 0.032427 | 0.031326 | 0.030222 |
+  | 44 | 0.027807 | 0.029882 | 0.032128 | 0.031158 | 0.030147 |
+
+- **Range**: (0.030704 − 0.030147) / 0.030147 = **1.8473%**, above the limit of 1%. **By the rule recorded before the run, the study stops here**: no tuning, no ablation, no extra seeds, no comparison with LightGBM and no independent check were run.
+- **The other stop conditions were not met**: seed 42 at its epoch has pooled MAP@12 0.030704, above the RRF baseline 0.019419 (LightGBM: 0.032713); no loss was NaN and the mean training loss fell in every epoch of every training (0.1052 → 0.0998 on average); the highest true peak was 7.73 GB (limit 12 GB).
+- **Time**: 5,021 s for the 12 trainings (409 to 434 s each).
+- **Not decided here**: what to do about the range is the user's decision; nothing was changed to get around the stop.
