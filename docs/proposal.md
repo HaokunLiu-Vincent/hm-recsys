@@ -1495,6 +1495,17 @@ All comparisons and selections are on V1–V4, with the pooled MAP@12 (weighted 
 - **One training** on the chosen device: the default configuration, target V1, 1 epoch, evaluated on V1. If its MAP@12 is below the RRF baseline of V1, stop and report; the model is not changed to investigate.
 - Reported: time per epoch, scoring time, true peaks, and the projected total of the study (about 60 trainings of 5 epochs). If the projection is above 12 hours, the dropout step is dropped.
 
+**Results of the speed test (2026-11-19; `results/deepfm_benchmark.csv`, `results/deepfm_trials.csv`, `results/deepfm_metrics.csv`).**
+
+| Device | Median training step | Same seed twice: identical losses | Scoring, 1 million rows | True peak (RSS) |
+|---|---|---|---|---|
+| CPU, 6 threads | 19.50 ms | yes | 727,851 rows/s | 7.71 GB |
+| MPS | 10.13 ms | no (largest difference 9.06e-06 over 300 steps) | 566,279 rows/s | 5.48 GB |
+
+- **Device**: MPS is 1.92 times faster per training step, so the device rule gives MPS (`configs/deepfm.yaml`). On MPS a training does not repeat bit for bit from the same seed; on CPU it does.
+- **V1, default configuration, 1 epoch, seed 42**: MAP@12 0.027923 (RRF baseline 0.018511, LightGBM 0.030112), Recall@12 0.063982, NDCG@12 0.044275. Above the RRF baseline, so the study may start.
+- **Time**: preparing the training rows 34.2 s, one epoch 29.9 s (2,616 steps), scoring and evaluating V1 with one model 40.3 s; true peak 5.34 GB. Projected: at most about 390 s per training of 5 epochs, about 6.5 hours for 60 trainings. The dropout step is kept.
+
 ### 16.7 Code
 
 - `src/hmrec/deepfm/` (torch side): `inputs.py` (bin edges, standardisation, encoding), `model.py`, `loss.py`, `train.py`, `score.py`, `data.py` (sample files and wide tables), `trial.py` (one training with its evaluations), `benchmark.py`, `records.py`; scripts `scripts/m9_deepfm_*.py`.
