@@ -622,6 +622,46 @@ class ProjectPaths:
         """results/t_diag_bootstrap.csv: bootstrap confidence intervals of the pooled MAP@12."""
         return self.results_root / "t_diag_bootstrap.csv"
 
+    # ------------------------------------------------------------ DeepFM (stage 2, M9)
+
+    @property
+    def deepfm_config_file(self) -> Path:
+        """configs/deepfm.yaml: the DeepFM model, its training and the speed test."""
+        return self.configs_dir / "deepfm.yaml"
+
+    @property
+    def deepfm_study_config_file(self) -> Path:
+        """configs/hpo/deepfm.yaml: the rules of the DeepFM study."""
+        return self.configs_dir / "hpo" / "deepfm.yaml"
+
+    @property
+    def deepfm_dir(self) -> Path:
+        """artifacts/deepfm/: every file of the DeepFM study."""
+        return self.artifacts_root / "deepfm"
+
+    def deepfm_trial_dir(self, area: str, config_id: str, seed: int, fold: str) -> Path:
+        """The files of one training: artifacts/deepfm/{area}/{config_id}/seed{seed}/{fold}/."""
+        return self.deepfm_dir / area / config_id / f"seed{seed}" / fold
+
+    def deepfm_log_file(self, label: str) -> Path:
+        """The log of one DeepFM process: artifacts/deepfm/logs/{label}.log."""
+        return self.deepfm_dir / "logs" / f"{label}.log"
+
+    @property
+    def deepfm_benchmark_file(self) -> Path:
+        """results/deepfm_benchmark.csv: the device benchmark, one row per device run."""
+        return self.results_root / "deepfm_benchmark.csv"
+
+    @property
+    def deepfm_trials_file(self) -> Path:
+        """results/deepfm_trials.csv: one row per training (time, true memory peak, device)."""
+        return self.results_root / "deepfm_trials.csv"
+
+    @property
+    def deepfm_metrics_file(self) -> Path:
+        """results/deepfm_metrics.csv: one row per (configuration, seed, fold, epoch)."""
+        return self.results_root / "deepfm_metrics.csv"
+
 
 def build_paths(config: BaseConfig, project_root: Path) -> ProjectPaths:
     """Derive ProjectPaths from a BaseConfig.

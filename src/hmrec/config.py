@@ -2315,3 +2315,413 @@ def parse_diagnostics_config(raw: Mapping[str, Any]) -> DiagnosticsConfig:
 def load_diagnostics_config(path: Path) -> DiagnosticsConfig:
     """Read and validate configs/m8_diagnostics.yaml."""
     return parse_diagnostics_config(load_yaml(path))
+
+
+# ---------------------------------------------------------------- deepfm.yaml
+
+DEEPFM_COMPONENTS = ("first_order", "fm", "deep", "full")
+DEEPFM_NUMERIC_INPUTS = ("binned", "standardised")
+DEEPFM_LOSSES = ("pointwise_bce", "listwise_softmax")
+DEEPFM_UNDECIDED_DEVICE = "undecided"
+DEEPFM_DEVICES = ("cpu", "mps", DEEPFM_UNDECIDED_DEVICE)
+
+
+@dataclass(frozen=True)
+class DeepFMModelConfig:
+    """The `model` section of configs/deepfm.yaml (proposal §16.2, §16.3).
+
+    Attributes:
+        embedding_dim: Length of every embedding (shared by the FM and the deep part).
+        hidden_units: Units of the MLP's hidden layers, e.g. (256, 128, 64).
+        dropout: Dropout probability after every hidden layer, in [0, 1).
+        components: "first_order", "fm", "deep" or "full".
+        numeric_input: "binned" or "standardised".
+        embedding_init_std: Standard deviation of the embeddings' initial values.
+    """
+
+    embedding_dim: int
+    hidden_units: tuple[int, ...]
+    dropout: float
+    components: str
+    numeric_input: str
+    embedding_init_std: float
+
+
+@dataclass(frozen=True)
+class DeepFMTrainingConfig:
+    """The `training` section of configs/deepfm.yaml.
+
+    Attributes:
+        loss: "pointwise_bce" or "listwise_softmax".
+        learning_rate: Adam learning rate.
+        batch_rows: Rows per batch (listwise: at most this many rows of whole queries).
+        weight_decay: Adam weight decay (0 = none).
+        epochs: Passes over the training rows; a checkpoint after each.
+        seed: Fixes the initial weights, the batch order and the dropout.
+        device: "cpu", "mps", or "undecided" until the device benchmark has run.
+    """
+
+    loss: str
+    learning_rate: float
+    batch_rows: int
+    weight_decay: float
+    epochs: int
+    seed: int
+    device: str
+
+
+@dataclass(frozen=True)
+class DeepFMSpeedTestConfig:
+    """The `speed_test` section of configs/deepfm.yaml (proposal §16.6).
+
+    Attributes:
+        target_fold: The V fold of the speed test's training.
+        benchmark_steps: Training steps of the device benchmark.
+        benchmark_discard_steps: First steps that are not timed.
+        benchmark_scoring_rows: Rows of the scoring throughput measurement.
+        epochs: Epochs of the speed test's training.
+    """
+
+    target_fold: str
+    benchmark_steps: int
+    benchmark_discard_steps: int
+    benchmark_scoring_rows: int
+    epochs: int
+
+
+@dataclass(frozen=True)
+class DeepFMConfig:
+    """Settings from configs/deepfm.yaml: DeepFM as an alternative ranker (proposal §16).
+
+    Attributes:
+        experiment: "full" (the sample files and features of all six channels).
+        negatives_per_positive: Ratio of the M7 sample files that are reused.
+        window_weeks: Training folds before the target week.
+        top_k: Candidates kept per query.
+        metric: The main metric, "map@12".
+        extra_metrics: Reported next to it.
+        model: The model settings.
+        n_bins: Quantile bins of a numeric feature (missing values get one more).
+        clip_low_percentile: Lower clipping percentile of the standardised input.
+        clip_high_percentile: Upper clipping percentile of the standardised input.
+        training: The training settings.
+        scoring_rows_per_chunk: Candidate rows per forward pass when scoring.
+        min_mps_speedup: MPS is used only if it is at least this many times faster.
+        speed_test: The speed test settings.
+    """
+
+    experiment: str
+    negatives_per_positive: int
+    window_weeks: int
+    top_k: int
+    metric: str
+    extra_metrics: tuple[str, ...]
+    model: DeepFMModelConfig
+    n_bins: int
+    clip_low_percentile: float
+    clip_high_percentile: float
+    training: DeepFMTrainingConfig
+    scoring_rows_per_chunk: int
+    min_mps_speedup: float
+    speed_test: DeepFMSpeedTestConfig
+
+    @property
+    def metrics(self) -> tuple[str, ...]:
+        """All metrics, the main metric first."""
+        return (self.metric, *self.extra_metrics)
+
+
+def _require_choice(value: str, choices: tuple[str, ...], name: str) -> None:
+    """Fail unless `value` is one of `choices`."""
+    if value not in choices:
+        raise ValueError(f"{name} must be one of {choices}, got {value!r}")
+
+
+def _get_positive_int_list(raw: Mapping[str, Any], key: str, where: str) -> tuple[int, ...]:
+    """Return raw[key] as a non-empty tuple of positive integers."""
+    value = raw[key]
+    is_int_list = isinstance(value, list) and all(
+        isinstance(item, int) and not isinstance(item, bool) and item > 0 for item in value
+    )
+    if not is_int_list or not value:
+        raise ValueError(f"{where}.{key}: expected a list of positive integers, got {value!r}")
+    return tuple(value)
+
+
+def _parse_deepfm_model(raw: Mapping[str, Any], where: str) -> DeepFMModelConfig:
+    """The `model` section of configs/deepfm.yaml."""
+    keys = {
+        "embedding_dim",
+        "hidden_units",
+        "dropout",
+        "components",
+        "numeric_input",
+        "embedding_init_std",
+    }
+    check_keys(raw, keys, where)
+    model = DeepFMModelConfig(
+        embedding_dim=get_int(raw, "embedding_dim", where),
+        hidden_units=_get_positive_int_list(raw, "hidden_units", where),
+        dropout=get_float(raw, "dropout", where),
+        components=get_str(raw, "components", where),
+        numeric_input=get_str(raw, "numeric_input", where),
+        embedding_init_std=get_float(raw, "embedding_init_std", where),
+    )
+    require_positive(model.embedding_dim, f"{where}.embedding_dim")
+    require_positive(model.embedding_init_std, f"{where}.embedding_init_std")
+    if not 0 <= model.dropout < 1:
+        raise ValueError(f"{where}.dropout must be in [0, 1), got {model.dropout}")
+    _require_choice(model.components, DEEPFM_COMPONENTS, f"{where}.components")
+    _require_choice(model.numeric_input, DEEPFM_NUMERIC_INPUTS, f"{where}.numeric_input")
+    return model
+
+
+def _parse_deepfm_training(raw: Mapping[str, Any], where: str) -> DeepFMTrainingConfig:
+    """The `training` section of configs/deepfm.yaml."""
+    keys = {"loss", "learning_rate", "batch_rows", "weight_decay", "epochs", "seed", "device"}
+    check_keys(raw, keys, where)
+    training = DeepFMTrainingConfig(
+        loss=get_str(raw, "loss", where),
+        learning_rate=get_float(raw, "learning_rate", where),
+        batch_rows=get_int(raw, "batch_rows", where),
+        weight_decay=get_float(raw, "weight_decay", where),
+        epochs=get_int(raw, "epochs", where),
+        seed=get_int(raw, "seed", where),
+        device=get_str(raw, "device", where),
+    )
+    for name in ("learning_rate", "batch_rows", "epochs"):
+        require_positive(getattr(training, name), f"{where}.{name}")
+    if training.weight_decay < 0:
+        raise ValueError(f"{where}.weight_decay must be >= 0, got {training.weight_decay}")
+    _require_choice(training.loss, DEEPFM_LOSSES, f"{where}.loss")
+    _require_choice(training.device, DEEPFM_DEVICES, f"{where}.device")
+    return training
+
+
+def _parse_deepfm_speed_test(raw: Mapping[str, Any], where: str) -> DeepFMSpeedTestConfig:
+    """The `speed_test` section of configs/deepfm.yaml."""
+    keys = {
+        "target_fold",
+        "benchmark_steps",
+        "benchmark_discard_steps",
+        "benchmark_scoring_rows",
+        "epochs",
+    }
+    check_keys(raw, keys, where)
+    speed_test = DeepFMSpeedTestConfig(
+        target_fold=get_str(raw, "target_fold", where),
+        benchmark_steps=get_int(raw, "benchmark_steps", where),
+        benchmark_discard_steps=get_int(raw, "benchmark_discard_steps", where),
+        benchmark_scoring_rows=get_int(raw, "benchmark_scoring_rows", where),
+        epochs=get_int(raw, "epochs", where),
+    )
+    for name in ("benchmark_steps", "benchmark_scoring_rows", "epochs"):
+        require_positive(getattr(speed_test, name), f"{where}.{name}")
+    if not 0 <= speed_test.benchmark_discard_steps < speed_test.benchmark_steps:
+        raise ValueError(f"{where}.benchmark_discard_steps must be in 0..benchmark_steps - 1")
+    return speed_test
+
+
+def parse_deepfm_config(raw: Mapping[str, Any]) -> DeepFMConfig:
+    """Build a DeepFMConfig from the parsed content of configs/deepfm.yaml.
+
+    Raises:
+        ValueError: If a key is missing or unknown, or a value is out of range.
+    """
+    where = "deepfm"
+    keys = {
+        "experiment",
+        "negatives_per_positive",
+        "window_weeks",
+        "top_k",
+        "metric",
+        "extra_metrics",
+        "model",
+        "binning",
+        "standardise",
+        "training",
+        "scoring",
+        "device_rule",
+        "speed_test",
+    }
+    check_keys(raw, keys, where)
+    binning = get_mapping(raw, "binning", where)
+    check_keys(binning, {"n_bins"}, f"{where}.binning")
+    standardise = get_mapping(raw, "standardise", where)
+    check_keys(standardise, {"clip_low_percentile", "clip_high_percentile"}, f"{where}.standardise")
+    scoring = get_mapping(raw, "scoring", where)
+    check_keys(scoring, {"rows_per_chunk"}, f"{where}.scoring")
+    device_rule = get_mapping(raw, "device_rule", where)
+    check_keys(device_rule, {"min_mps_speedup"}, f"{where}.device_rule")
+    config = DeepFMConfig(
+        experiment=get_str(raw, "experiment", where),
+        negatives_per_positive=get_int(raw, "negatives_per_positive", where),
+        window_weeks=get_int(raw, "window_weeks", where),
+        top_k=get_int(raw, "top_k", where),
+        metric=get_str(raw, "metric", where),
+        extra_metrics=get_str_list(raw, "extra_metrics", where),
+        model=_parse_deepfm_model(get_mapping(raw, "model", where), f"{where}.model"),
+        n_bins=get_int(binning, "n_bins", f"{where}.binning"),
+        clip_low_percentile=get_float(standardise, "clip_low_percentile", f"{where}.standardise"),
+        clip_high_percentile=get_float(standardise, "clip_high_percentile", f"{where}.standardise"),
+        training=_parse_deepfm_training(get_mapping(raw, "training", where), f"{where}.training"),
+        scoring_rows_per_chunk=get_int(scoring, "rows_per_chunk", f"{where}.scoring"),
+        min_mps_speedup=get_float(device_rule, "min_mps_speedup", f"{where}.device_rule"),
+        speed_test=_parse_deepfm_speed_test(
+            get_mapping(raw, "speed_test", where), f"{where}.speed_test"
+        ),
+    )
+    for name in ("negatives_per_positive", "window_weeks", "top_k", "scoring_rows_per_chunk"):
+        require_positive(getattr(config, name), f"{where}.{name}")
+    # Bin 0 is the missing bin and a binned value is stored as uint8: 1 + n_bins values.
+    if not 2 <= config.n_bins <= 255:
+        raise ValueError(f"{where}.binning.n_bins must be in 2..255, got {config.n_bins}")
+    if not 0 <= config.clip_low_percentile < config.clip_high_percentile <= 100:
+        raise ValueError(f"{where}.standardise: need 0 <= low < high <= 100")
+    if config.min_mps_speedup < 1:
+        raise ValueError(f"{where}.device_rule.min_mps_speedup must be >= 1")
+    if len(set(config.metrics)) != len(config.metrics):
+        raise ValueError(f"{where}: metrics repeat: {config.metrics}")
+    return config
+
+
+def load_deepfm_config(path: Path) -> DeepFMConfig:
+    """Read and validate configs/deepfm.yaml."""
+    return parse_deepfm_config(load_yaml(path))
+
+
+# ---------------------------------------------------------------- hpo/deepfm.yaml
+
+
+@dataclass(frozen=True)
+class DeepFMStudyStep:
+    """One tuning step of the DeepFM study: one parameter and its candidate values.
+
+    Attributes:
+        name: Step name.
+        parameter: "learning_rate", "embedding_dim" or "dropout".
+        candidates: The values in priority order; the first is the current value.
+    """
+
+    name: str
+    parameter: str
+    candidates: tuple[float, ...]
+
+
+@dataclass(frozen=True)
+class DeepFMStudyConfig:
+    """Settings from configs/hpo/deepfm.yaml: the rules of the DeepFM study (proposal §16.5).
+
+    Attributes:
+        phase: "V".
+        target_folds: The folds every configuration is trained for and evaluated on.
+        metric: The selection metric, pooled over the folds.
+        epoch_tolerance: Relative tolerance of the epoch rule.
+        noise_seeds: Seeds of step 0.
+        max_seed_range: Step 0 stops the study if (max - min) / min is above this.
+        selection_seed: The seed every selection uses.
+        steps: The tuning steps in order.
+        ablation_components: Component variants run at the selected configuration.
+        ablation_numeric_inputs: Numeric-input variants run there.
+        ablation_losses: Loss variants run there.
+        final_seeds: Seeds of the selected configuration in the final report.
+    """
+
+    phase: str
+    target_folds: tuple[str, ...]
+    metric: str
+    epoch_tolerance: float
+    noise_seeds: tuple[int, ...]
+    max_seed_range: float
+    selection_seed: int
+    steps: tuple[DeepFMStudyStep, ...]
+    ablation_components: tuple[str, ...]
+    ablation_numeric_inputs: tuple[str, ...]
+    ablation_losses: tuple[str, ...]
+    final_seeds: tuple[int, ...]
+
+
+DEEPFM_STUDY_PHASE = "V"
+DEEPFM_TUNED_PARAMETERS = ("learning_rate", "embedding_dim", "dropout")
+
+
+def _parse_deepfm_study_step(raw: Any, position: int) -> DeepFMStudyStep:
+    """One entry of `steps`; candidates must be distinct numbers."""
+    where = f"hpo/deepfm.steps[{position}]"
+    if not isinstance(raw, Mapping):
+        raise ValueError(f"{where}: expected a mapping")
+    check_keys(raw, {"name", "parameter", "candidates"}, where)
+    candidates = raw["candidates"]
+    is_numbers = isinstance(candidates, list) and all(
+        isinstance(item, int | float) and not isinstance(item, bool) for item in candidates
+    )
+    if not is_numbers or len(candidates) < 2 or len(set(candidates)) != len(candidates):
+        raise ValueError(f"{where}.candidates: expected at least 2 distinct numbers")
+    step = DeepFMStudyStep(
+        name=get_str(raw, "name", where),
+        parameter=get_str(raw, "parameter", where),
+        candidates=tuple(float(item) for item in candidates),
+    )
+    _require_choice(step.parameter, DEEPFM_TUNED_PARAMETERS, f"{where}.parameter")
+    return step
+
+
+def parse_deepfm_study_config(raw: Mapping[str, Any]) -> DeepFMStudyConfig:
+    """Build a DeepFMStudyConfig from the parsed content of configs/hpo/deepfm.yaml.
+
+    Raises:
+        ValueError: If a key is missing or unknown, the phase is not "V", a
+            tolerance is not positive, or a variant name is unknown.
+    """
+    where = "hpo/deepfm"
+    keys = {
+        "phase",
+        "target_folds",
+        "metric",
+        "epoch_tolerance",
+        "noise",
+        "selection_seed",
+        "steps",
+        "ablations",
+        "final_seeds",
+    }
+    check_keys(raw, keys, where)
+    noise = get_mapping(raw, "noise", where)
+    check_keys(noise, {"seeds", "max_seed_range"}, f"{where}.noise")
+    ablations = get_mapping(raw, "ablations", where)
+    check_keys(ablations, {"components", "numeric_input", "loss"}, f"{where}.ablations")
+    raw_steps = raw["steps"]
+    if not isinstance(raw_steps, list) or not raw_steps:
+        raise ValueError(f"{where}.steps: expected a non-empty list")
+    config = DeepFMStudyConfig(
+        phase=get_str(raw, "phase", where),
+        target_folds=get_str_list(raw, "target_folds", where),
+        metric=get_str(raw, "metric", where),
+        epoch_tolerance=get_float(raw, "epoch_tolerance", where),
+        noise_seeds=_get_positive_int_list(noise, "seeds", f"{where}.noise"),
+        max_seed_range=get_float(noise, "max_seed_range", f"{where}.noise"),
+        selection_seed=get_int(raw, "selection_seed", where),
+        steps=tuple(_parse_deepfm_study_step(step, i) for i, step in enumerate(raw_steps)),
+        ablation_components=get_str_list(ablations, "components", f"{where}.ablations"),
+        ablation_numeric_inputs=get_str_list(ablations, "numeric_input", f"{where}.ablations"),
+        ablation_losses=get_str_list(ablations, "loss", f"{where}.ablations"),
+        final_seeds=_get_positive_int_list(raw, "final_seeds", where),
+    )
+    if config.phase != DEEPFM_STUDY_PHASE:
+        raise ValueError(f"{where}.phase must be {DEEPFM_STUDY_PHASE!r}, got {config.phase!r}")
+    require_positive(config.epoch_tolerance, f"{where}.epoch_tolerance")
+    require_positive(config.max_seed_range, f"{where}.noise.max_seed_range")
+    for name in config.ablation_components:
+        _require_choice(name, DEEPFM_COMPONENTS, f"{where}.ablations.components")
+    for name in config.ablation_numeric_inputs:
+        _require_choice(name, DEEPFM_NUMERIC_INPUTS, f"{where}.ablations.numeric_input")
+    for name in config.ablation_losses:
+        _require_choice(name, DEEPFM_LOSSES, f"{where}.ablations.loss")
+    if config.selection_seed not in config.noise_seeds:
+        raise ValueError(f"{where}.selection_seed must be one of the noise seeds")
+    return config
+
+
+def load_deepfm_study_config(path: Path) -> DeepFMStudyConfig:
+    """Read and validate configs/hpo/deepfm.yaml."""
+    return parse_deepfm_study_config(load_yaml(path))
