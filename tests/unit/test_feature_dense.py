@@ -38,9 +38,9 @@ import math
 import numpy as np
 import polars as pl
 import pytest
-from conftest import FIXTURE_DAY_ZERO
 from feature_example import ANCHOR, ARTICLES, CUSTOMERS, LINES, POISON, QUERIES, make_transactions
 
+from conftest import FIXTURE_DAY_ZERO
 from hmrec.data.histories import recent_purchase_histories
 from hmrec.features.base import HistoryArrays
 from hmrec.features.dense import (

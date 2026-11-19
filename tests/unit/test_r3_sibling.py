@@ -43,8 +43,8 @@ import math
 
 import polars as pl
 import pytest
-from conftest import make_queries, make_recall_inputs
 
+from conftest import make_queries, make_recall_inputs
 from hmrec.config import SiblingConfig
 from hmrec.recall.base import rank_candidates, validate_candidates
 from hmrec.recall.r3_sibling import SIB_SPEC, SiblingChannel

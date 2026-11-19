@@ -18,10 +18,10 @@ import numpy as np
 import polars as pl
 import pytest
 import torch
-from conftest import FIXTURE_DAY_ZERO, make_queries, make_recall_inputs
 from test_twotower_infer import CHUNKS, _resources
 from test_twotower_infer import CONFIG as INFER_CONFIG
 
+from conftest import FIXTURE_DAY_ZERO, make_queries, make_recall_inputs
 from hmrec.config import TwoTowerChainConfig, TwoTowerConfig, load_base_config
 from hmrec.data.day_index import day_index_to_date
 from hmrec.recall.base import RecallInputs

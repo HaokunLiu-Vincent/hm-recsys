@@ -53,8 +53,8 @@ import math
 import numpy as np
 import polars as pl
 import pytest
-from conftest import make_queries, make_recall_inputs
 
+from conftest import make_queries, make_recall_inputs
 from hmrec.config import ItemCFConfig
 from hmrec.recall.base import RecallInputs, validate_candidates
 from hmrec.recall.r4_itemcf import (
