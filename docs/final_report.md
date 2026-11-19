@@ -434,9 +434,10 @@ The position says where the Private score would stand. Kaggle does not rank a la
 | This project (human-directed design, Claude Code as implementer) | 0.03548 | 0.03600 |
 | Claude Fable 5.2, autonomous | 0.03443 | 0.03486 |
 | Gemini Hydrogen Extra, autonomous | 0.03368 | 0.03330 |
-| GPT 6.0 Astra Ultra, autonomous | below 0.03 (exact score not recorded) | not recorded |
+| GPT 6.0 Astra Ultra, autonomous | not submitted | not submitted |
 
-- **What is not recorded.** The conditions of the three runs were not written down: how many submissions each made, its time budget, its prompts and its dates. Their code is not in this repository. So, unlike the other numbers of this report, these scores cannot be traced to a file under `results/` or to `docs/decisions.md`.
+- **One run was not submitted.** The GPT 6.0 Astra Ultra run has no Kaggle score: its offline MAP@12 on T1–T4, from that run's own evaluation, was about 0.029, and the user did not submit it. That offline number is not a Kaggle score and is not compared with the scores in the table.
+- **What is not recorded.** The conditions of the three runs were not written down: how many submissions the two submitted runs made, and each run's time budget, prompts and dates. Their code is not in this repository. So, unlike the other numbers of this report, these scores cannot be traced to a file under `results/` or to `docs/decisions.md`.
 - **The differences.** On the Private leaderboard this project is 3.3% above the Claude Fable 5.2 run (0.03600 / 0.03486 − 1) and 8.1% above the Gemini Hydrogen Extra run (0.03600 / 0.03330 − 1).
 - **This is background, not a controlled experiment.** Each system has one result, and the systems differ in many ways at once. The difference cannot be attributed to any single cause.
 
