@@ -1440,7 +1440,7 @@ The reader is a junior MLE, so **readability comes before cleverness**. The full
 
 ## 16. DeepFM as an alternative ranker (stage 2, M9)
 
-**Purpose.** To understand the difference between a pointwise deep model and a listwise GBDT on the same inputs. **Replacing the LightGBM ranker is not the goal**: the locked system of §9 and its results stay as they are, and nothing of this section changes a lock file, an existing result or an existing artifact.
+**Purpose.** To understand the difference between a pointwise deep model and a listwise GBDT on the same inputs. **Revised on 2026-11-20 (§16.8)**: the comparison is now 2×2, {LightGBM, DeepFM} × {listwise, pointwise}, so that the model family and the loss are not mixed up; where §16.2–§16.5 and §16.8 differ, §16.8 holds. **Replacing the LightGBM ranker is not the goal**: the locked system of §9 and its results stay as they are, and nothing of this section changes a lock file, an existing result or an existing artifact.
 
 ### 16.1 The controlled comparison (fixed)
 
@@ -1463,14 +1463,14 @@ The reader is a junior MLE, so **readability comes before cleverness**. The full
 - **FM part.** `b + Σ_f w_f[x_f] + ½ Σ_k [ (Σ_f e_{f,k})² − Σ_f e_{f,k}² ]`, where `e_f` is the embedding of field f's value: first-order weights plus the second-order interactions between all pairs of fields.
 - **Deep part.** The 71 embeddings concatenated (1,136 values) → 256 → 128 → 64 with ReLU → 1 (dropout after each hidden layer; 0 by default).
 - **Output and loss.** `logit = FM logit + deep logit`; pointwise binary cross-entropy on the label (1 = bought in the label week), mean over the rows of a batch.
-- **Training.** Adam (default betas), learning rate 1e-3, batches of 4,096 rows in a new random order every epoch, no weight decay, 5 epochs, seed 42. After every epoch the model is saved, the target week is scored and evaluated. The seed fixes the initial weights, the row order and the dropout.
+- **Training.** Adam (default betas), learning rate 1e-3, batches of 4,096 rows in a new random order every epoch, no weight decay, 5 epochs, seed 42. After every epoch the model is saved, the target week is scored and evaluated. The seed fixes the initial weights, the row order and the dropout. **Withdrawn on 2026-11-20 (§16.8)**: the constant learning rate, the 5 epochs and the evaluation after every epoch; step 0 ran with them and its records stay. The training is now the cosine schedule of §16.8.
 - **Device.** The pre-registered rule: MPS is used only if a training step on MPS is at least 1.5 times faster than on CPU (6 threads); otherwise CPU. **Deviation (a decision by the user, 2026-11-19): the study runs on CPU**, although the rule gives MPS (1.92 times faster, §16.6), because results on MPS cannot be reproduced from a fixed seed. The decision was made after the device benchmark and the 1-epoch V1 number were seen; it selects no model.
 
 ### 16.3 Variants (switchable by config)
 
 - **Components**: `first_order` (bias and first-order weights only), `fm` (first plus second order), `deep` (the MLP only), `full` (the default).
-- **Numeric input without binning (`standardised`).** For each numeric feature, from the non-missing training values of the window: `lo` and `hi` = the 0.1st and 99.9th percentiles; a value is clipped to `[lo, hi]`; `mean` and `std` are those of the clipped training values; `z = (clip(x) − mean) / std` (`z = 0` if `std = 0`). A missing value has `z = 0` and the indicator `m = 1` (otherwise `m = 0`). The field's embedding is `z · v_f + m · u_f` and its first-order term `w_f · z + c_f · m`, with one learned vector `v_f`, `u_f` and one weight `w_f`, `c_f` per feature. The categorical fields are unchanged. The statistics come from the training rows only.
-- **Listwise loss (`listwise_softmax`).** A batch is made of whole queries: the queries are put in a new random order every epoch and packed into batches of at most 4,096 rows (a larger query is a batch of its own). Loss of a query: `− (1 / |P_q|) Σ_{i ∈ P_q} log softmax(s_q)_i`, with `s_q` the logits of the query's rows and `P_q` its positive rows; the batch loss is the mean over its queries. Every query of a sample file has at least one positive.
+- **Numeric input without binning (`standardised`).** **Redefined on 2026-11-20, before this variant was ever run (§16.8): `g(x) = sign(x) · log(1 + |x|)` is applied first, and everything below is computed on `g(x)` instead of `x`.** For each numeric feature, from the non-missing training values of the window: `lo` and `hi` = the 0.1st and 99.9th percentiles; a value is clipped to `[lo, hi]`; `mean` and `std` are those of the clipped training values; `z = (clip(x) − mean) / std` (`z = 0` if `std = 0`). A missing value has `z = 0` and the indicator `m = 1` (otherwise `m = 0`). The field's embedding is `z · v_f + m · u_f` and its first-order term `w_f · z + c_f · m`, with one learned vector `v_f`, `u_f` and one weight `w_f`, `c_f` per feature. The categorical fields are unchanged. The statistics come from the training rows only.
+- **Listwise loss (`listwise_softmax`)** (from 2026-11-20 an arm of the comparison with its own learning-rate step, not an ablation; §16.8). A batch is made of whole queries: the queries are put in a new random order every epoch and packed into batches of at most 4,096 rows (a larger query is a batch of its own). Loss of a query: `− (1 / |P_q|) Σ_{i ∈ P_q} log softmax(s_q)_i`, with `s_q` the logits of the query's rows and `P_q` its positive rows; the batch loss is the mean over its queries. Every query of a sample file has at least one positive.
 
 ### 16.4 Outputs
 
@@ -1481,6 +1481,8 @@ The reader is a junior MLE, so **readability comes before cleverness**. The full
 ### 16.5 Rules of the study (recorded before any result existed)
 
 All comparisons and selections are on V1–V4, with the pooled MAP@12 (weighted by queries, as in M7).
+
+**Revised on 2026-11-20 (§16.8), after the step-0 results on V1–V4 were seen and without any T data.** Items 1 (the epoch rule over the checkpoints of one run), 2 (the stop at a seed range above 1%) and 7 (the 10-epoch extension) are **withdrawn**; items 3–5 are replaced by the rules of §16.8; items 6 and 8 stay, with the additions of §16.8. The original text is kept below as the record of what was fixed before step 0.
 
 1. **Epoch rule.** For each configuration: the smallest epoch whose pooled MAP@12 is within 1% of the configuration's best epoch (the number-of-trees rule of §9.4, `hpo/selection.choose_num_trees`).
 2. **Step 0, noise.** The default configuration with seeds 42, 43, 44. For each seed the epoch rule gives its pooled MAP@12. If `(max − min) / min` over the three seeds is above 1%, **stop and report before any tuning**.
@@ -1512,3 +1514,37 @@ All comparisons and selections are on V1–V4, with the pooled MAP@12 (weighted 
 
 - `src/hmrec/deepfm/` (torch side): `inputs.py` (bin edges, standardisation, encoding), `model.py`, `loss.py`, `train.py`, `score.py`, `data.py` (sample files and wide tables), `trial.py` (one training with its evaluations), `benchmark.py`, `records.py`; scripts `scripts/m9_deepfm_*.py`.
 - The package may import `eval/`, `ranker/window.py`, `ranker/sampling.py`, `ranker/ablation.py` (none of which loads LightGBM), `hpo/selection.py` and the bottom-layer modules. **It must not import lightgbm or any module that does** (two OpenMP runtimes in one process abort or hang, §9.7); `tests/unit/test_deepfm_code_rules.py` checks this. Its tests run on the torch side.
+
+### 16.8 Revision of 2026-11-20: the 2×2 comparison (recorded before any run of the revised study)
+
+**Why and when.** Step 0 of §16.5 ran on 2026-11-19 (default configuration, 5 epochs at a constant learning rate, seeds 42, 43, 44; `docs/decisions.md`): all three seeds were best after epoch 1 (pooled MAP@12 0.030704 / 0.030222 / 0.030147) and fell in every later epoch (to about 0.0286 after epoch 5); the seed range at epoch 1 was 1.85%, above the 1% limit, and the study stopped by its rule. The user then revised the study. **The revision was made after seeing these step-0 results on V1–V4 and involved no T data.** It withdraws four earlier rules: 5 epochs at a constant learning rate, the epoch rule over checkpoints, the 10-epoch extension, and the stop at a range above 1%. The step-0 records stay as they are.
+
+**A hypothesis that the new step 0 tests** (not an established cause): the model overfits after the first epoch at a constant learning rate of 1e-3, and the seed range is above 1% only at epoch 1 (it was 0.89%, 0.81%, 0.91%, 0.64% at epochs 2–5) because Adam still takes full steps at the end of that epoch; a learning rate that decays within the run would remove both.
+
+**The four arms.** All arms use the controlled inputs of §16.1 (the same candidates, features, window and `r40` sample files), V1–V4 only.
+
+| | Listwise | Pointwise |
+|---|---|---|
+| **LightGBM** (CPU, 6 threads, row-wise, learning rate 0.05, no decay) | **Arm 1**: `lambdarank`, the locked configuration, 500 trees. Seed 42 is the M7 record (pooled 0.032713); seeds 43, 44 are run | **Arm 2**: `binary`, the locked configuration with only the objective changed. Seed 42 to 1,000 trees, k* by the number-of-trees rule; seeds 43, 44 to k* trees |
+| **DeepFM** (CPU, Adam, cosine schedule) | **Arm 3**: `listwise_softmax` (§16.3), its own learning-rate step, then seeds 42, 43, 44 | **Arm 4**: `pointwise_bce` (§16.2), step 0, tuning, then seeds 42, 43, 44 |
+
+**DeepFM training.** Adam with a step-level cosine schedule: with N the number of optimizer steps of the whole run and t = 0 … N − 1, `lr(t) = lr_min + (lr − lr_min) · (1 + cos(π t / N)) / 2` and `lr_min = 0.01 · lr`. **The schedule length T (epochs) is a hyperparameter, T ∈ {1, 2, 3}.** A run with T epochs has its own schedule over exactly its T epochs and is evaluated once, at the end; no mid-schedule checkpoint is used. For the listwise loss N is counted from the whole-query batches of the T epochs before training starts.
+
+**Rules** (all on V1–V4, pooled MAP@12 weighted by queries):
+
+1. **Epoch rule.** The smallest T whose pooled MAP@12 is within 1% of the best T (`hpo/selection.choose_num_trees` on the curve T → pooled MAP@12).
+2. **Step 0 (Arm 4).** The default configuration with seeds 42, 43, 44 and T ∈ {1, 2, 3}; T is chosen on the seed mean. Stop only if the seed-mean pooled MAP@12 at that T is below the RRF baseline (0.019419).
+3. **Noise.** The 3-seed range `(max − min) / min` of the default configuration at its selected T. Below 1%: tuning uses seed 42. 1% or more: **no stop**; every tuning candidate of both DeepFM arms is run with seeds 42, 43, 44 and compared on seed means (the mean of the seeds' pooled MAP@12, and per week the mean of the seeds' MAP@12).
+4. **Tuning of Arm 4**, one factor at a time, with the selection rule of §4.2: learning rate {1e-3, 3e-4, 3e-3}, then embedding dimension {16, 8, 32}, then dropout {0, 0.1, 0.3} (the first value is the current one, then in priority order). In the learning-rate step every candidate is run for T ∈ {1, 2, 3} and gets its own T by rule 1; the candidates are compared at their own T. The later steps, the ablations and the extra seeds use the T selected together with the learning rate. **Limitation: T is not tuned again after the learning-rate step.**
+5. **Arm 3.** The embedding dimension and dropout selected for Arm 4; its own learning-rate step {1e-3, 3e-4, 3e-3} with T ∈ {1, 2, 3} per candidate, as in rule 4; then seeds 42, 43, 44. **Limitation: its embedding dimension and dropout are the ones tuned for Arm 4.**
+6. **Ablations** at the selected Arm 4 configuration and T, seed 42, reported only: components `first_order`, `fm`, `deep`; numeric input `standardised` (with the `g(x)` of §16.3). A difference smaller than the default configuration's 3-seed range is marked "within seed noise".
+7. **LightGBM seeds.** In the locked parameters two things are random: `feature_fraction: 0.8` and `bagging_fraction: 0.8` with `bagging_freq: 1`. A seed is set as the locked training sets it: the parameter `seed` only (LightGBM derives its sub-seeds from it). The bin boundaries (the M7 binary Datasets) and the negative sampling (seed 42) are the same for every seed and every arm, so **the seed variation excludes sampling**.
+8. **Grid edges** (§16.5 item 8): a selected value on the edge of its grid, T and k* included, is flagged and the grid is not extended.
+9. **Comparison (report only).** Per arm: pooled MAP@12 per seed, mean, sample standard deviation and range; Recall@12 and NDCG@12 as seed means. The customer-level paired bootstrap of §10.2 (1,000 replicates, seed 42, 95%), on seed 42 and on every query's 3-seed mean AP@12, for: DeepFM-pointwise − LGB-lambdarank, DeepFM-listwise − LGB-lambdarank, LGB-lambdarank − LGB-binary, DeepFM-listwise − DeepFM-pointwise. MAP@12 of the four arms in the three query groups. An independent naive recomputation of MAP@12 for the selected Arm 4 configuration, seed 42.
+10. **T phase (recorded now, implemented later).** After the V study is finished: one evaluation on T1–T4 of the three new arms at their selected configurations, seeds 42, 43, 44, reported only and never used to select anything. LGB-lambdarank with seed 42 on T is the M8 record and is not rerun. Until it is implemented, every entry point of M9 refuses T folds.
+
+**Speed only.** The encoded inputs (training rows and the target week's candidates) of the binned input are cached per target week under `artifacts/deepfm/cache/` and verified by sha256 before reuse. The device stays CPU.
+
+**Outputs added.** `results/m9_lgb_trials.csv`, `results/m9_lgb_metrics.csv` (LightGBM arms; nothing is appended to `results/v_phase*.csv`); `results/deepfm_study.csv` (what the rules decided); `results/m9_arms.csv`, `results/m9_contrasts.csv`, `results/m9_groups.csv` (the comparison). A cosine run has its own configuration id (it includes the schedule and T), so its rows do not mix with the step-0 rows of 2026-11-19.
+
+**Code added.** `src/hmrec/hpo/lgb_arms.py` with `scripts/m9_lgb_trial.py` and `scripts/m9_lgb_comparison.py` (LightGBM side: the configuration comes from `ranker/locked.py`, the fold guard and the evaluator are M7's); `src/hmrec/deepfm/cache.py`, `study.py`, `study_run.py`, `compare.py` (torch side).
