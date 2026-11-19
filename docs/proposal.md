@@ -1464,7 +1464,7 @@ The reader is a junior MLE, so **readability comes before cleverness**. The full
 - **Deep part.** The 71 embeddings concatenated (1,136 values) → 256 → 128 → 64 with ReLU → 1 (dropout after each hidden layer; 0 by default).
 - **Output and loss.** `logit = FM logit + deep logit`; pointwise binary cross-entropy on the label (1 = bought in the label week), mean over the rows of a batch.
 - **Training.** Adam (default betas), learning rate 1e-3, batches of 4,096 rows in a new random order every epoch, no weight decay, 5 epochs, seed 42. After every epoch the model is saved, the target week is scored and evaluated. The seed fixes the initial weights, the row order and the dropout.
-- **Device.** MPS is used only if a training step on MPS is at least 1.5 times faster than on CPU (6 threads); otherwise CPU. The outcome of the speed test (§16.6) is written to `configs/deepfm.yaml`.
+- **Device.** The pre-registered rule: MPS is used only if a training step on MPS is at least 1.5 times faster than on CPU (6 threads); otherwise CPU. **Deviation (a decision by the user, 2026-11-19): the study runs on CPU**, although the rule gives MPS (1.92 times faster, §16.6), because results on MPS cannot be reproduced from a fixed seed. The decision was made after the device benchmark and the 1-epoch V1 number were seen; it selects no model.
 
 ### 16.3 Variants (switchable by config)
 
@@ -1488,6 +1488,8 @@ All comparisons and selections are on V1–V4, with the pooled MAP@12 (weighted 
 4. **Ablations at the selected configuration**, without separate tuning, reported only: the four component variants, the standardised numeric input, the listwise loss.
 5. **Final report.** The selected configuration with 3 seeds, and a 95% interval of DeepFM minus LightGBM on V with the customer-level bootstrap of §10.2.
 6. **One evaluation on T1–T4** after the configuration is locked on V: run once, reported only, never used to select anything. It reads the labels of the T weeks again; the user has consented, and the read is recorded when it happens (AGENTS.md §3.2). It is not implemented yet.
+7. **Epoch cap (added 2026-11-19, before any run of the study).** If the epoch rule selects epoch 5 (the last one) for the final configuration, that configuration is trained for 10 epochs and the epoch rule is applied again. This is done once and only for the final configuration; the ablations and the extra seeds then use 10 epochs too.
+8. **Grid edges (added 2026-11-19, before any run of the study).** If a selected value lies on the edge of its grid, the grid is not extended; the value is flagged in the report.
 
 ### 16.6 Speed test (before the study)
 

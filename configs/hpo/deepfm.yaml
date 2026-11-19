@@ -42,3 +42,15 @@ ablations:
 # Final report: the selected configuration with these seeds, and a 95% interval of
 # DeepFM minus LightGBM on V with the customer-level bootstrap of the diagnostics.
 final_seeds: [42, 43, 44]
+
+# Two additions of 2026-11-19, recorded before any run of the study:
+#
+# 1. If the epoch rule selects the LAST epoch for the final (selected) configuration,
+#    that configuration is trained for this many epochs instead and the epoch rule is
+#    applied again. Done once, for the final configuration only; the ablations and
+#    the extra seeds then use this number of epochs too.
+final_epoch_extension:
+  epochs: 10
+# 2. If a selected value lies on the edge of its grid, the grid is NOT extended; the
+#    value is flagged in the report.
+extend_grid_on_edge: false
