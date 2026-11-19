@@ -4,8 +4,8 @@
     uv run python scripts/m9_deepfm_trial.py --area v_phase --target V2 --seed 43
 
 Trains the configuration of configs/deepfm.yaml for one V fold on the same
-training rows as LightGBM, saves the model after every epoch, scores all
-candidates of the fold and evaluates every epoch. Appends rows to
+training rows as LightGBM, saves the model after the last epoch, scores all
+candidates of the fold with it and evaluates it. Appends rows to
 results/deepfm_metrics.csv and results/deepfm_trials.csv. A T fold is refused.
 
 --area speed_test runs the speed test's one training (target fold and epochs
@@ -38,6 +38,7 @@ from hmrec.deepfm.process import (  # noqa: E402
     record_trial,
     speed_test_spec,
     start_process,
+    with_epochs,
     with_seed,
 )
 from hmrec.deepfm.records import read_reference_scores  # noqa: E402
@@ -80,6 +81,7 @@ def configuration(config: DeepFMConfig, args: argparse.Namespace) -> DeepFMConfi
         "components": args.components,
         "numeric_input": args.numeric_input,
         "loss": args.loss,
+        "epochs": args.epochs,
     }
     values = {
         name: getattr(default, name) if value is None else value for name, value in given.items()
@@ -97,14 +99,14 @@ def main() -> None:
         if args.target is not None or args.seed is not None or args.epochs is not None:
             raise SystemExit("--area speed_test takes its fold, seed and epochs from the config")
         spec = speed_test_spec(inputs)
+        inputs = replace(inputs, config=with_epochs(inputs.config, spec.epochs))
     else:
         if args.target is None:
             raise SystemExit(f"--target is required for --area {args.area}")
         config = configuration(inputs.config, args)
         seed = config.training.seed if args.seed is None else args.seed
-        epochs = config.training.epochs if args.epochs is None else args.epochs
         inputs = replace(inputs, config=with_seed(config, seed))
-        spec = TrialSpec(args.area, args.target, seed, epochs)
+        spec = TrialSpec(args.area, args.target, seed, config.training.epochs)
     result = run_trial(inputs, spec)
     peak = finish(inputs, label)
     record_trial(inputs, spec, result, started, peak, stamp)
@@ -113,10 +115,12 @@ def main() -> None:
     reference = read_reference_scores(inputs.paths, spec.target_fold, metric)
     last = result.metrics[-1]
     LOGGER.info(
-        "%s seed %d, epoch %d: %s = %.6f (recorded RRF baseline %.6f, LightGBM %.6f)",
+        "%s seed %d, %d epochs (input cache %s): %s = %.6f (recorded RRF baseline %.6f, "
+        "LightGBM %.6f)",
         spec.target_fold,
         spec.seed,
         last.epoch,
+        result.input_cache,
         metric,
         last.scores[metric],
         reference.rrf_baseline,

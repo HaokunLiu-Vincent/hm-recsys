@@ -1,5 +1,6 @@
 """Tests for deepfm.train and deepfm.score: batches, reproducibility, variants, Top-K."""
 
+import math
 from dataclasses import replace
 
 import numpy as np
@@ -14,6 +15,8 @@ from hmrec.deepfm.train import (
     TrainingSet,
     build_model,
     build_optimizer,
+    build_scheduler,
+    count_steps,
     listwise_batches,
     pointwise_batches,
     query_boundaries,
@@ -61,12 +64,16 @@ def _data(config: DeepFMConfig, seed: int = 0):
 
 
 def _train(config: DeepFMConfig, seed: int, epochs: int = 2):
+    """Train `epochs` epochs as a trial does: the schedule spans exactly these epochs."""
     transform, _, data, _ = _data(config)
     torch.set_num_threads(1)
     model = build_model(transform.layout, config.model, seed, CPU)
     optimizer = build_optimizer(model, config.training)
+    scheduler = build_scheduler(
+        optimizer, config.training, count_steps(data, config.training, seed, epochs)
+    )
     results = [
-        train_epoch(model, optimizer, data, config.training, seed, epoch)
+        train_epoch(model, optimizer, data, config.training, seed, epoch, scheduler)
         for epoch in range(1, epochs + 1)
     ]
     return model, results
@@ -154,6 +161,81 @@ def test_listwise_training_counts_whole_query_batches() -> None:
     _, results = _train(config, seed=42, epochs=1)
     # 30 queries of 12 rows, at most 64 rows per batch -> 5 queries per batch -> 6 batches.
     assert results[0].steps == 6
+
+
+# ---------------------------------------------------------------- the learning-rate schedule
+
+
+def test_cosine_schedule_follows_its_formula_step_by_step() -> None:
+    # lr(t) = lr_min + (lr - lr_min) * (1 + cos(pi * t / N)) / 2, t = 0 ... N - 1, with
+    # lr = 0.001, lr_min = 0.01 * lr and N = 12 steps (2 epochs of 6 batches).
+    config = SMALL
+    assert (config.training.lr_schedule, config.training.min_lr_ratio) == ("cosine", 0.01)
+    transform, _, data, _ = _data(config)
+    total_steps = count_steps(data, config.training, 42, 2)
+    assert total_steps == 12  # 360 rows in batches of 64 -> 6 batches per epoch
+    model = build_model(transform.layout, config.model, 42, CPU)
+    optimizer = build_optimizer(model, config.training)
+    scheduler = build_scheduler(optimizer, config.training, total_steps)
+    assert scheduler is not None
+    rate, lowest = config.training.learning_rate, 0.01 * config.training.learning_rate
+    used = []
+    for _ in range(total_steps):
+        used.append(optimizer.param_groups[0]["lr"])
+        optimizer.step()
+        scheduler.step()
+    expected = [
+        lowest + (rate - lowest) * (1 + math.cos(math.pi * step / total_steps)) / 2
+        for step in range(total_steps)
+    ]
+    assert used == pytest.approx(expected, rel=1e-9)
+    assert used[0] == rate and all(a > b for a, b in zip(used, used[1:], strict=False))
+    # After the last step the rate has reached lr_min exactly as the formula says (t = N).
+    assert optimizer.param_groups[0]["lr"] == pytest.approx(lowest, rel=1e-9)
+    with pytest.raises(ValueError, match="total_steps must be > 0"):
+        build_scheduler(optimizer, config.training, 0)
+
+
+def test_constant_schedule_has_no_scheduler_and_keeps_the_rate() -> None:
+    config = _variant(lr_schedule="constant")
+    transform, _, data, _ = _data(config)
+    model = build_model(transform.layout, config.model, 42, CPU)
+    optimizer = build_optimizer(model, config.training)
+    assert build_scheduler(optimizer, config.training, 12) is None
+    train_epoch(model, optimizer, data, config.training, 42, 1)
+    assert optimizer.param_groups[0]["lr"] == config.training.learning_rate
+
+
+def test_a_cosine_run_is_its_own_model_but_a_constant_run_is_a_prefix() -> None:
+    # Cosine: after epoch 1 a 2-epoch run has used other rates than a 1-epoch run, so
+    # its weights differ. This is why a run of T epochs is evaluated only at its end.
+    transform, _, data, _ = _data(SMALL)
+
+    def after_first_epoch(config: DeepFMConfig, epochs: int) -> torch.Tensor:
+        torch.set_num_threads(1)
+        model = build_model(transform.layout, config.model, 42, CPU)
+        optimizer = build_optimizer(model, config.training)
+        steps = count_steps(data, config.training, 42, epochs)
+        scheduler = build_scheduler(optimizer, config.training, steps)
+        train_epoch(model, optimizer, data, config.training, 42, 1, scheduler)
+        return model.embedding.weight.detach().clone()
+
+    assert not torch.equal(after_first_epoch(SMALL, 1), after_first_epoch(SMALL, 2))
+    constant = _variant(lr_schedule="constant")
+    assert torch.equal(after_first_epoch(constant, 1), after_first_epoch(constant, 2))
+
+
+@pytest.mark.parametrize("loss", ["pointwise_bce", "listwise_softmax"])
+def test_counted_steps_are_the_steps_training_takes(loss: str) -> None:
+    # Batches of 100 rows: pointwise 4 per epoch (360 rows); listwise 8 queries (96 rows)
+    # per batch -> 4 batches for 30 queries. Counted before training, for 3 epochs.
+    config = _variant(loss=loss, batch_rows=100)
+    _, _, data, _ = _data(config)
+    counted = count_steps(data, config.training, 7, 3)
+    _, results = _train(config, seed=7, epochs=3)
+    assert counted == sum(result.steps for result in results) == 12
+    with pytest.raises(ValueError, match="epochs must be > 0"):
+        count_steps(data, config.training, 7, 0)
 
 
 def test_training_set_needs_rows_sorted_by_query() -> None:

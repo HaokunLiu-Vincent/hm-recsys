@@ -643,6 +643,10 @@ class ProjectPaths:
         """The files of one training: artifacts/deepfm/{area}/{config_id}/seed{seed}/{fold}/."""
         return self.deepfm_dir / area / config_id / f"seed{seed}" / fold
 
+    def deepfm_cache_dir(self, target_fold: str, numeric_input: str, key: str) -> Path:
+        """artifacts/deepfm/cache/{target_fold}_{numeric_input}_{key}/: encoded inputs of a week."""
+        return self.deepfm_dir / "cache" / f"{target_fold}_{numeric_input}_{key}"
+
     def deepfm_log_file(self, label: str) -> Path:
         """The log of one DeepFM process: artifacts/deepfm/logs/{label}.log."""
         return self.deepfm_dir / "logs" / f"{label}.log"
@@ -663,14 +667,42 @@ class ProjectPaths:
         return self.results_root / "deepfm_study.csv"
 
     @property
-    def deepfm_compare_file(self) -> Path:
-        """results/deepfm_compare.csv: bootstrap intervals of DeepFM, LightGBM, their difference."""
-        return self.results_root / "deepfm_compare.csv"
+    def m9_arms_file(self) -> Path:
+        """results/m9_arms.csv: the four arms of the M9 comparison, per seed and summarised."""
+        return self.results_root / "m9_arms.csv"
 
     @property
-    def deepfm_groups_file(self) -> Path:
-        """results/deepfm_groups.csv: MAP@12 of DeepFM and LightGBM in the three query groups."""
-        return self.results_root / "deepfm_groups.csv"
+    def m9_contrasts_file(self) -> Path:
+        """results/m9_contrasts.csv: bootstrap intervals of the differences between arms."""
+        return self.results_root / "m9_contrasts.csv"
+
+    @property
+    def m9_groups_file(self) -> Path:
+        """results/m9_groups.csv: MAP@12 of the four arms in the three query groups."""
+        return self.results_root / "m9_groups.csv"
+
+    @property
+    def m9_lgb_trials_file(self) -> Path:
+        """results/m9_lgb_trials.csv: one row per training of the two LightGBM arms of M9."""
+        return self.results_root / "m9_lgb_trials.csv"
+
+    @property
+    def m9_lgb_metrics_file(self) -> Path:
+        """results/m9_lgb_metrics.csv: one row per (arm, seed, fold, number of trees)."""
+        return self.results_root / "m9_lgb_metrics.csv"
+
+    def m9_lgb_predictions_file(self, arm: str, seed: int, fold: str) -> Path:
+        """artifacts/predictions/m9_lgb/{arm}_s{seed}/{fold}.parquet: Top-K rows of an arm."""
+        return self.predictions_file(f"m9_lgb/{arm}_s{seed}", fold)
+
+    def m9_lgb_per_query_file(self, arm: str, seed: int, fold: str) -> Path:
+        """artifacts/predictions/m9_lgb/{arm}_s{seed}/{fold}_per_query.parquet."""
+        predictions = self.m9_lgb_predictions_file(arm, seed, fold)
+        return predictions.with_name(f"{fold}_per_query.parquet")
+
+    def m9_lgb_model_file(self, arm: str, seed: int, fold: str) -> Path:
+        """artifacts/models/ranker/m9_lgb/{arm}_s{seed}/{fold}/model.txt."""
+        return self.model_dir("ranker", "m9_lgb") / f"{arm}_s{seed}" / fold / "model.txt"
 
     @property
     def deepfm_metrics_file(self) -> Path:

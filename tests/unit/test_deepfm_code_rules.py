@@ -33,6 +33,7 @@ SCRIPTS = (
 MODULES = (
     "__init__.py",
     "benchmark.py",
+    "cache.py",
     "compare.py",
     "data.py",
     "inputs.py",
@@ -53,6 +54,8 @@ ALLOWED_OUTSIDE = (
     "hmrec.ranker.sampling",
     "hmrec.ranker.ablation",
     "hmrec.eval.ranker_eval",
+    # The result tables of the two LightGBM arms: read by the comparison script.
+    "hmrec.hpo.lgb_arm_records",
 )
 # Modules that import LightGBM themselves or through what they import.
 LOADS_LIGHTGBM = (
@@ -69,6 +72,7 @@ LOADS_LIGHTGBM = (
     "hmrec.hpo.v_phase",
     "hmrec.hpo.v_lock",
     "hmrec.hpo.speed_test",
+    "hmrec.hpo.lgb_arms",
     "hmrec.final",
     "hmrec.diagnostics",
     "hmrec.eval.final_eval",
@@ -94,9 +98,14 @@ def _files() -> list[Path]:
 def test_every_deepfm_file_is_listed_here() -> None:
     found = sorted(path.name for path in PACKAGE.glob("*.py"))
     assert found == sorted(MODULES)
-    assert sorted(path.name for path in (REPO / "scripts").glob("m9_*.py")) == sorted(
+    assert sorted(path.name for path in (REPO / "scripts").glob("m9_deepfm_*.py")) == sorted(
         Path(script).name for script in SCRIPTS
     )
+    # The other M9 scripts are the LightGBM arms; they belong to the LightGBM side.
+    assert sorted(path.name for path in (REPO / "scripts").glob("m9_lgb_*.py")) == [
+        "m9_lgb_comparison.py",
+        "m9_lgb_trial.py",
+    ]
 
 
 def test_no_deepfm_file_imports_lightgbm_or_a_module_that_loads_it() -> None:
@@ -141,6 +150,14 @@ def test_results_and_files_stay_in_their_own_places() -> None:
     tables = [paths.deepfm_benchmark_file, paths.deepfm_trials_file, paths.deepfm_metrics_file]
     assert all(table.parent == paths.results_root for table in tables)
     assert all(table.name.startswith("deepfm_") for table in tables)
+    cache = paths.deepfm_cache_dir("V1", "binned", "abc")
+    assert cache == paths.deepfm_dir / "cache" / "V1_binned_abc"
+    comparison = [paths.m9_arms_file, paths.m9_contrasts_file, paths.m9_groups_file]
+    assert [table.name for table in comparison] == [
+        "m9_arms.csv",
+        "m9_contrasts.csv",
+        "m9_groups.csv",
+    ]
 
 
 # ---------------------------------------------------------------- the recorded configs
@@ -160,7 +177,10 @@ def test_default_model_is_the_recorded_one() -> None:
         0.001,
         4096,
     )
-    assert (training.weight_decay, training.epochs, training.seed) == (0.0, 5, 42)
+    assert (training.weight_decay, training.seed) == (0.0, 42)
+    # From 2026-11-20 (proposal §16.8): a cosine schedule to 1% of the rate over the run.
+    assert (training.lr_schedule, training.min_lr_ratio, training.epochs) == ("cosine", 0.01, 3)
+    assert config.cached_numeric_inputs == ("binned",)
     assert config.metrics == ("map@12", "recall@12", "ndcg@12") and config.top_k == 12
     assert config.min_mps_speedup == 1.5
     speed_test = config.speed_test
@@ -176,6 +196,9 @@ def test_rules_of_the_study_are_the_recorded_ones() -> None:
     study = load_deepfm_study_config(STUDY_FILE)
     assert (study.phase, study.target_folds) == ("V", ("V1", "V2", "V3", "V4"))
     assert (study.metric, study.epoch_tolerance) == ("map@12", 0.01)
+    # The schedule length is a hyperparameter; the largest one is the config's default.
+    assert study.schedule_epochs == (1, 2, 3)
+    assert load_deepfm_config(CONFIG_FILE).training.epochs == max(study.schedule_epochs)
     assert (study.noise_seeds, study.max_seed_range, study.selection_seed) == (
         (42, 43, 44),
         0.01,
@@ -187,13 +210,13 @@ def test_rules_of_the_study_are_the_recorded_ones() -> None:
         ("embedding_dim", (16.0, 8.0, 32.0)),
         ("dropout", (0.0, 0.1, 0.3)),
     ]
+    # The listwise arm tunes its own learning rate over the same values.
+    assert study.listwise_learning_rates == study.steps[0].candidates
     assert study.ablation_components == ("first_order", "fm", "deep", "full")
     assert study.ablation_numeric_inputs == ("standardised",)
-    assert study.ablation_losses == ("listwise_softmax",)
-    assert study.final_seeds == (42, 43, 44)
-    # The two additions of 2026-11-19: the epoch-cap extension, and no grid extension.
-    assert (study.extension_epochs, study.extend_grid_on_edge) == (10, False)
-    assert study.extension_epochs > load_deepfm_config(CONFIG_FILE).training.epochs
+    assert study.final_seeds == (42, 43, 44) and not study.extend_grid_on_edge
+    # The LightGBM arms: the same seeds, the locked seed first; binary to 1000 trees.
+    assert (study.lightgbm_seeds, study.lightgbm_binary_num_trees) == ((42, 43, 44), 1000)
     # The first candidate of every step is the default of configs/deepfm.yaml.
     config = load_deepfm_config(CONFIG_FILE)
     defaults = {
@@ -218,6 +241,10 @@ def test_rules_of_the_study_are_the_recorded_ones() -> None:
         ("training", "loss", "pairwise", "loss"),
         ("training", "device", "cuda", "device"),
         ("training", "batch_rows", 0, "batch_rows"),
+        ("training", "lr_schedule", "linear", "lr_schedule"),
+        ("training", "min_lr_ratio", 0.0, "min_lr_ratio"),
+        ("training", "min_lr_ratio", 1.5, "min_lr_ratio"),
+        ("input_cache", "numeric_inputs", ["raw"], "numeric_inputs"),
         ("binning", "n_bins", 300, "n_bins"),
         ("standardise", "clip_low_percentile", 99.95, "low < high"),
         ("device_rule", "min_mps_speedup", 0.5, "min_mps_speedup"),
@@ -247,6 +274,21 @@ def test_study_config_is_validated() -> None:
         parse_deepfm_study_config({**raw, "steps": repeated})
     with pytest.raises(ValueError, match="a grid is never extended"):
         parse_deepfm_study_config({**raw, "extend_grid_on_edge": True})
+    # The rules withdrawn on 2026-11-20 are no longer accepted as settings.
+    with pytest.raises(ValueError, match="unknown keys"):
+        parse_deepfm_study_config({**raw, "final_epoch_extension": {"epochs": 10}})
+    with pytest.raises(ValueError, match="distinct and ascending"):
+        parse_deepfm_study_config({**raw, "schedule_epochs": [3, 1, 2]})
+    # The schedule length is tuned with the learning rate, so that step must come first.
+    with pytest.raises(ValueError, match="the first step must tune learning_rate"):
+        parse_deepfm_study_config({**raw, "steps": list(reversed(raw["steps"]))})
+    with pytest.raises(ValueError, match="at least 2 distinct numbers"):
+        parse_deepfm_study_config({**raw, "listwise": {"learning_rate": [0.001]}})
+    lightgbm = {**raw["lightgbm"], "seeds": [43, 42, 44]}
+    with pytest.raises(ValueError, match="must start with the selection seed"):
+        parse_deepfm_study_config({**raw, "lightgbm": lightgbm})
+    with pytest.raises(ValueError, match="selection_seed must be one of the final seeds"):
+        parse_deepfm_study_config({**raw, "final_seeds": [43, 44]})
     study = load_deepfm_study_config(STUDY_FILE)
     assert dataclasses.is_dataclass(study)
 
@@ -255,7 +297,8 @@ def test_the_study_runs_on_cpu_and_the_torch_free_modules_stay_torch_free() -> N
     # A decision by the user (docs/decisions.md 2026-11-19): CPU, so that a seed repeats exactly.
     assert load_deepfm_config(CONFIG_FILE).training.device == "cpu"
     # The rules, the driver and the comparison need no model: they must not load torch.
-    for name in ("study.py", "study_run.py", "compare.py", "records.py", "data.py", "inputs.py"):
+    torch_free = ("study.py", "study_run.py", "compare.py", "records.py", "data.py", "inputs.py")
+    for name in (*torch_free, "cache.py"):
         imports = _imports(PACKAGE / name)
         assert "torch" not in imports, name
         torch_modules = ("model", "train", "score", "trial", "benchmark", "process", "loss")

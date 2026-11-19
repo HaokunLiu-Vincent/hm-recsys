@@ -29,6 +29,9 @@ LIGHTGBM_SIDE_PREFIXES = (
     # The diagnostics after M8 train nothing, but they read the Ranker lock and the metric
     # tables through modules that import lightgbm (hmrec.ranker.locked, hmrec.hpo.v_records).
     "test_diag_",
+    # The two LightGBM arms of the M9 comparison (hmrec.hpo.lgb_arms*): they train LightGBM
+    # models with the locked configuration.
+    "test_lgb_arm",
 )
 LIGHTGBM_OPTION = "--lightgbm-side"
 _skipped_files: list[str] = []

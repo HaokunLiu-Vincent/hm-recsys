@@ -1,12 +1,17 @@
 """Tests for deepfm.study and deepfm.study_run: the rules on hand-made rows, then a tiny study.
 
-Hand example for the epoch rule (two folds, V1 with 100 queries and V2 with 300):
-    epoch 1: V1 0.20, V2 0.10 -> pooled (100 x 0.20 + 300 x 0.10) / 400 = 0.125
-    epoch 2: V1 0.22, V2 0.12 -> pooled 0.145
-    epoch 3: V1 0.21, V2 0.1205 -> pooled 0.142875 (1.47% below the best)
-    with a 1% tolerance only epoch 2 is "about equal" to the best -> e* = 2;
-    with a 2% tolerance epochs 2 and 3 are, and the smallest wins -> still 2;
-    with a 20% tolerance epoch 1 is too (13.8% below) -> e* = 1.
+Hand example for the scores (two folds, V1 with 100 queries and V2 with 300; one
+configuration "c2" with 2 epochs, two seeds):
+    seed 42: V1 0.20, V2 0.10 -> pooled (100 x 0.20 + 300 x 0.10) / 400 = 0.125
+    seed 43: V1 0.24, V2 0.12 -> pooled (24 + 36) / 400 = 0.15
+    configuration: pooled = (0.125 + 0.15) / 2 = 0.1375; V1 0.22, V2 0.11;
+    seed range = (0.15 - 0.125) / 0.125 = 0.2.
+
+Hand example for the epoch rule (the same settings with T = 1, 2, 3 epochs, seed 42):
+    T = 1: pooled 0.125;  T = 2: pooled 0.145;  T = 3: pooled 0.142875 (1.47% below the best)
+    with a 1% tolerance only T = 2 is "about equal" to the best -> T* = 2;
+    with a 2% tolerance T = 2 and T = 3 are, and the smallest wins -> still 2;
+    with a 20% tolerance T = 1 is too (13.8% below) -> T* = 1, on the edge of the grid.
 """
 
 import csv
@@ -21,47 +26,47 @@ from deepfm_example import REPO, STUDY_TARGETS, build_study_workspace
 
 from hmrec.config import (
     DeepFMStudyStep,
+    load_deepfm_config,
     load_deepfm_study_config,
     load_selection_rule,
 )
-from hmrec.csv_records import read_rows
+from hmrec.csv_records import append_row, read_rows
 from hmrec.deepfm.process import record_trial, with_seed
-from hmrec.deepfm.records import read_pooled_reference
+from hmrec.deepfm.records import TRIAL_COLUMNS, read_pooled_reference
 from hmrec.deepfm.study import (
+    WITHIN_SEED_NOISE,
     ConfigurationScore,
     StudyStop,
     Variant,
     ablation_variants,
     apply_variant,
     check_above_baseline,
-    check_noise,
+    choose_schedule,
     decide_step,
+    listwise_start,
+    listwise_step,
+    noise_mark,
     parameter_value,
     pooled_value,
     score_configuration,
-    seed_range,
     step_variants,
+    tuning_seeds,
     variant_config_id,
     variant_of,
     with_parameter,
 )
 from hmrec.deepfm.study_run import (
-    AREA_V_EXTENDED,
     AREA_V_PHASE,
+    STAGES,
     STUDY_COLUMNS,
     StudyContext,
+    StudyResult,
     TrialRequest,
-    final_rows,
+    ensure_trials,
     recorded_trials,
-    run_ablations,
-    run_final,
-    run_seeds,
-    run_step0,
-    run_tuning,
-    selected_variant,
-    step0_rows,
+    run_study,
+    study_rows,
     trial_arguments,
-    tuning_rows,
     write_study_table,
 )
 from hmrec.deepfm.trial import TrialInputs, TrialSpec, run_trial
@@ -71,202 +76,290 @@ from hmrec.run_records import RunStamp
 
 RULE = load_selection_rule(REPO / "configs" / "selection_rule.yaml")
 STUDY = load_deepfm_study_config(REPO / "configs" / "hpo" / "deepfm.yaml")
+REAL_CONFIG = load_deepfm_config(REPO / "configs" / "deepfm.yaml")
 FOLDS: tuple[str, ...] = ("V1", "V2", "V3", "V4")
-DEFAULT = Variant(0.001, 16, 0.0, "full", "binned", "pointwise_bce")
+DEFAULT = Variant(0.001, 16, 0.0, "full", "binned", "pointwise_bce", 3)
 STAMP = RunStamp("abc123", False)
+N_QUERIES = {"V1": 100, "V2": 300, "V3": 100, "V4": 300}
 
 
-def _rows(config_id: str, seed: int, values: dict[int, dict[str, float]], area: str = "v_phase"):
-    """Metric rows of one configuration: epoch -> fold -> MAP@12 (100 / 300 queries)."""
-    n_queries = {"V1": 100, "V2": 300, "V3": 100, "V4": 300}
+def _rows(config_id: str, seed: int, epochs: int, values: dict[str, float]):
+    """Metric rows of one finished configuration and seed: fold -> MAP@12 of the final model."""
     return [
         {
-            "area": area,
+            "area": "v_phase",
             "config_id": config_id,
             "seed": str(seed),
             "fold": fold,
-            "epoch": str(epoch),
-            "n_queries": str(n_queries[fold]),
+            "epoch": str(epochs),
+            "n_queries": str(N_QUERIES[fold]),
             "map@12": repr(value),
-            "train_loss": repr(1.0 / epoch),
+            "train_loss": repr(1.0 / epochs),
         }
-        for epoch, by_fold in values.items()
-        for fold, value in by_fold.items()
+        for fold, value in values.items()
     ]
 
 
-CURVE = {
-    1: {"V1": 0.20, "V2": 0.10},
-    2: {"V1": 0.22, "V2": 0.12},
-    3: {"V1": 0.21, "V2": 0.1205},
-}
+TWO_SEEDS = _rows("c2", 42, 2, {"V1": 0.20, "V2": 0.10}) + _rows(
+    "c2", 43, 2, {"V1": 0.24, "V2": 0.12}
+)
+SCHEDULE_ROWS = (
+    _rows("t1", 42, 1, {"V1": 0.20, "V2": 0.10})
+    + _rows("t2", 42, 2, {"V1": 0.22, "V2": 0.12})
+    + _rows("t3", 42, 3, {"V1": 0.21, "V2": 0.1205})
+)
 
 
-def _score(values=CURVE, tolerance: float = 0.01, folds=("V1", "V2")) -> ConfigurationScore:
-    return score_configuration(
-        _rows("c1", 42, values), "v_phase", "c1", 42, folds, "map@12", tolerance
+def _score(rows, config_id: str, epochs: int, seeds=(42,), folds=("V1", "V2")):
+    return score_configuration(rows, "v_phase", config_id, epochs, seeds, folds, "map@12")
+
+
+# ---------------------------------------------------------------- variants
+
+
+def test_the_real_configs_give_the_default_variant_and_the_recorded_rules() -> None:
+    assert variant_of(REAL_CONFIG) == DEFAULT
+    assert STUDY.schedule_epochs == (1, 2, 3) and STUDY.epoch_tolerance == 0.01
+    assert (STUDY.noise_seeds, STUDY.max_seed_range, STUDY.selection_seed) == (
+        (42, 43, 44),
+        0.01,
+        42,
     )
+    assert [(step.parameter, step.candidates) for step in STUDY.steps] == [
+        ("learning_rate", (0.001, 0.0003, 0.003)),
+        ("embedding_dim", (16.0, 8.0, 32.0)),
+        ("dropout", (0.0, 0.1, 0.3)),
+    ]
+    assert STUDY.listwise_learning_rates == (0.001, 0.0003, 0.003)
+    assert STUDY.ablation_components == ("first_order", "fm", "deep", "full")
+    assert STUDY.ablation_numeric_inputs == ("standardised",)
+    assert STUDY.final_seeds == (42, 43, 44) and not STUDY.extend_grid_on_edge
 
 
-# ---------------------------------------------------------------- scores and the epoch rule
+def test_a_variant_changes_only_its_seven_settings() -> None:
+    variant = Variant(0.003, 8, 0.1, "fm", "standardised", "listwise_softmax", 1)
+    config = apply_variant(REAL_CONFIG, variant)
+    assert variant_of(config) == variant
+    assert config.training.batch_rows == REAL_CONFIG.training.batch_rows
+    assert config.model.hidden_units == REAL_CONFIG.model.hidden_units
+    assert apply_variant(REAL_CONFIG, DEFAULT) == REAL_CONFIG
+    # Every setting is part of the configuration id; the epochs too (cosine schedule).
+    ids = {variant_config_id(REAL_CONFIG, DEFAULT)}
+    for name, value in dataclasses.asdict(variant).items():
+        ids.add(variant_config_id(REAL_CONFIG, dataclasses.replace(DEFAULT, **{name: value})))
+    assert len(ids) == 8
 
 
-def test_pooled_value_is_weighted_by_queries() -> None:
-    assert pooled_value({"V1": 0.20, "V2": 0.10}, {"V1": 100, "V2": 300}) == pytest.approx(0.125)
+def test_with_parameter_sets_one_tuned_value() -> None:
+    assert with_parameter(DEFAULT, "learning_rate", 0.003).learning_rate == 0.003
+    assert with_parameter(DEFAULT, "embedding_dim", 32.0).embedding_dim == 32
+    assert with_parameter(DEFAULT, "dropout", 0.3).dropout == 0.3
+    assert parameter_value(DEFAULT, "embedding_dim") == 16.0
+    with pytest.raises(ValueError, match="whole number"):
+        with_parameter(DEFAULT, "embedding_dim", 12.5)
+    with pytest.raises(ValueError, match="not a tuned parameter"):
+        with_parameter(DEFAULT, "components", 1.0)
+    with pytest.raises(ValueError, match="not a tuned parameter"):
+        parameter_value(DEFAULT, "epochs")
 
 
-def test_epoch_rule_hand_computed() -> None:
-    score = _score()
-    assert score.curve == pytest.approx({1: 0.125, 2: 0.145, 3: 0.142875})
-    assert (score.selected_epoch, score.best_epoch, score.epochs_trained) == (2, 2, 3)
-    assert score.pooled == pytest.approx(0.145)
-    # The fold scores are those of the SELECTED epoch.
-    assert score.fold_scores == {"V1": 0.22, "V2": 0.12}
-    assert not score.uses_last_epoch
-    assert _score(tolerance=0.02).selected_epoch == 2
-    assert _score(tolerance=0.20).selected_epoch == 1
-    assert score.train_loss == pytest.approx({1: 1.0, 2: 0.5, 3: 1 / 3})
+# ---------------------------------------------------------------- scores
+
+
+def test_scores_of_one_configuration_hand_computed() -> None:
+    assert pooled_value({"V1": 0.20, "V2": 0.10}, N_QUERIES) == pytest.approx(0.125)
+    score = _score(TWO_SEEDS, "c2", 2, seeds=(42, 43))
+    assert [seed.seed for seed in score.seeds] == [42, 43] and score.epochs == 2
+    assert [seed.pooled for seed in score.seeds] == pytest.approx([0.125, 0.15])
+    assert score.pooled == pytest.approx(0.1375)
+    assert score.fold_scores == pytest.approx({"V1": 0.22, "V2": 0.11})
+    assert score.seed_range == pytest.approx(0.2)
+    assert score.seeds[0].train_loss == pytest.approx(0.5)
     trial = score.trial_scores()
-    assert (trial.trial_id, trial.pooled_score) == ("c1", score.pooled)
+    assert (trial.trial_id, trial.pooled_score) == ("c2", pytest.approx(0.1375))
+    # One seed: the means are that seed's values, and there is no range.
+    single = score.only_seed(43)
+    assert single.pooled == pytest.approx(0.15) and single.fold_scores["V1"] == 0.24
+    with pytest.raises(ValueError, match="at least two"):
+        _ = single.seed_range
+    with pytest.raises(ValueError, match="not among its seeds"):
+        score.only_seed(44)
 
 
-def test_a_rising_curve_selects_the_last_epoch() -> None:
-    rising = {1: {"V1": 0.1, "V2": 0.1}, 2: {"V1": 0.2, "V2": 0.2}, 3: {"V1": 0.3, "V2": 0.3}}
-    score = _score(rising)
-    assert score.selected_epoch == 3 and score.uses_last_epoch
-
-
-def test_scores_need_every_fold_for_every_epoch_and_only_their_own_rows() -> None:
-    rows = _rows("c1", 42, CURVE) + _rows("c1", 43, CURVE) + _rows("c2", 42, CURVE)
-    rows += _rows("c1", 42, {1: {"V1": 0.9, "V2": 0.9}}, area="v_phase_extended")
-    own = score_configuration(rows, "v_phase", "c1", 42, ("V1", "V2"), "map@12", 0.01)
-    assert own.pooled == pytest.approx(0.145)  # other seeds, configurations and areas are ignored
-    with pytest.raises(ValueError, match="not all recorded"):
-        score_configuration(rows, "v_phase", "c1", 42, ("V1", "V2", "V3"), "map@12", 0.01)
-    with pytest.raises(ValueError, match="not all recorded"):
-        score_configuration(rows, "v_phase", "missing", 42, ("V1", "V2"), "map@12", 0.01)
+def test_scores_need_every_fold_once_and_only_the_final_epoch() -> None:
+    with pytest.raises(ValueError, match="recorded folds"):
+        _score(TWO_SEEDS, "c2", 2, folds=("V1", "V2", "V3"))
+    with pytest.raises(ValueError, match="recorded folds"):
+        _score(TWO_SEEDS, "c2", 2, seeds=(44,))
     with pytest.raises(ValueError, match="recorded twice"):
-        score_configuration(rows + rows[:1], "v_phase", "c1", 42, ("V1", "V2"), "map@12", 0.01)
+        _score(TWO_SEEDS + _rows("c2", 42, 2, {"V1": 0.3}), "c2", 2)
+    # A row of another epoch under this id means the id and the run do not belong together.
+    with pytest.raises(ValueError, match="has 2 epochs"):
+        _score(TWO_SEEDS + _rows("c2", 42, 1, {"V1": 0.3}), "c2", 2)
+    with pytest.raises(ValueError, match="at least one seed"):
+        _score(TWO_SEEDS, "c2", 2, seeds=())
+    # Rows of other areas and other configurations are not this configuration's rows.
+    other_area = [{**row, "area": "speed_test"} for row in _rows("c2", 42, 2, {"V1": 0.9})]
+    assert _score(TWO_SEEDS + other_area, "c2", 2).pooled == pytest.approx(0.125)
+
+
+def _schedule(tolerance: float):
+    scores = {epochs: _score(SCHEDULE_ROWS, f"t{epochs}", epochs) for epochs in (1, 2, 3)}
+    return choose_schedule(scores, tolerance)
+
+
+def test_epoch_rule_takes_the_smallest_schedule_within_the_tolerance() -> None:
+    choice = _schedule(0.01)
+    assert [score.pooled for score in choice.scores.values()] == pytest.approx(
+        [0.125, 0.145, 0.142875]
+    )
+    assert (choice.selected_epochs, choice.best_epochs, choice.on_grid_edge) == (2, 2, False)
+    assert choice.selected.config_id == "t2"
+    assert _schedule(0.02).selected_epochs == 2
+    wide = _schedule(0.2)
+    assert (wide.selected_epochs, wide.best_epochs, wide.on_grid_edge) == (1, 2, True)
+
+
+def test_epoch_rule_uses_the_seed_mean() -> None:
+    # T = 1: seeds 0.100 and 0.120 -> mean 0.110.  T = 2: seeds 0.118 and 0.104 -> mean 0.111.
+    # Seed 42 alone would pick T = 2 (0.118 against 0.100); the mean is within 1% -> T = 1.
+    rows = (
+        _rows("a1", 42, 1, {"V1": 0.100, "V2": 0.100})
+        + _rows("a1", 43, 1, {"V1": 0.120, "V2": 0.120})
+        + _rows("a2", 42, 2, {"V1": 0.118, "V2": 0.118})
+        + _rows("a2", 43, 2, {"V1": 0.104, "V2": 0.104})
+    )
+    both = {t: _score(rows, f"a{t}", t, seeds=(42, 43)) for t in (1, 2)}
+    assert choose_schedule(both, 0.01).selected_epochs == 1
+    only_42 = {t: _score(rows, f"a{t}", t) for t in (1, 2)}
+    assert choose_schedule(only_42, 0.01).selected_epochs == 2
 
 
 # ---------------------------------------------------------------- step 0
 
 
-def _pooled_score(pooled: float, seed: int = 42, config_id: str = "c") -> ConfigurationScore:
-    folds = dict.fromkeys(FOLDS, pooled)
-    return ConfigurationScore(config_id, seed, "v_phase", 5, 3, 3, pooled, folds, {3: pooled}, {})
+def test_noise_rule_decides_the_seeds_of_tuning_and_never_stops() -> None:
+    assert tuning_seeds(STUDY, 0.0099) == (42,)
+    # 1% or more: every candidate runs with all noise seeds (no stop).
+    assert tuning_seeds(STUDY, 0.01) == (42, 43, 44)
+    assert tuning_seeds(STUDY, 0.0185) == (42, 43, 44)
 
 
-def test_seed_range_is_max_minus_min_over_min() -> None:
-    scores = [_pooled_score(0.0300, 42), _pooled_score(0.0303, 43), _pooled_score(0.0301, 44)]
-    assert seed_range(scores) == pytest.approx(0.01)
-    assert check_noise(scores, 0.0101) == pytest.approx(0.01)
-    with pytest.raises(StudyStop, match="stops before any tuning"):
-        check_noise(scores, 0.0099)
-    with pytest.raises(ValueError, match="at least two"):
-        seed_range(scores[:1])
-
-
-def test_default_below_the_rrf_baseline_stops_the_study() -> None:
-    check_above_baseline(_pooled_score(0.0195), 0.019419)
-    with pytest.raises(StudyStop, match="below the RRF"):
-        check_above_baseline(_pooled_score(0.0194), 0.019419)
+def test_default_below_the_baseline_stops_the_study() -> None:
+    score = _score(TWO_SEEDS, "c2", 2, seeds=(42, 43))  # seed-mean pooled 0.1375
+    check_above_baseline(score, 0.1375)
+    check_above_baseline(score, 0.13)
+    with pytest.raises(StudyStop, match="below the RRF baseline"):
+        check_above_baseline(score, 0.14)
 
 
 # ---------------------------------------------------------------- tuning
 
-LEARNING_RATE = DeepFMStudyStep("learning_rate", "learning_rate", (0.001, 0.0003, 0.003))
+LEARNING_RATE_STEP = STUDY.steps[0]
 
 
-def _fold_score(config_id: str, folds: list[float]) -> ConfigurationScore:
-    """A score whose four folds each have 100 queries (pooled = plain mean)."""
-    pooled = sum(folds) / 4
-    by_fold = dict(zip(FOLDS, folds, strict=True))
-    return ConfigurationScore(config_id, 42, "v_phase", 5, 3, 3, pooled, by_fold, {3: pooled}, {})
+def _step_scores() -> tuple[dict[float, Variant], dict[float, ConfigurationScore]]:
+    """A learning-rate step whose candidates were selected at T = 2, 3 and 1.
+
+    default 0.001 (T = 2): 0.100 in every fold                 -> pooled 0.100
+    0.0003 (T = 3): 0.102, 0.102, 0.102, 0.099                  -> pooled 0.100875 (+0.875%)
+    0.003  (T = 1): 0.103, 0.103, 0.103, 0.100                  -> pooled 0.101875 (+1.875%)
+    (queries 100, 300, 100, 300)
+    """
+    values = {
+        0.001: (2, {"V1": 0.100, "V2": 0.100, "V3": 0.100, "V4": 0.100}),
+        0.0003: (3, {"V1": 0.102, "V2": 0.102, "V3": 0.102, "V4": 0.099}),
+        0.003: (1, {"V1": 0.103, "V2": 0.103, "V3": 0.103, "V4": 0.100}),
+    }
+    variants, scores = {}, {}
+    for rate, (epochs, by_fold) in values.items():
+        variants[rate] = dataclasses.replace(DEFAULT, learning_rate=rate, epochs=epochs)
+        config_id = f"lr{rate}"
+        scores[rate] = _score(_rows(config_id, 42, epochs, by_fold), config_id, epochs, folds=FOLDS)
+    return variants, scores
+
+
+def test_step_selects_by_the_rule_and_carries_the_schedule_of_the_winner() -> None:
+    variants, scores = _step_scores()
+    assert [scores[rate].pooled for rate in (0.001, 0.0003, 0.003)] == pytest.approx(
+        [0.100, 0.100875, 0.101875]
+    )
+    outcome = decide_step(LEARNING_RATE_STEP, DEFAULT, variants, scores, RULE)
+    checks = {check.trial_id: check for check in outcome.decision.checks}
+    # 0.0003: better in 3 folds but only +0.875% -> fails. 0.003: +1.875% and 3 folds -> passes.
+    assert (checks["lr0.0003"].folds_better, checks["lr0.0003"].passes) == (3, False)
+    assert (checks["lr0.003"].folds_better, checks["lr0.003"].passes) == (3, True)
+    assert outcome.selected_value == 0.003 and outcome.on_grid_edge
+    # The winner goes on WITH its own schedule length.
+    assert outcome.selected == dataclasses.replace(DEFAULT, learning_rate=0.003, epochs=1)
+    assert outcome.schedules == {}
 
 
 def test_step_keeps_the_default_when_no_candidate_passes() -> None:
-    scores = {
-        0.001: _fold_score("default", [0.030, 0.030, 0.030, 0.030]),
-        # +0.5%: better in all 4 weeks, but below the 1% gain.
-        0.0003: _fold_score("slow", [0.03015, 0.03015, 0.03015, 0.03015]),
-        # +5% pooled, but better in only 2 weeks.
-        0.003: _fold_score("fast", [0.040, 0.038, 0.024, 0.024]),
-    }
-    outcome = decide_step(LEARNING_RATE, DEFAULT, scores, RULE)
-    assert (outcome.selected_value, outcome.decision.action) == (0.001, "keep")
-    assert [(c.folds_better, c.passes) for c in outcome.decision.checks] == [(4, False), (2, False)]
-    assert outcome.selected == DEFAULT and not outcome.on_grid_edge  # 0.001 is inside its grid
+    variants, scores = _step_scores()
+    weaker = _score(
+        _rows("lr0.003", 42, 1, {"V1": 0.103, "V2": 0.100, "V3": 0.103, "V4": 0.100}),
+        "lr0.003",
+        1,
+        folds=FOLDS,
+    )  # better in 2 folds only
+    outcome = decide_step(LEARNING_RATE_STEP, DEFAULT, variants, {**scores, 0.003: weaker}, RULE)
+    assert outcome.selected_value == 0.001 and not outcome.on_grid_edge
+    assert outcome.selected.epochs == 2  # the default's own schedule length
+    with pytest.raises(ValueError, match="same configuration id"):
+        decide_step(LEARNING_RATE_STEP, DEFAULT, variants, {**scores, 0.003: scores[0.001]}, RULE)
 
 
-def test_step_switches_to_the_passing_candidate_with_the_highest_priority() -> None:
-    scores = {
-        0.001: _fold_score("default", [0.030, 0.030, 0.030, 0.030]),
-        0.0003: _fold_score("slow", [0.0310, 0.0310, 0.0310, 0.0295]),  # +2.1%, 3 weeks
-        0.003: _fold_score("fast", [0.0312, 0.0312, 0.0312, 0.0312]),  # +4%, 4 weeks
-    }
-    outcome = decide_step(LEARNING_RATE, DEFAULT, scores, RULE)
-    # "fast" is better, but "slow" comes first in priority order and is NOT within 1% of it.
-    assert outcome.selected_value == 0.003
-    close = {**scores, 0.003: _fold_score("fast", [0.0309, 0.0309, 0.0309, 0.0309])}
-    outcome = decide_step(LEARNING_RATE, DEFAULT, close, RULE)
-    # Now the two passing candidates are within 1% of each other: the first in priority wins.
-    assert (outcome.selected_value, outcome.decision.action) == (0.0003, "switch")
-    assert outcome.selected.learning_rate == 0.0003 and outcome.on_grid_edge  # the smallest value
-
-
-def test_a_step_must_start_from_the_current_configuration() -> None:
-    assert list(step_variants(LEARNING_RATE, DEFAULT)) == [0.001, 0.0003, 0.003]
+def test_a_step_starts_from_the_current_configuration() -> None:
+    variants = step_variants(LEARNING_RATE_STEP, DEFAULT)
+    assert list(variants) == [0.001, 0.0003, 0.003]
+    assert variants[0.003] == dataclasses.replace(DEFAULT, learning_rate=0.003)
     moved = dataclasses.replace(DEFAULT, learning_rate=0.003)
-    with pytest.raises(ValueError, match="not the current value"):
-        step_variants(LEARNING_RATE, moved)
-    dimension = DeepFMStudyStep("embedding_dim", "embedding_dim", (16.0, 8.0, 32.0))
-    variants = step_variants(dimension, moved)
-    # The next step keeps the learning rate the previous step selected.
-    assert [(v.embedding_dim, v.learning_rate) for v in variants.values()] == [
-        (16, 0.003),
-        (8, 0.003),
-        (32, 0.003),
-    ]
-    assert isinstance(variants[8.0].embedding_dim, int)
+    with pytest.raises(ValueError, match="is not the current value"):
+        step_variants(LEARNING_RATE_STEP, moved)
 
 
-def test_variants_change_only_the_named_setting(tmp_path: Path) -> None:
-    config = build_study_workspace(tmp_path).config
-    default = variant_of(config)
-    assert apply_variant(config, default) == config
-    faster = with_parameter(default, "learning_rate", 0.003)
-    changed = apply_variant(config, faster)
-    assert changed.training.learning_rate == 0.003 and changed.model == config.model
-    assert variant_config_id(config, faster) != variant_config_id(config, default)
-    assert parameter_value(with_parameter(default, "dropout", 0.3), "dropout") == 0.3
-    with pytest.raises(ValueError, match="not a tuned parameter"):
-        with_parameter(default, "batch_rows", 1)
-    with pytest.raises(ValueError, match="whole number"):
-        with_parameter(default, "embedding_dim", 8.5)
+def test_listwise_arm_starts_from_the_pointwise_selection() -> None:
+    pointwise = Variant(0.0003, 32, 0.1, "full", "binned", "pointwise_bce", 2)
+    start = listwise_start(STUDY, pointwise)
+    # The loss changes, the learning rate restarts at the first value of its own grid;
+    # the embedding dimension and dropout are those selected for the pointwise arm.
+    assert (start.loss, start.learning_rate) == ("listwise_softmax", 0.001)
+    assert (start.embedding_dim, start.dropout) == (32, 0.1)
+    step = listwise_step(STUDY)
+    assert (step.parameter, step.candidates) == ("learning_rate", (0.001, 0.0003, 0.003))
+    assert list(step_variants(step, start)) == [0.001, 0.0003, 0.003]
 
 
-def test_ablations_change_one_setting_and_leave_out_the_selected_configuration() -> None:
-    selected = dataclasses.replace(DEFAULT, learning_rate=0.003)
+def test_ablations_change_one_setting_and_keep_the_schedule() -> None:
+    selected = Variant(0.003, 16, 0.1, "full", "binned", "pointwise_bce", 2)
     variants = ablation_variants(STUDY, selected)
     assert list(variants) == [
         "components=first_order",
         "components=fm",
         "components=deep",
         "numeric_input=standardised",
-        "loss=listwise_softmax",
     ]
-    assert all(variant.learning_rate == 0.003 for variant in variants.values())
+    assert all(
+        (v.learning_rate, v.epochs, v.loss) == (0.003, 2, "pointwise_bce")
+        for v in variants.values()
+    )
     assert variants["components=fm"] == dataclasses.replace(selected, components="fm")
-    assert variants["loss=listwise_softmax"].components == "full"
+    assert variants["numeric_input=standardised"].components == "full"
+
+
+def test_noise_mark_compares_the_change_with_the_seed_range() -> None:
+    # Seed range 1.2%: a change of -1.0% is within the noise, -1.5% is not.
+    assert noise_mark(0.0300, 0.0297, 0.012) == WITHIN_SEED_NOISE
+    assert noise_mark(0.0300, 0.0303, 0.012) == WITHIN_SEED_NOISE
+    assert noise_mark(0.0300, 0.02955, 0.012) == ""
+    assert noise_mark(0.0300, 0.0200, 0.012) == ""
 
 
 def test_trial_arguments_carry_the_whole_configuration() -> None:
-    request = TrialRequest(
-        "v_phase_extended", "V3", 44, 10, dataclasses.replace(DEFAULT, dropout=0.1)
-    )
-    assert trial_arguments(request) == [
-        "--area", "v_phase_extended", "--target", "V3", "--seed", "44", "--epochs", "10",
+    variant = dataclasses.replace(DEFAULT, dropout=0.1, epochs=2)
+    assert trial_arguments(TrialRequest("v_phase", "V3", 44, variant)) == [
+        "--area", "v_phase", "--target", "V3", "--seed", "44", "--epochs", "2",
         "--learning-rate", "0.001", "--embedding-dim", "16", "--dropout", "0.1",
         "--components", "full", "--numeric-input", "binned", "--loss", "pointwise_bce",
     ]  # fmt: skip
@@ -292,7 +385,7 @@ def _write_reference(inputs: TrialInputs) -> None:
         csv.writer(handle).writerows([header, *rows])
 
 
-def _context(inputs: TrialInputs, calls: list[TrialRequest]) -> StudyContext:
+def _context(inputs: TrialInputs, calls: list[TrialRequest], max_seed_range: float) -> StudyContext:
     """A study on the tiny workspace whose trainings run in this process."""
     peak = ProcessPeakMemory(1024**3, 0)
 
@@ -300,120 +393,190 @@ def _context(inputs: TrialInputs, calls: list[TrialRequest]) -> StudyContext:
         calls.append(request)
         config = with_seed(apply_variant(inputs.config, request.variant), request.seed)
         trial_inputs = dataclasses.replace(inputs, config=config)
-        spec = TrialSpec(request.area, request.target_fold, request.seed, request.epochs)
+        spec = TrialSpec(request.area, request.target_fold, request.seed, request.variant.epochs)
         result = run_trial(trial_inputs, spec)
         record_trial(trial_inputs, spec, result, time.perf_counter(), peak, STAMP)
 
     study = dataclasses.replace(
         STUDY,
         noise_seeds=(42, 43),
-        max_seed_range=10.0,  # the tiny models are noisy; the stop rule is tested above
-        steps=(DeepFMStudyStep("learning_rate", "learning_rate", (0.001, 0.003)),),
+        schedule_epochs=(1, 2),
+        max_seed_range=max_seed_range,
+        steps=(
+            DeepFMStudyStep("learning_rate", "learning_rate", (0.001, 0.003)),
+            DeepFMStudyStep("dropout", "dropout", (0.0, 0.1)),
+        ),
+        listwise_learning_rates=(0.001, 0.003),
         ablation_components=("fm", "full"),
-        ablation_numeric_inputs=(),
-        ablation_losses=("listwise_softmax",),
+        ablation_numeric_inputs=("standardised",),
         final_seeds=(42, 43),
-        extension_epochs=2,
     )
     return StudyContext(inputs.paths, inputs.config, study, RULE, launch)
 
 
-def test_tiny_study_runs_every_stage_and_extends_the_epochs_at_the_cap(tmp_path: Path) -> None:
+def _keys(calls: list[TrialRequest]) -> set[tuple[Variant, int, str]]:
+    return {(call.variant, call.seed, call.target_fold) for call in calls}
+
+
+def _check_single_seed_study(
+    result: StudyResult, calls: list[TrialRequest], default: Variant
+) -> None:
+    """The trainings and decisions of the tiny study when tuning uses the selection seed only."""
+    step0 = result.step0
+    assert result.tuning is not None and result.pointwise is not None
+    assert result.listwise_step is not None and result.listwise is not None
+    assert result.pointwise_variant is not None and result.listwise_variant is not None
+    assert result.ablations is not None
+    # ---- step 0: the default with 2 schedule lengths x 2 seeds x 4 folds
+    assert list(step0.schedule.scores) == [1, 2] and step0.tuning_seeds == (42,)
+    assert not step0.multi_seed and step0.baseline == pytest.approx(0.05)
+    step0_calls = calls[:16]
+    assert _keys(step0_calls) == {
+        (dataclasses.replace(default, epochs=epochs), seed, fold)
+        for epochs in (1, 2)
+        for seed in (42, 43)
+        for fold in STUDY_TARGETS
+    }
+    selected = step0.schedule.selected
+    assert [seed.seed for seed in selected.seeds] == [42, 43]
+    assert step0.seed_range == pytest.approx(selected.seed_range)
+    # ---- learning rate: every candidate with both schedule lengths, seed 42 only
+    rate_step, dropout_step = result.tuning
+    assert sorted(rate_step.schedules) == [0.001, 0.003]
+    for value, schedule in rate_step.schedules.items():
+        assert list(schedule.scores) == [1, 2]
+        assert rate_step.variants[value].epochs == schedule.selected_epochs
+        assert rate_step.scores[value] == schedule.selected
+        assert [seed.seed for seed in schedule.selected.seeds] == [42]
+    faster = dataclasses.replace(default, learning_rate=0.003)
+    rate_calls = calls[16:24]
+    assert _keys(rate_calls) == {
+        (dataclasses.replace(faster, epochs=epochs), 42, fold)
+        for epochs in (1, 2)
+        for fold in STUDY_TARGETS
+    }
+    # ---- dropout: at the schedule length that came with the learning rate, seed 42 only
+    after_rate = rate_step.selected
+    assert dropout_step.start == after_rate and dropout_step.schedules == {}
+    assert {variant.epochs for variant in dropout_step.variants.values()} == {after_rate.epochs}
+    assert _keys(calls[24:28]) == {
+        (dataclasses.replace(after_rate, dropout=0.1), 42, fold) for fold in STUDY_TARGETS
+    }
+    assert result.pointwise_variant == dropout_step.selected
+    # ---- the final seeds of the pointwise arm
+    assert [seed.seed for seed in result.pointwise.seeds] == [42, 43]
+    assert result.pointwise.epochs == result.pointwise_variant.epochs
+    # ---- listwise: its own learning-rate step from the pointwise selection
+    start = dataclasses.replace(
+        result.pointwise_variant, loss="listwise_softmax", learning_rate=0.001
+    )
+    assert result.listwise_step.start == start
+    assert sorted(result.listwise_step.schedules) == [0.001, 0.003]
+    assert result.listwise_variant.loss == "listwise_softmax"
+    assert result.listwise_variant.dropout == result.pointwise_variant.dropout
+    assert [seed.seed for seed in result.listwise.seeds] == [42, 43]
+    # ---- ablations: seed 42, the pointwise selection's schedule length
+    assert list(result.ablations) == ["components=fm", "numeric_input=standardised"]
+    for score in result.ablations.values():
+        assert score.epochs == result.pointwise_variant.epochs
+        assert [seed.seed for seed in score.seeds] == [42]
+    # Every training ran once, in the area of the study.
+    assert len(_keys(calls)) == len(calls) and {call.area for call in calls} == {AREA_V_PHASE}
+
+
+def test_tiny_study_runs_every_stage_and_continues_where_it_stopped(tmp_path: Path) -> None:
     torch.set_num_threads(1)
-    inputs = build_study_workspace(tmp_path, epochs=1)  # 1 epoch: the rule must pick the cap
+    inputs = build_study_workspace(tmp_path)
     _write_reference(inputs)
     calls: list[TrialRequest] = []
-    context = _context(inputs, calls)
+    # A huge limit: the tiny models are noisy, and this test is about the single-seed branch.
+    context = _context(inputs, calls, max_seed_range=10.0)
     reference = read_pooled_reference(inputs.paths, STUDY_TARGETS, "map@12")
     assert (reference.rrf_baseline, reference.lightgbm) == pytest.approx((0.05, 0.5))
 
-    # ---- step 0: 2 seeds x 4 folds, one process each
-    step0 = run_step0(context)
-    assert [(c.seed, c.target_fold, c.epochs) for c in calls] == [
-        (seed, fold, 1) for seed in (42, 43) for fold in STUDY_TARGETS
-    ]
-    assert [score.seed for score in step0.scores] == [42, 43] and step0.baseline == 0.05
-    assert step0.seed_range == pytest.approx(seed_range(step0.scores))
-    assert all(score.selected_epoch == 1 for score in step0.scores)
-
-    # ---- tuning: the default is not trained again; the candidate is, with seed 42 only
-    outcomes = run_tuning(context)
-    new = calls[8:]
-    assert [(c.variant.learning_rate, c.seed, c.target_fold) for c in new] == [
-        (0.003, 42, fold) for fold in STUDY_TARGETS
-    ]
-    assert len(outcomes) == 1 and set(outcomes[0].scores) == {0.001, 0.003}
-    selected = selected_variant(outcomes, context.default)
-    assert selected.learning_rate == outcomes[0].selected_value
-
-    # ---- final: epoch 1 of 1 is the cap -> the selected configuration is trained for 2 epochs
-    final = run_final(context, selected)
-    extension = calls[12:]
-    assert final.extended and (final.area, final.epochs) == (AREA_V_EXTENDED, 2)
-    assert [(c.area, c.epochs, c.seed) for c in extension] == [(AREA_V_EXTENDED, 2, 42)] * 4
-    assert final.default_epochs_score.uses_last_epoch and final.score.epochs_trained == 2
-    # On CPU the first epoch of the longer run repeats the 1-epoch run exactly.
-    assert final.score.curve[1] == final.default_epochs_score.curve[1]
-
-    # ---- ablations and seeds use the extended number of epochs too
-    ablations = run_ablations(context, final)
-    assert list(ablations) == ["components=fm", "loss=listwise_softmax"]
-    seeds = run_seeds(context, final)
-    later = calls[16:]
-    assert all((c.area, c.epochs) == (AREA_V_EXTENDED, 2) for c in later)
-    assert [score.seed for score in seeds] == [42, 43] and seeds[0] == final.score
-    assert len(calls) == 16 + 2 * 4 + 4  # two ablations, and seed 43 of the selected one
-
-    # ---- nothing is trained twice: every stage again starts no process
-    n_calls = len(calls)
-    run_step0(context)
-    assert run_final(context, selected_variant(run_tuning(context), context.default)) == final
-    run_ablations(context, final)
-    run_seeds(context, final)
-    assert len(calls) == n_calls == len(recorded_trials(inputs.paths))
+    # Stage by stage: a later stage does not repeat the trainings of an earlier one.
+    only_step0 = run_study(context, "step0")
+    assert len(calls) == 16 and only_step0.tuning is None and only_step0.pointwise is None
+    result = run_study(context, STAGES[-1])
+    _check_single_seed_study(result, calls, context.default)
+    n_trainings = len(calls)
+    assert len(recorded_trials(inputs.paths)) == n_trainings
+    again = run_study(context, STAGES[-1])
+    assert len(calls) == n_trainings and again == result
+    with pytest.raises(ValueError, match="through must be one of"):
+        run_study(context, "final")
 
     # ---- the study table
-    rows = step0_rows(step0) + tuning_rows(outcomes)
-    rows += final_rows(final, ablations, seeds, reference.lightgbm)
+    assert result.pointwise is not None and result.ablations is not None
+    with pytest.raises(ValueError, match="run it through ablations"):
+        study_rows(only_step0, 42, reference.lightgbm)
+    rows = study_rows(result, 42, reference.lightgbm)
     write_study_table(inputs.paths, rows, STAMP)
     written = read_rows(inputs.paths.deepfm_study_file, STUDY_COLUMNS)
-    assert [row["stage"] for row in written] == (
+    stages = [row["stage"] for row in written]
+    assert stages == (
         ["step0"] * 2
+        + ["tune:learning_rate:schedule"] * 4
         + ["tune:learning_rate"] * 2
-        + ["final"] * 2
+        + ["tune:dropout"] * 2
+        + ["final"]
+        + ["tune:listwise_learning_rate:schedule"] * 4
+        + ["tune:listwise_learning_rate"] * 2
+        + ["final"]
         + ["ablation"] * 2
-        + ["seeds"] * 2
     )
-    tuned = [row for row in written if row["stage"] == "tune:learning_rate"]
-    assert [row["selected"] for row in tuned].count("True") == 1
-    assert tuned[0]["relative_change"] == "0.0" and tuned[0]["passes"] == ""  # the step's start
-    assert tuned[1]["passes"] in ("True", "False") and tuned[1]["folds_better"] in "01234"
+    by_stage = {stage: [row for row in written if row["stage"] == stage] for stage in set(stages)}
+    assert [row["selected"] for row in by_stage["step0"]].count("True") == 1
+    assert [row["selected"] for row in by_stage["tune:learning_rate"]].count("True") == 1
+    assert {row["arm"] for row in by_stage["final"]} == {"deepfm_pointwise", "deepfm_listwise"}
+    assert all(row["seeds"] == "42 43" and row["seed_range"] for row in by_stage["final"])
     assert all(row["git_commit"] == "abc123" for row in written)
+    # An ablation is compared with the full model of the SAME seed; the mark follows the range.
+    full = result.pointwise.only_seed(42)
+    for row in by_stage["ablation"]:
+        change = float(row["relative_change"])
+        ablation = result.ablations[row["name"]]
+        assert change == pytest.approx(ablation.pooled / full.pooled - 1)
+        marked = row["note"].startswith(WITHIN_SEED_NOISE)
+        assert marked == (abs(change) < result.step0.seed_range)
+        assert "relative to LightGBM" in row["note"] and row["reference"] == full.config_id
     with pytest.raises(FileExistsError, match="never replaced"):
         write_study_table(inputs.paths, rows, STAMP)
 
+    # ---- the second branch of the noise rule, on the same records: with a limit below the
+    # observed range every tuning candidate also runs with seed 43, and nothing stops.
+    noisy = _context(inputs, calls, max_seed_range=1e-9)
+    multi = run_study(noisy, STAGES[-1])
+    assert multi.step0.multi_seed and multi.step0.tuning_seeds == (42, 43)
+    assert multi.tuning is not None and multi.listwise_step is not None
+    for outcome in (*multi.tuning, multi.listwise_step):
+        for score in outcome.scores.values():
+            assert [seed.seed for seed in score.seeds] == [42, 43]
+    new_calls = calls[n_trainings:]
+    assert new_calls and {call.seed for call in new_calls} <= {42, 43}
+    # The ablations stay at the selection seed in both branches.
+    assert multi.ablations is not None
+    assert all([s.seed for s in score.seeds] == [42] for score in multi.ablations.values())
 
-def test_no_extension_when_the_selected_epoch_is_below_the_cap(tmp_path: Path) -> None:
+
+def test_a_training_recorded_on_another_device_does_not_count(tmp_path: Path) -> None:
     inputs = build_study_workspace(tmp_path)
     paths = inputs.paths
-    config_id = variant_config_id(inputs.config, variant_of(inputs.config))
-    values = {
-        1: dict.fromkeys(FOLDS, 0.30),
-        2: dict.fromkeys(FOLDS, 0.40),
-        3: dict.fromkeys(FOLDS, 0.401),
-    }
-    header = ["area", "config_id", "seed", "fold", "epoch", "n_queries", "map@12", "train_loss"]
-    paths.results_root.mkdir(parents=True)
-    with paths.deepfm_metrics_file.open("w", newline="") as handle:
-        writer = csv.DictWriter(handle, fieldnames=header)
-        writer.writeheader()
-        writer.writerows(_rows(config_id, 42, values))
-
-    def never(request: TrialRequest) -> None:
-        raise AssertionError(f"no training is needed, got {request}")
-
-    context = StudyContext(paths, inputs.config, STUDY, RULE, never)
-    final = run_final(context, variant_of(inputs.config))
-    # Epoch 2 is within 1% of the best (epoch 3): the cap is not reached, nothing is extended.
-    assert (final.score.selected_epoch, final.extended, final.area) == (2, False, AREA_V_PHASE)
-    assert final.epochs == 3 and final.score == final.default_epochs_score
+    variant = variant_of(inputs.config)
+    config_id = variant_config_id(inputs.config, variant)
+    row = dict.fromkeys(TRIAL_COLUMNS, "0")
+    for fold in STUDY_TARGETS:
+        row.update({"area": AREA_V_PHASE, "config_id": config_id, "seed": "42", "fold": fold})
+        append_row(paths.deepfm_trials_file, TRIAL_COLUMNS, {**row, "device": "mps"})
+    assert (AREA_V_PHASE, config_id, 42, "V1", "mps") in recorded_trials(paths)
+    requested: list[TrialRequest] = []
+    study = dataclasses.replace(STUDY, target_folds=STUDY_TARGETS)
+    context = StudyContext(paths, inputs.config, study, RULE, requested.append)
+    # The config says CPU: the four MPS rows do not satisfy the request.
+    assert inputs.config.training.device == "cpu"
+    assert ensure_trials(context, variant, [42]) == 4
+    assert [request.target_fold for request in requested] == list(STUDY_TARGETS)
+    for fold in STUDY_TARGETS:
+        row.update({"area": AREA_V_PHASE, "config_id": config_id, "seed": "42", "fold": fold})
+        append_row(paths.deepfm_trials_file, TRIAL_COLUMNS, {**row, "device": "cpu"})
+    assert ensure_trials(context, variant, [42]) == 0

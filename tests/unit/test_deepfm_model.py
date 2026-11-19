@@ -95,6 +95,24 @@ def test_the_four_component_variants_add_up() -> None:
     assert float(outputs["deep"].abs().sum()) > 0
 
 
+def test_first_order_variant_never_looks_up_an_embedding(monkeypatch: pytest.MonkeyPatch) -> None:
+    # The first_order variant uses no embedding, so it must not compute them at all.
+    codes = torch.tensor([[0, 1], [2, 0]])
+
+    def refuse(*args: object) -> torch.Tensor:
+        raise AssertionError("field_embeddings was called")
+
+    first_order = _model(replace(SMALL, components="first_order"))
+    expected = first_order.first_order_logit(codes, None, None)
+    monkeypatch.setattr(first_order, "field_embeddings", refuse)
+    assert torch.equal(first_order(codes), expected)
+    # The other variants do need them.
+    full = _model(replace(SMALL, components="full"))
+    monkeypatch.setattr(full, "field_embeddings", refuse)
+    with pytest.raises(AssertionError, match="field_embeddings was called"):
+        full(codes)
+
+
 def test_value_fields_use_the_value_and_the_missing_indicator() -> None:
     layout = FieldLayout((3,), 2)  # one code field, two value fields
     model = _model(layout=layout)

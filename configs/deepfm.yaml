@@ -35,10 +35,19 @@ standardise:
 
 training:
   loss: pointwise_bce          # or listwise_softmax (batches of whole queries, §16.3)
-  learning_rate: 0.001         # Adam, default betas
+  learning_rate: 0.001         # Adam, default betas; the rate of the first step
+  # cosine (from 2026-11-20, proposal §16.8) or constant (the step-0 runs of 2026-11-19).
+  # cosine: with N = all optimizer steps of the run and t = 0 ... N - 1,
+  #   lr(t) = lr_min + (learning_rate - lr_min) * (1 + cos(pi * t / N)) / 2
+  # so the rate falls within the run, whatever its number of epochs.
+  lr_schedule: cosine
+  min_lr_ratio: 0.01           # lr_min = learning_rate * min_lr_ratio
   batch_rows: 4096             # rows per batch (listwise: at most this many rows of whole queries)
   weight_decay: 0.0
-  epochs: 5                    # a checkpoint and an evaluation after every epoch
+  # Epochs of one run = the length T of its schedule. The model is evaluated once, after
+  # the last epoch. The study runs T = 1, 2, 3 as separate trainings (configs/hpo/deepfm.yaml).
+  # It was 5 with a checkpoint after every epoch until 2026-11-20.
+  epochs: 3
   seed: 42
   # cpu, mps or undecided (a training refuses to start while it is undecided).
   # CPU, a decision by the user on 2026-11-19 that DEVIATES from the device rule
@@ -52,6 +61,14 @@ training:
 
 scoring:
   rows_per_chunk: 262144       # candidate rows scored per forward pass (memory only)
+
+input_cache:
+  # Speed only (proposal §16.8): the encoded inputs of a target week (its training rows
+  # and its candidates) are written to artifacts/deepfm/cache/ by the first training that
+  # needs them and read back by the later ones, after every file's sha256 was checked.
+  # Only the modes listed here are cached. standardised is left out: one ablation uses it
+  # once per week, so its cache would never be read.
+  numeric_inputs: [binned]
 
 device_rule:
   # MPS is used only if one training step on MPS is at least this many times faster

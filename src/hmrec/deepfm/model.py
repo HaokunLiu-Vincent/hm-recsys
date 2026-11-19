@@ -119,9 +119,12 @@ class DeepFM(nn.Module):
         missing: torch.Tensor | None = None,
     ) -> torch.Tensor:
         """The logit of every row: float32 [B]."""
+        if self.components == FIRST_ORDER:
+            # No embedding is used by this variant: do not look them up at all.
+            return self.first_order_logit(codes, values, missing)
         embeddings = self.field_embeddings(codes, values, missing)
         logit = torch.zeros(codes.shape[0], dtype=embeddings.dtype, device=embeddings.device)
-        if self.components in (FIRST_ORDER, FM, FULL):
+        if self.components in (FM, FULL):
             logit = logit + self.first_order_logit(codes, values, missing)
         if self.components in (FM, FULL):
             logit = logit + fm_second_order(embeddings)

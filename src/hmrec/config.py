@@ -2322,6 +2322,9 @@ def load_diagnostics_config(path: Path) -> DiagnosticsConfig:
 DEEPFM_COMPONENTS = ("first_order", "fm", "deep", "full")
 DEEPFM_NUMERIC_INPUTS = ("binned", "standardised")
 DEEPFM_LOSSES = ("pointwise_bce", "listwise_softmax")
+DEEPFM_LR_COSINE = "cosine"
+DEEPFM_LR_CONSTANT = "constant"
+DEEPFM_LR_SCHEDULES = (DEEPFM_LR_COSINE, DEEPFM_LR_CONSTANT)
 DEEPFM_UNDECIDED_DEVICE = "undecided"
 DEEPFM_DEVICES = ("cpu", "mps", DEEPFM_UNDECIDED_DEVICE)
 
@@ -2353,16 +2356,22 @@ class DeepFMTrainingConfig:
 
     Attributes:
         loss: "pointwise_bce" or "listwise_softmax".
-        learning_rate: Adam learning rate.
+        learning_rate: Adam learning rate (with the cosine schedule: of the first step).
+        lr_schedule: "cosine" (the rate falls to learning_rate * min_lr_ratio over
+            all steps of the run) or "constant".
+        min_lr_ratio: Lowest rate of the cosine schedule as a share of learning_rate.
         batch_rows: Rows per batch (listwise: at most this many rows of whole queries).
         weight_decay: Adam weight decay (0 = none).
-        epochs: Passes over the training rows; a checkpoint after each.
+        epochs: Passes over the training rows = the length of the schedule. The
+            model is evaluated once, after the last epoch.
         seed: Fixes the initial weights, the batch order and the dropout.
         device: "cpu", "mps", or "undecided" until the device benchmark has run.
     """
 
     loss: str
     learning_rate: float
+    lr_schedule: str
+    min_lr_ratio: float
     batch_rows: int
     weight_decay: float
     epochs: int
@@ -2406,6 +2415,8 @@ class DeepFMConfig:
         clip_high_percentile: Upper clipping percentile of the standardised input.
         training: The training settings.
         scoring_rows_per_chunk: Candidate rows per forward pass when scoring.
+        cached_numeric_inputs: The numeric-input modes whose encoded inputs are
+            cached on disk (speed only).
         min_mps_speedup: MPS is used only if it is at least this many times faster.
         speed_test: The speed test settings.
     """
@@ -2422,6 +2433,7 @@ class DeepFMConfig:
     clip_high_percentile: float
     training: DeepFMTrainingConfig
     scoring_rows_per_chunk: int
+    cached_numeric_inputs: tuple[str, ...]
     min_mps_speedup: float
     speed_test: DeepFMSpeedTestConfig
 
@@ -2478,11 +2490,23 @@ def _parse_deepfm_model(raw: Mapping[str, Any], where: str) -> DeepFMModelConfig
 
 def _parse_deepfm_training(raw: Mapping[str, Any], where: str) -> DeepFMTrainingConfig:
     """The `training` section of configs/deepfm.yaml."""
-    keys = {"loss", "learning_rate", "batch_rows", "weight_decay", "epochs", "seed", "device"}
+    keys = {
+        "loss",
+        "learning_rate",
+        "lr_schedule",
+        "min_lr_ratio",
+        "batch_rows",
+        "weight_decay",
+        "epochs",
+        "seed",
+        "device",
+    }
     check_keys(raw, keys, where)
     training = DeepFMTrainingConfig(
         loss=get_str(raw, "loss", where),
         learning_rate=get_float(raw, "learning_rate", where),
+        lr_schedule=get_str(raw, "lr_schedule", where),
+        min_lr_ratio=get_float(raw, "min_lr_ratio", where),
         batch_rows=get_int(raw, "batch_rows", where),
         weight_decay=get_float(raw, "weight_decay", where),
         epochs=get_int(raw, "epochs", where),
@@ -2493,7 +2517,10 @@ def _parse_deepfm_training(raw: Mapping[str, Any], where: str) -> DeepFMTraining
         require_positive(getattr(training, name), f"{where}.{name}")
     if training.weight_decay < 0:
         raise ValueError(f"{where}.weight_decay must be >= 0, got {training.weight_decay}")
+    if not 0 < training.min_lr_ratio <= 1:
+        raise ValueError(f"{where}.min_lr_ratio must be in (0, 1], got {training.min_lr_ratio}")
     _require_choice(training.loss, DEEPFM_LOSSES, f"{where}.loss")
+    _require_choice(training.lr_schedule, DEEPFM_LR_SCHEDULES, f"{where}.lr_schedule")
     _require_choice(training.device, DEEPFM_DEVICES, f"{where}.device")
     return training
 
@@ -2541,10 +2568,13 @@ def parse_deepfm_config(raw: Mapping[str, Any]) -> DeepFMConfig:
         "standardise",
         "training",
         "scoring",
+        "input_cache",
         "device_rule",
         "speed_test",
     }
     check_keys(raw, keys, where)
+    input_cache = get_mapping(raw, "input_cache", where)
+    check_keys(input_cache, {"numeric_inputs"}, f"{where}.input_cache")
     binning = get_mapping(raw, "binning", where)
     check_keys(binning, {"n_bins"}, f"{where}.binning")
     standardise = get_mapping(raw, "standardise", where)
@@ -2566,6 +2596,7 @@ def parse_deepfm_config(raw: Mapping[str, Any]) -> DeepFMConfig:
         clip_high_percentile=get_float(standardise, "clip_high_percentile", f"{where}.standardise"),
         training=_parse_deepfm_training(get_mapping(raw, "training", where), f"{where}.training"),
         scoring_rows_per_chunk=get_int(scoring, "rows_per_chunk", f"{where}.scoring"),
+        cached_numeric_inputs=get_str_list(input_cache, "numeric_inputs", f"{where}.input_cache"),
         min_mps_speedup=get_float(device_rule, "min_mps_speedup", f"{where}.device_rule"),
         speed_test=_parse_deepfm_speed_test(
             get_mapping(raw, "speed_test", where), f"{where}.speed_test"
@@ -2580,6 +2611,8 @@ def parse_deepfm_config(raw: Mapping[str, Any]) -> DeepFMConfig:
         raise ValueError(f"{where}.standardise: need 0 <= low < high <= 100")
     if config.min_mps_speedup < 1:
         raise ValueError(f"{where}.device_rule.min_mps_speedup must be >= 1")
+    for name in config.cached_numeric_inputs:
+        _require_choice(name, DEEPFM_NUMERIC_INPUTS, f"{where}.input_cache.numeric_inputs")
     if len(set(config.metrics)) != len(config.metrics):
         raise ValueError(f"{where}: metrics repeat: {config.metrics}")
     return config
@@ -2610,45 +2643,64 @@ class DeepFMStudyStep:
 
 @dataclass(frozen=True)
 class DeepFMStudyConfig:
-    """Settings from configs/hpo/deepfm.yaml: the rules of the DeepFM study (proposal §16.5).
+    """Settings from configs/hpo/deepfm.yaml: the rules of the M9 study (proposal §16.8).
 
     Attributes:
         phase: "V".
         target_folds: The folds every configuration is trained for and evaluated on.
         metric: The selection metric, pooled over the folds.
-        epoch_tolerance: Relative tolerance of the epoch rule.
+        schedule_epochs: The schedule lengths T (epochs of a run), ascending.
+        epoch_tolerance: Relative tolerance of the epoch rule (and of the
+            number-of-trees rule of the binary LightGBM arm).
         noise_seeds: Seeds of step 0.
-        max_seed_range: Step 0 stops the study if (max - min) / min is above this.
-        selection_seed: The seed every selection uses.
-        steps: The tuning steps in order.
+        max_seed_range: A step-0 seed range of at least this much makes every
+            tuning candidate run with all noise seeds (there is no stop).
+        selection_seed: The seed of tuning when the seed range is below the limit,
+            and of the ablations.
+        steps: The tuning steps of the pointwise arm in order; the first is the
+            learning rate.
+        listwise_learning_rates: Learning-rate candidates of the listwise arm, the
+            current value first.
         ablation_components: Component variants run at the selected configuration.
         ablation_numeric_inputs: Numeric-input variants run there.
-        ablation_losses: Loss variants run there.
-        final_seeds: Seeds of the selected configuration in the final report.
-        extension_epochs: Epochs the final configuration is trained for if the
-            epoch rule selects its last epoch (more than the default number).
+        final_seeds: Seeds of each arm's selected configuration in the final report.
         extend_grid_on_edge: Always False: a selected value on the edge of its
             grid is flagged, the grid is not extended.
+        lightgbm_seeds: Seeds of the two LightGBM arms, the selection seed first.
+        lightgbm_binary_num_trees: Trees the binary arm's first seed is trained to.
     """
 
     phase: str
     target_folds: tuple[str, ...]
     metric: str
+    schedule_epochs: tuple[int, ...]
     epoch_tolerance: float
     noise_seeds: tuple[int, ...]
     max_seed_range: float
     selection_seed: int
     steps: tuple[DeepFMStudyStep, ...]
+    listwise_learning_rates: tuple[float, ...]
     ablation_components: tuple[str, ...]
     ablation_numeric_inputs: tuple[str, ...]
-    ablation_losses: tuple[str, ...]
     final_seeds: tuple[int, ...]
-    extension_epochs: int
     extend_grid_on_edge: bool
+    lightgbm_seeds: tuple[int, ...]
+    lightgbm_binary_num_trees: int
 
 
 DEEPFM_STUDY_PHASE = "V"
-DEEPFM_TUNED_PARAMETERS = ("learning_rate", "embedding_dim", "dropout")
+DEEPFM_LEARNING_RATE = "learning_rate"
+DEEPFM_TUNED_PARAMETERS = (DEEPFM_LEARNING_RATE, "embedding_dim", "dropout")
+
+
+def _distinct_numbers(value: Any, where: str) -> tuple[float, ...]:
+    """A list of at least 2 distinct numbers, as floats."""
+    is_numbers = isinstance(value, list) and all(
+        isinstance(item, int | float) and not isinstance(item, bool) for item in value
+    )
+    if not is_numbers or len(value) < 2 or len(set(value)) != len(value):
+        raise ValueError(f"{where}: expected at least 2 distinct numbers")
+    return tuple(float(item) for item in value)
 
 
 def _parse_deepfm_study_step(raw: Any, position: int) -> DeepFMStudyStep:
@@ -2657,19 +2709,39 @@ def _parse_deepfm_study_step(raw: Any, position: int) -> DeepFMStudyStep:
     if not isinstance(raw, Mapping):
         raise ValueError(f"{where}: expected a mapping")
     check_keys(raw, {"name", "parameter", "candidates"}, where)
-    candidates = raw["candidates"]
-    is_numbers = isinstance(candidates, list) and all(
-        isinstance(item, int | float) and not isinstance(item, bool) for item in candidates
-    )
-    if not is_numbers or len(candidates) < 2 or len(set(candidates)) != len(candidates):
-        raise ValueError(f"{where}.candidates: expected at least 2 distinct numbers")
     step = DeepFMStudyStep(
         name=get_str(raw, "name", where),
         parameter=get_str(raw, "parameter", where),
-        candidates=tuple(float(item) for item in candidates),
+        candidates=_distinct_numbers(raw["candidates"], f"{where}.candidates"),
     )
     _require_choice(step.parameter, DEEPFM_TUNED_PARAMETERS, f"{where}.parameter")
     return step
+
+
+def _check_deepfm_study(config: DeepFMStudyConfig, where: str) -> None:
+    """The range and consistency checks of a parsed study config."""
+    if config.extend_grid_on_edge:
+        raise ValueError(f"{where}.extend_grid_on_edge must be false: a grid is never extended")
+    if config.phase != DEEPFM_STUDY_PHASE:
+        raise ValueError(f"{where}.phase must be {DEEPFM_STUDY_PHASE!r}, got {config.phase!r}")
+    require_positive(config.epoch_tolerance, f"{where}.epoch_tolerance")
+    require_positive(config.max_seed_range, f"{where}.noise.max_seed_range")
+    require_positive(config.lightgbm_binary_num_trees, f"{where}.lightgbm.binary_num_trees")
+    if list(config.schedule_epochs) != sorted(set(config.schedule_epochs)):
+        raise ValueError(f"{where}.schedule_epochs must be distinct and ascending")
+    for name in config.ablation_components:
+        _require_choice(name, DEEPFM_COMPONENTS, f"{where}.ablations.components")
+    for name in config.ablation_numeric_inputs:
+        _require_choice(name, DEEPFM_NUMERIC_INPUTS, f"{where}.ablations.numeric_input")
+    if config.selection_seed not in config.noise_seeds:
+        raise ValueError(f"{where}.selection_seed must be one of the noise seeds")
+    if config.selection_seed not in config.final_seeds:
+        raise ValueError(f"{where}.selection_seed must be one of the final seeds")
+    if config.lightgbm_seeds[0] != config.selection_seed:
+        raise ValueError(f"{where}.lightgbm.seeds must start with the selection seed")
+    # The schedule length is tuned together with the learning rate, so that step comes first.
+    if config.steps[0].parameter != DEEPFM_LEARNING_RATE:
+        raise ValueError(f"{where}.steps: the first step must tune {DEEPFM_LEARNING_RATE}")
 
 
 def parse_deepfm_study_config(raw: Mapping[str, Any]) -> DeepFMStudyConfig:
@@ -2684,22 +2756,26 @@ def parse_deepfm_study_config(raw: Mapping[str, Any]) -> DeepFMStudyConfig:
         "phase",
         "target_folds",
         "metric",
+        "schedule_epochs",
         "epoch_tolerance",
         "noise",
         "selection_seed",
         "steps",
+        "listwise",
         "ablations",
         "final_seeds",
-        "final_epoch_extension",
         "extend_grid_on_edge",
+        "lightgbm",
     }
     check_keys(raw, keys, where)
-    extension = get_mapping(raw, "final_epoch_extension", where)
-    check_keys(extension, {"epochs"}, f"{where}.final_epoch_extension")
     noise = get_mapping(raw, "noise", where)
     check_keys(noise, {"seeds", "max_seed_range"}, f"{where}.noise")
+    listwise = get_mapping(raw, "listwise", where)
+    check_keys(listwise, {"learning_rate"}, f"{where}.listwise")
     ablations = get_mapping(raw, "ablations", where)
-    check_keys(ablations, {"components", "numeric_input", "loss"}, f"{where}.ablations")
+    check_keys(ablations, {"components", "numeric_input"}, f"{where}.ablations")
+    lightgbm = get_mapping(raw, "lightgbm", where)
+    check_keys(lightgbm, {"seeds", "binary_num_trees"}, f"{where}.lightgbm")
     raw_steps = raw["steps"]
     if not isinstance(raw_steps, list) or not raw_steps:
         raise ValueError(f"{where}.steps: expected a non-empty list")
@@ -2707,33 +2783,23 @@ def parse_deepfm_study_config(raw: Mapping[str, Any]) -> DeepFMStudyConfig:
         phase=get_str(raw, "phase", where),
         target_folds=get_str_list(raw, "target_folds", where),
         metric=get_str(raw, "metric", where),
+        schedule_epochs=_get_positive_int_list(raw, "schedule_epochs", where),
         epoch_tolerance=get_float(raw, "epoch_tolerance", where),
         noise_seeds=_get_positive_int_list(noise, "seeds", f"{where}.noise"),
         max_seed_range=get_float(noise, "max_seed_range", f"{where}.noise"),
         selection_seed=get_int(raw, "selection_seed", where),
         steps=tuple(_parse_deepfm_study_step(step, i) for i, step in enumerate(raw_steps)),
+        listwise_learning_rates=_distinct_numbers(
+            listwise["learning_rate"], f"{where}.listwise.learning_rate"
+        ),
         ablation_components=get_str_list(ablations, "components", f"{where}.ablations"),
         ablation_numeric_inputs=get_str_list(ablations, "numeric_input", f"{where}.ablations"),
-        ablation_losses=get_str_list(ablations, "loss", f"{where}.ablations"),
         final_seeds=_get_positive_int_list(raw, "final_seeds", where),
-        extension_epochs=get_int(extension, "epochs", f"{where}.final_epoch_extension"),
         extend_grid_on_edge=get_bool(raw, "extend_grid_on_edge", where),
+        lightgbm_seeds=_get_positive_int_list(lightgbm, "seeds", f"{where}.lightgbm"),
+        lightgbm_binary_num_trees=get_int(lightgbm, "binary_num_trees", f"{where}.lightgbm"),
     )
-    require_positive(config.extension_epochs, f"{where}.final_epoch_extension.epochs")
-    if config.extend_grid_on_edge:
-        raise ValueError(f"{where}.extend_grid_on_edge must be false: a grid is never extended")
-    if config.phase != DEEPFM_STUDY_PHASE:
-        raise ValueError(f"{where}.phase must be {DEEPFM_STUDY_PHASE!r}, got {config.phase!r}")
-    require_positive(config.epoch_tolerance, f"{where}.epoch_tolerance")
-    require_positive(config.max_seed_range, f"{where}.noise.max_seed_range")
-    for name in config.ablation_components:
-        _require_choice(name, DEEPFM_COMPONENTS, f"{where}.ablations.components")
-    for name in config.ablation_numeric_inputs:
-        _require_choice(name, DEEPFM_NUMERIC_INPUTS, f"{where}.ablations.numeric_input")
-    for name in config.ablation_losses:
-        _require_choice(name, DEEPFM_LOSSES, f"{where}.ablations.loss")
-    if config.selection_seed not in config.noise_seeds:
-        raise ValueError(f"{where}.selection_seed must be one of the noise seeds")
+    _check_deepfm_study(config, where)
     return config
 
 

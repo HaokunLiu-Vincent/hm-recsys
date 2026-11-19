@@ -20,6 +20,7 @@ from deepfm_example import (
     N_CANDIDATES,
     N_QUERIES,
     RATIO,
+    REAL_CONFIG,
     REPO,
     TARGET,
     TRAIN_FOLDS,
@@ -35,6 +36,7 @@ from hmrec.deepfm.process import (
     record_trial,
     require_clean_tree,
     speed_test_spec,
+    with_epochs,
     with_seed,
 )
 from hmrec.deepfm.records import (
@@ -79,7 +81,7 @@ def trained(tmp_path_factory: pytest.TempPathFactory) -> tuple[TrialInputs, Tria
 # ---------------------------------------------------------------- one trial
 
 
-def test_trial_trains_on_the_window_and_evaluates_every_epoch(
+def test_trial_trains_on_the_window_and_evaluates_the_final_model(
     trained: tuple[TrialInputs, TrialResult],
 ) -> None:
     inputs, result = trained
@@ -88,20 +90,23 @@ def test_trial_trains_on_the_window_and_evaluates_every_epoch(
     assert (result.n_train_rows, result.n_train_queries) == (4 * 360, 4 * 30)
     assert result.n_scored_rows == N_QUERIES * N_CANDIDATES
     assert [epoch.epoch for epoch in result.epochs] == [1, 2]
-    assert [metric.epoch for metric in result.metrics] == [1, 2]
-    for metric in result.metrics:
-        assert metric.n_queries == N_QUERIES and set(metric.scores) == set(METRICS)
-        assert 0 < metric.scores["map@12"] <= 1
-    assert result.metrics[0].train_loss == result.epochs[0].mean_loss
+    # Evaluated ONCE, after the last epoch of the run's schedule.
+    assert [metric.epoch for metric in result.metrics] == [2]
+    metric = result.metrics[0]
+    assert metric.n_queries == N_QUERIES and set(metric.scores) == set(METRICS)
+    assert 0 < metric.scores["map@12"] <= 1
+    assert metric.train_loss == result.epochs[-1].mean_loss
     assert result.config_id == deepfm_config_id(inputs.config)
+    # The first trial of a week writes the input cache.
+    assert result.input_cache == "written"
 
 
 def test_trial_files_are_under_artifacts_deepfm(trained: tuple[TrialInputs, TrialResult]) -> None:
     inputs, _ = trained
     directory = _trial_dir(inputs)
     assert inputs.paths.deepfm_dir in directory.parents
+    # No mid-schedule checkpoint: only the model after the last epoch is saved.
     assert sorted(path.name for path in directory.iterdir()) == [
-        "epoch1.pt",
         "epoch2.pt",
         "per_query.parquet",
         "predictions.parquet",
@@ -109,13 +114,15 @@ def test_trial_files_are_under_artifacts_deepfm(trained: tuple[TrialInputs, Tria
         "trial.json",
     ]
     predictions = pl.read_parquet(directory / "predictions.parquet")
-    # The Top-12 of all 30 queries for each of the 2 epochs (a query has 12 candidates).
-    assert predictions.height == 2 * N_QUERIES * 12
+    # The Top-12 of all 30 queries for the final model (a query has 12 candidates).
+    assert predictions.height == N_QUERIES * 12 and predictions["epoch"].unique().to_list() == [2]
     assert predictions.columns == ["epoch", "query_id", "rank", "article_idx", "score"]
     one_query = predictions.filter((pl.col("epoch") == 2) & (pl.col("rank") <= 12)).head(12)
     assert one_query["score"].to_list() == sorted(one_query["score"].to_list(), reverse=True)
     per_query = pl.read_parquet(directory / "per_query.parquet")
-    assert per_query.height == 2 * N_QUERIES and set(METRICS) <= set(per_query.columns)
+    assert per_query.height == N_QUERIES and set(METRICS) <= set(per_query.columns)
+    summary = json.loads((directory / "trial.json").read_text())
+    assert sorted(summary["epoch_mean_loss"]) == ["1", "2"] and summary["epochs"] == 2
 
 
 def test_a_trained_model_beats_a_random_order(tmp_path: Path) -> None:
@@ -132,12 +139,13 @@ def test_same_seed_gives_the_same_models_and_metrics(tmp_path: Path) -> None:
     second_inputs = build_workspace(tmp_path / "b")
     first, second = run_trial(first_inputs, SPEC), run_trial(second_inputs, SPEC)
     assert [m.scores for m in first.metrics] == [m.scores for m in second.metrics]
-    for name in ("epoch1.pt", "epoch2.pt"):
-        one = torch.load(_trial_dir(first_inputs) / name, weights_only=True)
-        two = torch.load(_trial_dir(second_inputs) / name, weights_only=True)
-        assert all(torch.equal(one[key], two[key]) for key in one)
+    one = torch.load(_trial_dir(first_inputs) / "epoch2.pt", weights_only=True)
+    two = torch.load(_trial_dir(second_inputs) / "epoch2.pt", weights_only=True)
+    assert all(torch.equal(one[key], two[key]) for key in one)
     other = run_trial(first_inputs, dataclasses.replace(SPEC, seed=43))
     assert other.metrics[0].train_loss != first.metrics[0].train_loss
+    # The second trial of the same week reads the cache the first one wrote.
+    assert (first.input_cache, other.input_cache) == ("written", "read")
 
 
 def test_bin_edges_and_models_do_not_depend_on_the_target_week(tmp_path: Path) -> None:
@@ -148,10 +156,9 @@ def test_bin_edges_and_models_do_not_depend_on_the_target_week(tmp_path: Path) -
     one, two = _trial_dir(first_inputs), _trial_dir(second_inputs)
     # The fitted transform (bin edges) and the trained weights are identical ...
     assert (one / "transform.json").read_text() == (two / "transform.json").read_text()
-    for name in ("epoch1.pt", "epoch2.pt"):
-        a = torch.load(one / name, weights_only=True)
-        b = torch.load(two / name, weights_only=True)
-        assert all(torch.equal(a[key], b[key]) for key in a)
+    a = torch.load(one / "epoch2.pt", weights_only=True)
+    b = torch.load(two / "epoch2.pt", weights_only=True)
+    assert all(torch.equal(a[key], b[key]) for key in a)
     # ... while the target weeks really differ.
     assert first.metrics[-1].scores != second.metrics[-1].scores
     edges = json.loads((one / "transform.json").read_text())["edges"]
@@ -196,6 +203,9 @@ def test_other_folds_and_bad_specs_are_refused(tmp_path: Path) -> None:
         check_spec(inputs, dataclasses.replace(SPEC, area="t_phase"))
     with pytest.raises(ValueError, match="epochs must be > 0"):
         check_spec(inputs, dataclasses.replace(SPEC, epochs=0))
+    # The configuration id of a cosine run depends on its epochs: the two must agree.
+    with pytest.raises(ValueError, match="the two must be equal"):
+        check_spec(inputs, dataclasses.replace(SPEC, epochs=3))
     # V1's window is F1-F4; all of them may train.
     assert [fold.name for fold in check_spec(inputs, SPEC)] == list(TRAIN_FOLDS)
 
@@ -286,11 +296,9 @@ def test_trial_rows_are_written_metrics_first(
     peak = ProcessPeakMemory(2 * 1024**3, 0)
     record_trial(inputs, SPEC, result, 0.0, peak, STAMP)
     metric_rows = read_rows(paths.deepfm_metrics_file, metric_columns(METRICS))
-    assert [(row["fold"], row["epoch"], row["seed"]) for row in metric_rows] == [
-        ("V1", "1", "42"),
-        ("V1", "2", "42"),
-    ]
-    assert float(metric_rows[1]["map@12"]) == result.metrics[1].scores["map@12"]
+    assert [(row["fold"], row["epoch"], row["seed"]) for row in metric_rows] == [("V1", "2", "42")]
+    assert float(metric_rows[0]["map@12"]) == result.metrics[0].scores["map@12"]
+    assert float(metric_rows[0]["train_loss"]) == result.epochs[-1].mean_loss
     trial_rows = read_rows(paths.deepfm_trials_file, TRIAL_COLUMNS)
     assert len(trial_rows) == 1
     row = trial_rows[0]
@@ -304,16 +312,25 @@ def test_trial_rows_are_written_metrics_first(
     assert len(read_rows(paths.deepfm_trials_file, TRIAL_COLUMNS)) == 2
 
 
-def test_config_id_ignores_seed_epochs_and_device_only(tmp_path: Path) -> None:
+def test_config_id_ignores_seed_and_device_and_follows_the_schedule(tmp_path: Path) -> None:
     config = build_workspace(tmp_path).config
     base = deepfm_config_id(config)
     training = config.training
+    assert training.lr_schedule == "cosine"
     for same in (
         dataclasses.replace(training, seed=7),
-        dataclasses.replace(training, epochs=1),
         dataclasses.replace(training, device="mps"),
     ):
         assert deepfm_config_id(dataclasses.replace(config, training=same)) == base
+    # Cosine: a run of another length is another model, so another configuration.
+    shorter = dataclasses.replace(training, epochs=1)
+    assert deepfm_config_id(dataclasses.replace(config, training=shorter)) != base
+    # Constant rate: epoch k of a longer run is the k-epoch model, so epochs are left out.
+    constant = dataclasses.replace(training, lr_schedule="constant")
+    constant_id = deepfm_config_id(dataclasses.replace(config, training=constant))
+    constant_shorter = dataclasses.replace(constant, epochs=1)
+    assert deepfm_config_id(dataclasses.replace(config, training=constant_shorter)) == constant_id
+    assert constant_id != base
     different = dataclasses.replace(training, learning_rate=0.003)
     assert deepfm_config_id(dataclasses.replace(config, training=different)) != base
     assert deepfm_config_id(dataclasses.replace(config, n_bins=8)) != base
@@ -330,6 +347,18 @@ def test_speed_test_spec_and_its_stop_rule(trained: tuple[TrialInputs, TrialResu
     require_clean_tree(STAMP)
     with pytest.raises(RuntimeError, match="starts only from committed code"):
         require_clean_tree(RunStamp("abc123", True))
+
+
+def test_the_step0_rows_of_2026_11_19_keep_their_configuration_id() -> None:
+    # The step-0 runs used a constant rate, 5 epochs, on CPU. Their id must not change
+    # when the schedule settings are added to the config.
+    training = dataclasses.replace(
+        REAL_CONFIG.training, lr_schedule="constant", epochs=5, learning_rate=0.001
+    )
+    assert deepfm_config_id(dataclasses.replace(REAL_CONFIG, training=training)) == "653c29035939"
+    # The speed test's trial uses the speed test's number of epochs.
+    spec_config = with_epochs(REAL_CONFIG, REAL_CONFIG.speed_test.epochs)
+    assert spec_config.training.epochs == 1
 
 
 # ---------------------------------------------------------------- device benchmark

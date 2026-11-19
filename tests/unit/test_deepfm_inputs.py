@@ -14,8 +14,10 @@ from hmrec.deepfm.inputs import (
     clip_and_standardise_statistics,
     encode_rows,
     fit_transform,
+    load_transform,
     quantile_edges,
     save_transform,
+    signed_log1p,
     standardise_values,
 )
 
@@ -55,24 +57,57 @@ def test_bin_is_one_plus_the_edges_at_or_below_the_value() -> None:
     assert bin_values(values, edges).dtype == np.uint8
 
 
+def test_signed_log1p_hand_computed() -> None:
+    # g(x) = sign(x) * log(1 + |x|): g(0) = 0, g(e - 1) = 1, g(-(e - 1)) = -1, g(99) = log(100).
+    e = float(np.e)
+    g = signed_log1p(np.array([0.0, e - 1, -(e - 1), 99.0, NAN], dtype=np.float64))
+    assert g[:4].tolist() == pytest.approx([0.0, 1.0, -1.0, np.log(100.0)])
+    assert np.isnan(g[4]) and g.dtype == np.float64
+    # It keeps the order of the values and shortens a long tail: 240,417 -> about 12.4.
+    values = np.array([-50.0, -1.0, 0.0, 0.5, 3.0, 240417.0], dtype=np.float32)
+    assert np.all(np.diff(signed_log1p(values)) > 0)
+    assert signed_log1p(values)[-1] == pytest.approx(12.39, abs=0.01)
+
+
 def test_standardise_statistics_hand_computed() -> None:
-    # 0 ... 100: the 10th and 90th percentiles are 10 and 90; clipping gives eleven
-    # 10s, the values 11 ... 89 and eleven 90s, whose mean is 50.
+    # The statistics are those of g(x) = log(1 + x) here (all values >= 0), not of x.
+    # x = 0 ... 100: g is increasing, so the 10th and 90th percentiles of g(x) are
+    # g(10) = log(11) and g(90) = log(91). Clipping g(x) to them gives eleven log(11),
+    # the values log(12) ... log(90) and eleven log(91).
     values = _column([*range(101), NAN])
     low, high, mean, std = clip_and_standardise_statistics(values, 10, 90)
-    assert (low, high, mean) == (10.0, 90.0, 50.0)
-    clipped = np.clip(np.arange(101, dtype=np.float64), 10, 90)
-    assert std == pytest.approx(clipped.std())
+    assert (low, high) == pytest.approx((np.log(11.0), np.log(91.0)))
+    logs = [np.log(11.0)] * 11 + [np.log(float(x + 1)) for x in range(11, 90)] + [np.log(91.0)] * 11
+    assert mean == pytest.approx(sum(logs) / 101)
+    assert std == pytest.approx(np.array(logs).std())
     z, missing = standardise_values(_column([50, 0, 100, NAN]), low, high, mean, std)
-    # 0 is clipped to 10 and 100 to 90, so they are the same distance from the mean.
-    assert z.tolist() == pytest.approx([0.0, -40 / std, 40 / std, 0.0])
+    # g(0) is clipped up to log(11) and g(100) down to log(91).
+    expected = [
+        (np.log(51.0) - mean) / std,
+        (np.log(11.0) - mean) / std,
+        (np.log(91.0) - mean) / std,
+    ]
+    assert z.tolist() == pytest.approx([*expected, 0.0], rel=1e-6)
     assert missing.tolist() == [0, 0, 0, 1] and z.dtype == np.float32
+
+
+def test_a_long_tail_no_longer_gives_a_huge_standardised_value() -> None:
+    # 999 small values and one very large one. The 99.9th percentile lies between the
+    # two, so the large value is only partly clipped. Without g(x) its z would be
+    # above 25; with g(x) it stays below 10.
+    values = _column([*([1.0] * 500), *([2.0] * 499), 240417.0])
+    low, high, mean, std = clip_and_standardise_statistics(values, 0.1, 99.9)
+    z, _ = standardise_values(values, low, high, mean, std)
+    assert float(z.max()) < 10.0
+    raw = np.clip(values.astype(np.float64), *np.percentile(values, [0.1, 99.9]))
+    assert float((raw.max() - raw.mean()) / raw.std()) > 25.0
 
 
 def test_constant_or_empty_feature_standardises_to_zero() -> None:
     assert clip_and_standardise_statistics(_column([NAN]), 0.1, 99.9) == (0.0, 0.0, 0.0, 0.0)
     low, high, mean, std = clip_and_standardise_statistics(_column([3, 3, 3]), 0.1, 99.9)
-    assert (mean, std) == (3.0, 0.0)
+    # The statistics are those of g(x): g(3) = log(4).
+    assert (mean, std) == (pytest.approx(np.log(4.0)), 0.0)
     z, missing = standardise_values(_column([3, 7, NAN]), low, high, mean, std)
     assert z.tolist() == [0.0, 0.0, 0.0] and missing.tolist() == [0, 0, 1]
 
@@ -153,3 +188,26 @@ def test_unknown_codes_and_bad_arguments_are_refused(tmp_path: Path) -> None:
     assert saved["edges"][0] == [2.75, 4.5, 6.25] and saved["numeric_names"] == ["a", "b"]
     with pytest.raises(FileExistsError, match="never replaced"):
         save_transform(transform, tmp_path / "transform.json")
+
+
+@pytest.mark.parametrize("numeric_input", [BINNED, STANDARDISED])
+def test_a_saved_transform_is_read_back_exactly(tmp_path: Path, numeric_input: str) -> None:
+    transform = _fit(numeric_input)
+    save_transform(transform, tmp_path / "transform.json")
+    loaded = load_transform(tmp_path / "transform.json")
+    assert (loaded.numeric_input, loaded.numeric_names, loaded.categorical_names) == (
+        transform.numeric_input,
+        transform.numeric_names,
+        transform.categorical_names,
+    )
+    assert loaded.categorical_sizes == transform.categorical_sizes and loaded.n_bins == 4
+    assert len(loaded.edges) == len(transform.edges)
+    for one, two in zip(loaded.edges, transform.edges, strict=True):
+        assert np.array_equal(one, two) and one.dtype == np.float64
+    for name in ("clip_low", "clip_high", "mean", "std"):
+        assert np.array_equal(getattr(loaded, name), getattr(transform, name))
+    # So rows are encoded identically with the loaded transform.
+    one, two = encode_rows(TRAIN, transform), encode_rows(TRAIN, loaded)
+    assert np.array_equal(one.codes, two.codes)
+    if one.values is not None and two.values is not None:
+        assert np.array_equal(one.values, two.values)

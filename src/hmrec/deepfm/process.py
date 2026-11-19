@@ -80,8 +80,17 @@ def with_seed(config: DeepFMConfig, seed: int) -> DeepFMConfig:
     return replace(config, training=replace(config.training, seed=seed))
 
 
+def with_epochs(config: DeepFMConfig, epochs: int) -> DeepFMConfig:
+    """The configuration with another number of epochs (the length of its schedule)."""
+    return replace(config, training=replace(config.training, epochs=epochs))
+
+
 def speed_test_spec(inputs: TrialInputs) -> TrialSpec:
-    """The one training of the speed test: the default configuration, 1 epoch, its target fold."""
+    """The one training of the speed test: the default configuration, its epochs and fold.
+
+    The trial's configuration must have the same number of epochs: use
+    with_epochs(config, speed_test.epochs) for it.
+    """
     speed_test, training = inputs.config.speed_test, inputs.config.training
     return TrialSpec(AREA_SPEED_TEST, speed_test.target_fold, training.seed, speed_test.epochs)
 
@@ -129,7 +138,7 @@ def record_trial(
     peak: ProcessPeakMemory,
     stamp: RunStamp,
 ) -> None:
-    """Append the trial's metric rows (one per epoch), then its trial row.
+    """Append the trial's metric row (the final model's evaluation), then its trial row.
 
     The trial row is written LAST and marks the trial as recorded.
     """
@@ -166,7 +175,7 @@ def record_trial(
         "train_seconds": repr(train_seconds),
         "seconds_per_epoch": repr(train_seconds / len(result.epochs)),
         "score_seconds": repr(result.score_seconds),
-        "score_seconds_per_model": repr(result.score_seconds / len(result.epochs)),
+        "score_seconds_per_model": repr(result.score_seconds / len(result.metrics)),
         "total_seconds": repr(time.perf_counter() - started),
         "process_max_rss_gb": repr(peak.process_max_rss_gb),
         "num_threads": str(inputs.base.num_threads),

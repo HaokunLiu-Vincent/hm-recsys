@@ -1270,7 +1270,7 @@ hm-recsys/
 │   │   ├── run.py               # Driver: one process per step, resumable
 │   │   └── process.py           # One step in one process: pass the gate first, then run, then record
 │   ├── diagnostics/             # Descriptive diagnostics after M8 (§10.2): access (records and issues), computing the four tables, inputs (reads files), run (driver)
-│   ├── deepfm/                  # Stage 2, M9 (§16): DeepFM as an alternative ranker. Torch side; V folds only; inputs, model, loss, train, score, data, trial, benchmark, records, process
+│   ├── deepfm/                  # Stage 2, M9 (§16): DeepFM as an alternative ranker. Torch side; V folds only; inputs, cache, model, loss, train, score, data, trial, benchmark, records, process, study, study_run, compare
 │
 ├── scripts/                     # Command-line entry points; they only "read arguments → call src → write results"
 │   ├── m0_preprocess.py

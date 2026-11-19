@@ -2,7 +2,8 @@
 
     results/deepfm_benchmark.csv   one row per device run of the device benchmark
     results/deepfm_trials.csv      one row per training (time, true memory peak, device)
-    results/deepfm_metrics.csv     one row per (configuration, seed, fold, epoch)
+    results/deepfm_metrics.csv     one row per (configuration, seed, fold, epoch); from
+                                   2026-11-20 a run is evaluated after its last epoch only
 
 Rows are only appended (hmrec.csv_records). Floats are written with repr().
 
@@ -21,7 +22,7 @@ from datetime import datetime
 from pathlib import Path
 from typing import Any
 
-from hmrec.config import DeepFMConfig
+from hmrec.config import DEEPFM_LR_CONSTANT, DeepFMConfig
 from hmrec.locks import load_ranker_lock
 from hmrec.paths import ProjectPaths
 from hmrec.run_records import RunStamp
@@ -90,13 +91,23 @@ def metric_columns(metrics: tuple[str, ...]) -> tuple[str, ...]:
 def model_settings(config: DeepFMConfig) -> dict[str, Any]:
     """Everything that defines a DeepFM configuration's results, as plain values.
 
-    Left out on purpose: the seed (a configuration is run with several seeds),
-    the number of epochs (epoch k of a longer run is the same model) and the
-    device (recorded with every training instead).
+    Left out on purpose: the seed (a configuration is run with several seeds)
+    and the device (recorded with every training instead).
+
+    The number of epochs depends on the schedule. With the cosine schedule it IS
+    part of the configuration: the rate of every step depends on the length of
+    the run, so a run of T epochs is its own model. With a constant rate, epoch
+    k of a longer run is the model of a k-epoch run, so the number of epochs is
+    left out; the two schedule settings are left out too, so that a
+    constant-rate configuration keeps the id it had before the schedule existed
+    (the step-0 rows of 2026-11-19).
     """
     training = asdict(config.training)
-    for name in ("seed", "epochs", "device"):
+    for name in ("seed", "device"):
         del training[name]
+    if config.training.lr_schedule == DEEPFM_LR_CONSTANT:
+        for name in ("epochs", "lr_schedule", "min_lr_ratio"):
+            del training[name]
     return {
         "experiment": config.experiment,
         "negatives_per_positive": config.negatives_per_positive,
@@ -243,3 +254,61 @@ def locked_lightgbm(paths: ProjectPaths) -> tuple[str, int]:
     """(config_id, number of trees) of the locked LightGBM ranker, from its lock file."""
     lock = load_ranker_lock(paths.ranker_lock_file)
     return lock.selection.config_id, lock.model.num_trees
+
+
+# ---------------------------------------------------------------- run time and memory of an arm
+
+
+def _run_cost(rows: list[dict[str, str]], folds: tuple[str, ...], what: str) -> tuple[float, float]:
+    """(summed total_seconds, highest process_max_rss_gb) of exactly one row per fold.
+
+    Raises:
+        ValueError: If the rows are not one per fold.
+    """
+    if sorted(row["fold"] for row in rows) != sorted(folds):
+        raise ValueError(
+            f"{what}: expected one trial row per fold {list(folds)}, found {len(rows)}"
+        )
+    seconds = math.fsum(float(row["total_seconds"]) for row in rows)
+    return seconds, max(float(row["process_max_rss_gb"]) for row in rows)
+
+
+def deepfm_run_cost(
+    paths: ProjectPaths, area: str, config_id: str, seed: int, folds: tuple[str, ...]
+) -> tuple[float, float]:
+    """Run time (seconds, all folds) and highest true peak (GB) of a DeepFM configuration, seed."""
+    rows = [
+        row
+        for row in read_csv_rows(paths.deepfm_trials_file)
+        if (row["area"], row["config_id"], int(row["seed"])) == (area, config_id, seed)
+        and row["fold"] in folds
+    ]
+    return _run_cost(rows, folds, f"DeepFM {config_id} seed {seed}")
+
+
+def lightgbm_arm_run_cost(
+    paths: ProjectPaths, arm: str, seed: int, folds: tuple[str, ...]
+) -> tuple[float, float]:
+    """Run time and highest true peak of a LightGBM arm and seed (results/m9_lgb_trials.csv)."""
+    rows = [
+        row
+        for row in read_csv_rows(paths.m9_lgb_trials_file)
+        if (row["arm"], int(row["seed"])) == (arm, seed) and row["fold"] in folds
+    ]
+    return _run_cost(rows, folds, f"LightGBM {arm} seed {seed}")
+
+
+def locked_lightgbm_run_cost(paths: ProjectPaths, folds: tuple[str, ...]) -> tuple[float, float]:
+    """Run time and highest true peak of the locked Ranker's M7 trials (results/v_phase.csv).
+
+    These trials trained to the grid's full number of trees and evaluated every
+    checkpoint, so their time is not the time of training the locked number of trees.
+    """
+    config_id, _ = locked_lightgbm(paths)
+    rows = [
+        row
+        for row in read_csv_rows(paths.v_phase_results_file)
+        if (row["experiment"], row["config_id"]) == (FULL_EXPERIMENT, config_id)
+        and row["fold"] in folds
+    ]
+    return _run_cost(rows, folds, f"the locked LightGBM ranker {config_id}")

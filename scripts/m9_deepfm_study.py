@@ -1,14 +1,15 @@
-"""CLI for M9: run the DeepFM study on V1-V4 up to a stage (proposal §16.5).
+"""CLI for M9: run the DeepFM part of the study on V1-V4 up to a stage (proposal §16.8).
 
     caffeinate -i uv run python scripts/m9_deepfm_study.py --through step0
-    caffeinate -i uv run python scripts/m9_deepfm_study.py --through seeds --record
+    caffeinate -i uv run python scripts/m9_deepfm_study.py --through ablations --record
 
-Stages, in order: step0 (noise), tuning (learning rate, embedding dimension,
-dropout), final (epoch rule of the selected configuration, with the epoch-cap
-extension), ablations, seeds. Every training runs in its own process
-(scripts/m9_deepfm_trial.py); recorded trainings are not repeated, so the same
-command continues an interrupted study. A stop condition (seed range above the
-limit, default below the RRF baseline, a diverged or failed training, a memory
+Stages, in order: step0 (the default configuration with three seeds and every
+schedule length; the noise rule), tuning (pointwise: learning rate with its
+schedule length, embedding dimension, dropout), pointwise (the final seeds),
+listwise (its learning-rate step and the final seeds), ablations. Every training
+runs in its own process (scripts/m9_deepfm_trial.py); recorded trainings are not
+repeated, so the same command continues an interrupted study. A stop condition
+(the default below the RRF baseline, a diverged or failed training, a memory
 peak above the limit) ends the run with an error.
 
 --record writes results/deepfm_study.csv once, after the last stage. Run it on
@@ -29,20 +30,16 @@ from hmrec.config import (  # noqa: E402
     load_deepfm_study_config,
     load_selection_rule,
 )
-from hmrec.deepfm.study import StudyStop  # noqa: E402
+from hmrec.deepfm.study import ConfigurationScore, StudyStop  # noqa: E402
 from hmrec.deepfm.study_run import (  # noqa: E402
+    STAGES,
+    StepOutcome,
     StudyContext,
-    final_rows,
+    StudyResult,
     reference,
-    run_ablations,
-    run_final,
-    run_seeds,
-    run_step0,
-    run_tuning,
-    selected_variant,
-    step0_rows,
+    run_study,
+    study_rows,
     subprocess_launcher,
-    tuning_rows,
     write_study_table,
 )
 from hmrec.git_state import git_state  # noqa: E402
@@ -51,7 +48,6 @@ from hmrec.paths import get_paths  # noqa: E402
 from hmrec.run_records import RunStamp  # noqa: E402
 
 LOGGER = get_logger("m9_deepfm_study")
-STAGES = ("step0", "tuning", "final", "ablations", "seeds")
 TRIAL_SCRIPT = Path(__file__).resolve().parent / "m9_deepfm_trial.py"
 
 
@@ -63,12 +59,62 @@ def parse_args() -> argparse.Namespace:
     return parser.parse_args()
 
 
+def log_configuration(label: str, result: ConfigurationScore) -> None:
+    """Log one scored configuration: its T, the seeds' pooled scores and their mean."""
+    by_seed = ", ".join(f"seed {seed.seed}: {seed.pooled:.6f}" for seed in result.seeds)
+    LOGGER.info(
+        "%s | %s, T = %d: pooled %.6f (%s)",
+        label,
+        result.config_id,
+        result.epochs,
+        result.pooled,
+        by_seed,
+    )
+
+
+def log_step(label: str, outcome: StepOutcome) -> None:
+    """Log one tuning step: every candidate and the decision."""
+    for value in outcome.step.candidates:
+        log_configuration(f"{label} | {outcome.step.parameter} = {value}", outcome.scores[value])
+    LOGGER.info(
+        "%s | selected %s (%s); on the grid edge: %s",
+        label,
+        outcome.selected_value,
+        outcome.decision.reason,
+        outcome.on_grid_edge,
+    )
+
+
+def log_result(result: StudyResult) -> None:
+    """Log what every finished stage decided."""
+    step0 = result.step0
+    for epochs, score in step0.schedule.scores.items():
+        log_configuration(f"step 0 | T = {epochs}", score)
+    LOGGER.info(
+        "step 0 | selected T = %d, seed range %.4f%%, RRF baseline %.6f, tuning seeds %s",
+        step0.schedule.selected_epochs,
+        100 * step0.seed_range,
+        step0.baseline,
+        list(step0.tuning_seeds),
+    )
+    for outcome in result.tuning or ():
+        log_step(f"tuning {outcome.step.name}", outcome)
+    if result.pointwise is not None:
+        LOGGER.info("pointwise | selected configuration: %s", result.pointwise_variant)
+        log_configuration("pointwise | final seeds", result.pointwise)
+    if result.listwise_step is not None and result.listwise is not None:
+        log_step("listwise", result.listwise_step)
+        LOGGER.info("listwise | selected configuration: %s", result.listwise_variant)
+        log_configuration("listwise | final seeds", result.listwise)
+    for name, score in (result.ablations or {}).items():
+        log_configuration(f"ablation | {name}", score)
+
+
 def main() -> None:
     """Run the stages up to --through and log what the rules decided."""
     args = parse_args()
-    last = STAGES.index(args.through)
     if args.record and args.through != STAGES[-1]:
-        raise SystemExit("--record needs --through seeds: the table records the finished study")
+        raise SystemExit(f"--record needs --through {STAGES[-1]}: it records the finished study")
     paths = get_paths()
     setup_logging(logging.INFO, log_file=paths.deepfm_log_file("study"))
     commit, dirty = git_state(paths.project_root, paths.results_root)
@@ -82,55 +128,12 @@ def main() -> None:
         launcher=subprocess_launcher(TRIAL_SCRIPT),
     )
     try:
-        step0 = run_step0(context)
+        result = run_study(context, args.through)
     except StudyStop as stop:
         raise SystemExit(f"STOP: {stop}") from stop
-    for result in step0.scores:
-        LOGGER.info(
-            "step 0 | seed %d: epoch %d, pooled %.6f, folds %s",
-            result.seed,
-            result.selected_epoch,
-            result.pooled,
-            result.fold_scores,
-        )
-    LOGGER.info(
-        "step 0 | seed range %.4f%%, RRF baseline %.6f", 100 * step0.seed_range, step0.baseline
-    )
-    if last < STAGES.index("tuning"):
-        return
-    outcomes = run_tuning(context)
-    selected = selected_variant(outcomes, context.default)
-    LOGGER.info("tuning | selected configuration: %s", selected)
-    if last < STAGES.index("final"):
-        return
-    final = run_final(context, selected)
-    LOGGER.info(
-        "final | extended: %s, epochs %d, selected epoch %d, pooled %.6f",
-        final.extended,
-        final.epochs,
-        final.score.selected_epoch,
-        final.score.pooled,
-    )
-    if last < STAGES.index("ablations"):
-        return
-    ablations = run_ablations(context, final)
-    for name, result in ablations.items():
-        LOGGER.info(
-            "ablation | %s: epoch %d, pooled %.6f", name, result.selected_epoch, result.pooled
-        )
-    if last < STAGES.index("seeds"):
-        return
-    seeds = run_seeds(context, final)
-    for result in seeds:
-        LOGGER.info(
-            "seeds | seed %d: epoch %d, pooled %.6f",
-            result.seed,
-            result.selected_epoch,
-            result.pooled,
-        )
+    log_result(result)
     if args.record:
-        rows = step0_rows(step0) + tuning_rows(outcomes)
-        rows += final_rows(final, ablations, seeds, reference(context).lightgbm)
+        rows = study_rows(result, context.study.selection_seed, reference(context).lightgbm)
         write_study_table(paths, rows, RunStamp(commit, dirty))
         LOGGER.info("study table -> %s (%d rows)", paths.deepfm_study_file, len(rows))
 

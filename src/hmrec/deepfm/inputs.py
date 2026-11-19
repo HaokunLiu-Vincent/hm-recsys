@@ -23,9 +23,15 @@ the TRAINING rows of the window:
 
 Standardised. For each numeric feature, from its non-missing training values:
 
-    lo, hi = the clip_low / clip_high percentiles; x is clipped to [lo, hi]
-    mean, std of the clipped values; z = (clip(x) - mean) / std   (0 if std = 0)
+    g(x) = sign(x) * log(1 + |x|)                 (signed log1p, applied FIRST)
+    lo, hi = the clip_low / clip_high percentiles of g(x); g(x) is clipped to [lo, hi]
+    mean, std of the clipped values; z = (clip(g(x)) - mean) / std   (0 if std = 0)
     missing: z = 0 and the indicator m = 1
+
+g(x) was added on 2026-11-20, before this variant was ever trained (proposal §16.8):
+some features have a very long tail (a largest value of 240,417 against a 99.9th
+percentile far below it is clipped, but the values below the clip still give
+z above 15), and the FM part multiplies the z of two fields.
 
 The statistics are FITTED on the training rows of one window only and then
 applied unchanged to the target week: no value of the target week can move an
@@ -186,16 +192,27 @@ def bin_values(values: np.ndarray, edges: np.ndarray) -> np.ndarray:
 # ---------------------------------------------------------------- standardising
 
 
+def signed_log1p(values: np.ndarray) -> np.ndarray:
+    """g(x) = sign(x) * log(1 + |x|), in float64; NaN stays NaN.
+
+    It keeps the sign and the order of the values, leaves 0 at 0 and shortens
+    long tails on both sides.
+    """
+    as_float64 = values.astype(np.float64)
+    return np.sign(as_float64) * np.log1p(np.abs(as_float64))
+
+
 def clip_and_standardise_statistics(
     values: np.ndarray, low_percentile: float, high_percentile: float
 ) -> tuple[float, float, float, float]:
     """(lo, hi, mean, std) of one numeric feature from its non-missing training values.
 
-    lo / hi are the two percentiles; mean / std are those of the values clipped
-    to [lo, hi] (population std). A feature with no value at all gives
-    (0, 0, 0, 0): its rows are all missing.
+    All four are statistics of g(x) = signed_log1p(x), not of x: lo / hi are the
+    two percentiles of g(x); mean / std are those of g(x) clipped to [lo, hi]
+    (population std). A feature with no value at all gives (0, 0, 0, 0): its
+    rows are all missing.
     """
-    present = values[~np.isnan(values)].astype(np.float64)
+    present = signed_log1p(values[~np.isnan(values)])
     if present.size == 0:
         return 0.0, 0.0, 0.0, 0.0
     low, high = np.percentile(present, [low_percentile, high_percentile])
@@ -206,14 +223,17 @@ def clip_and_standardise_statistics(
 def standardise_values(
     values: np.ndarray, low: float, high: float, mean: float, std: float
 ) -> tuple[np.ndarray, np.ndarray]:
-    """Standardise one numeric feature: z = (clip(x) - mean) / std, plus its missing indicator.
+    """Standardise one numeric feature: z = (clip(g(x)) - mean) / std, plus its missing indicator.
+
+    g is signed_log1p; low, high, mean and std are statistics of g(x) from
+    clip_and_standardise_statistics.
 
     Returns:
         (z float32 [n], missing uint8 [n]). A missing value has z = 0; std = 0
         gives z = 0 everywhere (the feature is constant in the training rows).
     """
     missing = np.isnan(values)
-    clipped = np.clip(values.astype(np.float64), low, high)
+    clipped = np.clip(signed_log1p(values), low, high)
     z = (clipped - mean) / std if std > 0 else np.zeros_like(clipped)
     z[missing] = 0.0
     return z.astype(np.float32), missing.astype(CODE_DTYPE)
@@ -347,3 +367,24 @@ def save_transform(transform: InputTransform, path: Path) -> None:
     }
     path.parent.mkdir(parents=True, exist_ok=True)
     path.write_text(json.dumps(content), encoding="utf-8")
+
+
+def load_transform(path: Path) -> InputTransform:
+    """Read a transform written by save_transform (floats are stored exactly).
+
+    Raises:
+        FileNotFoundError: If the file does not exist.
+    """
+    content = json.loads(path.read_text(encoding="utf-8"))
+    return InputTransform(
+        numeric_input=content["numeric_input"],
+        numeric_names=tuple(content["numeric_names"]),
+        categorical_names=tuple(content["categorical_names"]),
+        categorical_sizes=tuple(content["categorical_sizes"]),
+        n_bins=content["n_bins"],
+        edges=tuple(np.array(edges, dtype=np.float64) for edges in content["edges"]),
+        clip_low=np.array(content["clip_low"], dtype=np.float64),
+        clip_high=np.array(content["clip_high"], dtype=np.float64),
+        mean=np.array(content["mean"], dtype=np.float64),
+        std=np.array(content["std"], dtype=np.float64),
+    )

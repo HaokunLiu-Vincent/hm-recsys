@@ -1,4 +1,4 @@
-"""One DeepFM training with its evaluations: a configuration, a seed, one V fold (proposal §16).
+"""One DeepFM training with its evaluation: a configuration, a seed, one V fold (proposal §16).
 
     1. Fold check FIRST (hmrec.ranker.window.m7_training_window): the target must
        be a V fold and every training fold an F or V fold. A T fold raises before
@@ -7,27 +7,39 @@
        LightGBM Dataset of the same target week (hmrec.deepfm.data).
     3. The input transform is fitted on those training rows only, then the rows
        are encoded and the raw values released.
-    4. Training: `epochs` epochs; the model is saved after every epoch.
+    4. Training: `epochs` epochs with the configured learning-rate schedule
+       (hmrec.deepfm.train). The model is saved ONCE, after the last epoch: with
+       the cosine schedule a run of T epochs is its own model, and no
+       mid-schedule checkpoint is kept or evaluated (proposal §16.8).
     5. Scoring: the target week's frozen wide table is verified, then read ONE
-       part at a time; a part is encoded once and scored with the model of every
-       epoch. Top-K by score DESC, article_idx ASC.
-    6. Evaluation of every epoch with the existing code
-       (hmrec.eval.ranker_eval): the labels of the target fold are read through
-       load_m7_evaluator, which refuses every fold that is not a V fold.
+       part at a time and scored with the final model. Top-K by score DESC,
+       article_idx ASC.
+    6. Evaluation with the existing code (hmrec.eval.ranker_eval): the labels of
+       the target fold are read through load_m7_evaluator, which refuses every
+       fold that is not a V fold.
+
+Steps 2, 3 and the encoding of step 5 give the same arrays for every training of
+a target week, so they are cached on disk for the input modes listed in the
+config (hmrec.deepfm.cache). The first training of a week does them and writes
+the cache; the later ones read it after its sha256 check. Either way the
+trial's own transform.json records the transform it used.
 
 Files of a trial, under artifacts/deepfm/{area}/{config_id}/seed{seed}/{fold}/:
     transform.json            the fitted bin edges or standardisation statistics
-    epoch{k}.pt               the model after epoch k
-    predictions.parquet       epoch, query_id, rank, article_idx, score (Top-K of every epoch)
+    epoch{T}.pt               the model after the last epoch T
+    predictions.parquet       epoch, query_id, rank, article_idx, score (Top-K; epoch = T)
     per_query.parquet         epoch, query_id, fold and one column per metric
-    trial.json                written LAST: marks the trial as finished
+    trial.json                written LAST: marks the trial as finished; it also
+                              holds the mean training loss of every epoch
 Nothing is ever replaced: a folder that already exists is an error.
 """
 
 import json
 import time
+from collections.abc import Iterator
 from dataclasses import dataclass, replace
 from pathlib import Path
+from typing import Any
 
 import numpy as np
 import polars as pl
@@ -35,6 +47,14 @@ import torch
 
 from hmrec.config import DEEPFM_UNDECIDED_DEVICE, BaseConfig, DeepFMConfig
 from hmrec.data.folds import Fold, FoldManifest
+from hmrec.deepfm.cache import (
+    CachedPart,
+    CachedTraining,
+    CacheReader,
+    CacheWriter,
+    open_cache,
+    source_key,
+)
 from hmrec.deepfm.data import (
     FeatureColumns,
     TrainingRows,
@@ -54,31 +74,33 @@ from hmrec.deepfm.train import (
     TrainingSet,
     build_model,
     build_optimizer,
+    build_scheduler,
+    count_steps,
     train_epoch,
     training_set,
 )
 from hmrec.eval.ranker_eval import load_m7_evaluator, ranking_scores
-from hmrec.feature_files import verify_feature_files
-from hmrec.locks import FeaturesLock
+from hmrec.feature_files import METADATA_FILE, verify_feature_files
+from hmrec.locks import FeaturesLock, file_sha256
 from hmrec.logging_utils import get_logger
 from hmrec.memory import log_memory
 from hmrec.paths import ProjectPaths
 from hmrec.ranker.ablation import wide_table_columns
+from hmrec.ranker.sampling import read_sample_record, record_file
 from hmrec.ranker.window import m7_training_window
 
 LOGGER = get_logger("deepfm.trial")
 
 AREA_SPEED_TEST = "speed_test"
 AREA_V_PHASE = "v_phase"
-# The final configuration trained for more epochs (proposal §16.5 item 7). A separate
-# area, so that nothing of the runs with the default number of epochs is replaced.
-AREA_V_EXTENDED = "v_phase_extended"
-AREAS = (AREA_SPEED_TEST, AREA_V_PHASE, AREA_V_EXTENDED)
+AREAS = (AREA_SPEED_TEST, AREA_V_PHASE)
 EPOCH = "epoch"
 DONE_FILE = "trial.json"
 TRANSFORM_FILE = "transform.json"
 PREDICTIONS_FILE = "predictions.parquet"
 PER_QUERY_FILE = "per_query.parquet"
+# Part of the cache key: changes whenever the way inputs are encoded changes.
+ENCODING_VERSION = "2026-11-20 signed_log1p"
 
 
 @dataclass(frozen=True)
@@ -105,10 +127,12 @@ class TrialSpec:
     """One training to run.
 
     Attributes:
-        area: "speed_test", "v_phase" or "v_phase_extended".
+        area: "speed_test" or "v_phase".
         target_fold: The V fold to predict.
         seed: The training seed.
-        epochs: Epochs to train (a checkpoint and an evaluation after each).
+        epochs: Epochs to train = the schedule length; it must equal
+            training.epochs of the trial's configuration (the configuration id
+            of a cosine run depends on it).
     """
 
     area: str
@@ -119,13 +143,13 @@ class TrialSpec:
 
 @dataclass(frozen=True)
 class EpochMetrics:
-    """The evaluation of the model after one epoch.
+    """The evaluation of the final model.
 
     Attributes:
-        epoch: 1-based epoch number.
+        epoch: The last epoch of the run (1-based) = its number of epochs.
         n_queries: Queries of the target fold.
         scores: metric name -> mean over the fold's queries.
-        train_loss: Mean training loss of the epoch.
+        train_loss: Mean training loss of that last epoch.
     """
 
     epoch: int
@@ -144,11 +168,13 @@ class TrialResult:
         device: The device it ran on.
         n_train_rows: Training rows.
         n_train_queries: Training queries.
-        n_scored_rows: Candidate rows of the target week (scored once per epoch model).
-        prepare_seconds: Reading the sample files, fitting the transform, encoding.
+        n_scored_rows: Candidate rows of the target week.
+        prepare_seconds: Getting the encoded training rows (from the sample files
+            or from the cache).
         epochs: One EpochResult per epoch (steps, loss, seconds).
-        score_seconds: Reading, encoding and scoring the target week with all epoch models.
-        metrics: One EpochMetrics per epoch.
+        score_seconds: Scoring and evaluating the target week with the final model.
+        metrics: The evaluation of the final model (exactly one entry).
+        input_cache: "written", "read" or "off": how the encoded inputs were obtained.
     """
 
     config_id: str
@@ -161,6 +187,7 @@ class TrialResult:
     epochs: tuple[EpochResult, ...]
     score_seconds: float
     metrics: tuple[EpochMetrics, ...]
+    input_cache: str
 
 
 # ---------------------------------------------------------------- checks
@@ -178,6 +205,11 @@ def check_spec(inputs: TrialInputs, spec: TrialSpec) -> tuple[Fold, ...]:
         raise ValueError(f"area must be one of {AREAS}, got {spec.area!r}")
     if spec.epochs <= 0:
         raise ValueError(f"epochs must be > 0, got {spec.epochs}")
+    if spec.epochs != inputs.config.training.epochs:
+        raise ValueError(
+            f"the trial trains {spec.epochs} epochs but its configuration says "
+            f"{inputs.config.training.epochs}: the two must be equal"
+        )
     if inputs.config.training.device == DEEPFM_UNDECIDED_DEVICE:
         raise ValueError(
             "training.device of configs/deepfm.yaml is still undecided: run the device "
@@ -219,16 +251,24 @@ class PreparedTraining:
     n_queries: int
 
 
+def window_sample_files(inputs: TrialInputs, folds: tuple[Fold, ...]) -> dict[str, Path]:
+    """Training fold -> its M7 sample file of the configured ratio, in time order."""
+    paths, config = inputs.paths, inputs.config
+    ratio = config.negatives_per_positive
+    return {
+        fold.name: paths.ranker_sample_file(config.experiment, fold.name, ratio) for fold in folds
+    }
+
+
 def load_window_rows(
     inputs: TrialInputs, target_fold: str, folds: tuple[Fold, ...], columns: FeatureColumns
 ) -> TrainingRows:
     """Check the window's sample files against LightGBM's Dataset record, then read them."""
     paths, config = inputs.paths, inputs.config
-    ratio = config.negatives_per_positive
-    sample_files = {
-        fold.name: paths.ranker_sample_file(config.experiment, fold.name, ratio) for fold in folds
-    }
-    dataset_dir = paths.ranker_dataset_dir(config.experiment, target_fold, ratio)
+    sample_files = window_sample_files(inputs, folds)
+    dataset_dir = paths.ranker_dataset_dir(
+        config.experiment, target_fold, config.negatives_per_positive
+    )
     check_sample_files(sample_files, lightgbm_sample_sha256(dataset_dir))
     return load_training_rows(list(sample_files.values()), columns)
 
@@ -250,90 +290,215 @@ def fit_window_transform(
     )
 
 
-def prepare_training(
-    inputs: TrialInputs, target_fold: str, folds: tuple[Fold, ...], device: torch.device
-) -> PreparedTraining:
+def encode_window(inputs: TrialInputs, target_fold: str, folds: tuple[Fold, ...]) -> CachedTraining:
     """Read, check and encode the training rows of the window that predicts `target_fold`."""
     columns = feature_columns(inputs.lock)
     rows = load_window_rows(inputs, target_fold, folds, columns)
     transform = fit_window_transform(inputs, rows, columns)
     encoded = encode_rows(rows.raw, transform)
-    data = training_set(encoded, rows.labels, rows.query_ids, device)
     log_memory(LOGGER, f"{target_fold}: {rows.raw.n_rows} training rows encoded")
-    return PreparedTraining(transform, data, data.boundaries.size - 1)
+    return CachedTraining(transform, encoded, rows.labels, rows.query_ids)
+
+
+def encoded_parts(
+    inputs: TrialInputs, target_fold: str, transform: InputTransform
+) -> Iterator[CachedPart]:
+    """The target week's candidates, one part at a time, encoded with `transform`.
+
+    The frozen wide table is verified before the first part is read.
+    """
+    features_dir = inputs.paths.features_dir(target_fold)
+    feature_files = verify_feature_files(features_dir, wide_table_columns(inputs.lock))
+    columns = feature_columns(inputs.lock)
+    for part in feature_files.parts:
+        candidates = read_candidate_part(features_dir / part.name, columns)
+        encoded = encode_rows(candidates.raw, transform)
+        yield CachedPart(part.name, encoded, candidates.query_ids, candidates.article_idx)
+
+
+# ---------------------------------------------------------------- the input cache
+
+
+def cache_source(inputs: TrialInputs, target_fold: str, folds: tuple[Fold, ...]) -> dict[str, Any]:
+    """Everything the encoded inputs of a target week are computed from (the cache key).
+
+    Only small record files are read here. The sample files' sha256 come from
+    their own records and must equal the ones LightGBM's Dataset recorded, so a
+    cache can only belong to the rows LightGBM trained on.
+
+    Raises:
+        ValueError: If a sample record does not name the file LightGBM trained on.
+    """
+    paths, config = inputs.paths, inputs.config
+    columns = feature_columns(inputs.lock)
+    dataset_dir = paths.ranker_dataset_dir(
+        config.experiment, target_fold, config.negatives_per_positive
+    )
+    lightgbm_sha256 = lightgbm_sample_sha256(dataset_dir)
+    sample_sha256 = {
+        fold: read_sample_record(record_file(file)).sha256
+        for fold, file in window_sample_files(inputs, folds).items()
+    }
+    if sample_sha256 != lightgbm_sha256:
+        raise ValueError(
+            f"{target_fold}: a sample file is not the one LightGBM trained on: the sample "
+            f"records say {sample_sha256}, the LightGBM Dataset {lightgbm_sha256}"
+        )
+    return {
+        "encoding": ENCODING_VERSION,
+        "experiment": config.experiment,
+        "negatives_per_positive": config.negatives_per_positive,
+        "target_fold": target_fold,
+        "train_folds": [fold.name for fold in folds],
+        "sample_sha256": sample_sha256,
+        "features_record_sha256": file_sha256(paths.features_dir(target_fold) / METADATA_FILE),
+        "numeric": list(columns.numeric),
+        "categorical": list(columns.categorical),
+        "categorical_sizes": list(
+            categorical_sizes(paths.category_codes_file, columns.categorical)
+        ),
+        "numeric_input": config.model.numeric_input,
+        "n_bins": config.n_bins,
+        "clip_percentiles": [config.clip_low_percentile, config.clip_high_percentile],
+    }
+
+
+def cache_dir(inputs: TrialInputs, target_fold: str, source: dict[str, Any]) -> Path:
+    """The cache folder of a source: artifacts/deepfm/cache/{target}_{mode}_{key}/."""
+    return inputs.paths.deepfm_cache_dir(
+        target_fold, inputs.config.model.numeric_input, source_key(source)
+    )
+
+
+def write_cache(
+    inputs: TrialInputs, target_fold: str, folds: tuple[Fold, ...], directory: Path
+) -> None:
+    """Encode the training rows and all candidates of a target week and write them as a cache.
+
+    The sample files and the wide table are fully verified (sha256) while they
+    are read, exactly as in a training without a cache.
+    """
+    training = encode_window(inputs, target_fold, folds)
+    # The folder is created only now: a sample file that fails its check leaves nothing behind.
+    writer = CacheWriter(directory, cache_source(inputs, target_fold, folds))
+    writer.write_training(training)
+    transform = training.transform
+    # The training rows are not needed for the candidates: release them first.
+    del training
+    for part in encoded_parts(inputs, target_fold, transform):
+        writer.write_part(part)
+        LOGGER.info("cached %s (%d rows)", part.name, part.rows.n_rows)
+    writer.finish()
+    LOGGER.info("input cache written -> %s", directory)
+
+
+def open_input_cache(
+    inputs: TrialInputs, target_fold: str, folds: tuple[Fold, ...]
+) -> tuple[CacheReader | None, str]:
+    """The verified input cache of a target week, written first if it does not exist.
+
+    Returns:
+        (reader, "read" or "written"), or (None, "off") if the configuration's
+        input mode is not cached.
+    """
+    if inputs.config.model.numeric_input not in inputs.config.cached_numeric_inputs:
+        return None, "off"
+    source = cache_source(inputs, target_fold, folds)
+    directory = cache_dir(inputs, target_fold, source)
+    reader = open_cache(directory, source)
+    if reader is not None:
+        LOGGER.info("input cache verified and read: %s", directory)
+        return reader, "read"
+    write_cache(inputs, target_fold, folds, directory)
+    reader = open_cache(directory, source)
+    if reader is None:
+        raise ValueError(f"{directory} does not exist right after it was written")
+    return reader, "written"
+
+
+def prepare_training(
+    inputs: TrialInputs,
+    target_fold: str,
+    folds: tuple[Fold, ...],
+    device: torch.device,
+    reader: CacheReader | None = None,
+) -> PreparedTraining:
+    """The encoded training rows of the window on the device, from the cache if there is one."""
+    if reader is None:
+        training = encode_window(inputs, target_fold, folds)
+    else:
+        training = reader.read_training()
+    data = training_set(training.rows, training.labels, training.query_ids, device)
+    return PreparedTraining(training.transform, data, data.boundaries.size - 1)
 
 
 # ---------------------------------------------------------------- scoring and evaluation
 
 
-def load_epoch_models(
+def load_final_model(
     directory: Path, transform: InputTransform, inputs: TrialInputs, epochs: int
-) -> dict[int, DeepFM]:
-    """The saved model of every epoch, loaded from its file, in eval mode on the device."""
+) -> DeepFM:
+    """The saved model of the last epoch, loaded from its file, in eval mode on the device."""
     device = torch.device(inputs.config.training.device)
-    models = {}
-    for epoch in range(1, epochs + 1):
-        model = DeepFM(transform.layout, inputs.config.model).to(device)
-        state = torch.load(directory / f"epoch{epoch}.pt", map_location=device, weights_only=True)
-        model.load_state_dict(state)
-        models[epoch] = model.eval()
-    return models
+    model = DeepFM(transform.layout, inputs.config.model).to(device)
+    state = torch.load(directory / f"epoch{epochs}.pt", map_location=device, weights_only=True)
+    model.load_state_dict(state)
+    return model.eval()
 
 
 def score_target_fold(
-    inputs: TrialInputs, target_fold: str, transform: InputTransform, models: dict[int, DeepFM]
-) -> tuple[dict[int, pl.DataFrame], int]:
-    """Score ALL candidates of the target week with every epoch's model.
+    inputs: TrialInputs,
+    target_fold: str,
+    transform: InputTransform,
+    model: DeepFM,
+    reader: CacheReader | None = None,
+) -> tuple[pl.DataFrame, int]:
+    """Score ALL candidates of the target week with the final model.
 
-    The wide table is verified first. Each part is read and encoded once, then
-    scored by every model, so only one part is in memory.
+    One part is in memory at a time. Without a cache the wide table is verified
+    and each part is read and encoded here; with a cache the encoded parts are
+    read (they were verified when the cache was opened).
 
     Returns:
-        (epoch -> Top-K table of the whole fold, number of candidate rows).
+        (the Top-K table of the whole fold, number of candidate rows).
     """
     config = inputs.config
-    features_dir = inputs.paths.features_dir(target_fold)
-    feature_files = verify_feature_files(features_dir, wide_table_columns(inputs.lock))
-    columns = feature_columns(inputs.lock)
     device = torch.device(config.training.device)
-    tops: dict[int, list[pl.DataFrame]] = {epoch: [] for epoch in models}
+    if reader is None:
+        parts = encoded_parts(inputs, target_fold, transform)
+    else:
+        parts = (reader.read_part(name) for name in reader.parts)
+    tops: list[pl.DataFrame] = []
     n_rows = 0
-    for part in feature_files.parts:
-        candidates = read_candidate_part(features_dir / part.name, columns)
-        encoded = encode_rows(candidates.raw, transform)
-        n_rows += encoded.n_rows
-        for epoch, model in models.items():
-            scores = score_rows(model, encoded, config.scoring_rows_per_chunk, device)
-            tops[epoch].append(
-                top_k_per_query(candidates.query_ids, candidates.article_idx, scores, config.top_k)
-            )
-        LOGGER.info("scored %s (%d rows, %d models)", part.name, encoded.n_rows, len(models))
-    return {epoch: pl.concat(frames) for epoch, frames in tops.items()}, n_rows
+    for part in parts:
+        scores = score_rows(model, part.rows, config.scoring_rows_per_chunk, device)
+        tops.append(top_k_per_query(part.query_ids, part.article_idx, scores, config.top_k))
+        n_rows += part.rows.n_rows
+        LOGGER.info("scored %s (%d rows)", part.name, part.rows.n_rows)
+    return pl.concat(tops), n_rows
 
 
 def evaluate_and_save(
     inputs: TrialInputs,
     target: Fold,
-    tops: dict[int, pl.DataFrame],
-    losses: dict[int, float],
+    top: pl.DataFrame,
+    last_epoch: EpochResult,
     directory: Path,
 ) -> tuple[EpochMetrics, ...]:
-    """Evaluate every epoch's Top-K on the target V fold and write the trial's two tables.
+    """Evaluate the final model's Top-K on the target V fold and write the trial's two tables.
 
     The labels are read through load_m7_evaluator, which checks the fold's phase
     before it opens the file.
     """
     evaluator = load_m7_evaluator(target, inputs.paths.labels_file(target.name))
-    metrics, per_query, predictions = [], [], []
-    for epoch in sorted(tops):
-        scores = ranking_scores(evaluator, tops[epoch], inputs.config.metrics)
-        metrics.append(EpochMetrics(epoch, scores.n_queries, scores.means, losses[epoch]))
-        epoch_column = pl.lit(epoch, dtype=pl.Int32).alias(EPOCH)
-        per_query.append(scores.per_query.with_columns(epoch_column))
-        predictions.append(tops[epoch].select(epoch_column, QUERY_ID, RANK, ARTICLE_IDX, SCORE))
-    pl.concat(predictions).write_parquet(directory / PREDICTIONS_FILE)
-    pl.concat(per_query).write_parquet(directory / PER_QUERY_FILE)
-    return tuple(metrics)
+    scores = ranking_scores(evaluator, top, inputs.config.metrics)
+    epoch_column = pl.lit(last_epoch.epoch, dtype=pl.Int32).alias(EPOCH)
+    top.select(epoch_column, QUERY_ID, RANK, ARTICLE_IDX, SCORE).write_parquet(
+        directory / PREDICTIONS_FILE
+    )
+    scores.per_query.with_columns(epoch_column).write_parquet(directory / PER_QUERY_FILE)
+    metrics = EpochMetrics(last_epoch.epoch, scores.n_queries, scores.means, last_epoch.mean_loss)
+    return (metrics,)
 
 
 # ---------------------------------------------------------------- one trial
@@ -342,20 +507,32 @@ def evaluate_and_save(
 def train_and_save(
     inputs: TrialInputs, spec: TrialSpec, prepared: PreparedTraining, directory: Path
 ) -> tuple[EpochResult, ...]:
-    """Train `spec.epochs` epochs and save the model after each."""
+    """Train `spec.epochs` epochs with the run's schedule and save the final model."""
     training = replace(inputs.config.training, seed=spec.seed)
     device = torch.device(training.device)
     model = build_model(prepared.transform.layout, inputs.config.model, spec.seed, device)
     optimizer = build_optimizer(model, training)
+    total_steps = count_steps(prepared.data, training, spec.seed, spec.epochs)
+    scheduler = build_scheduler(optimizer, training, total_steps)
+    LOGGER.info(
+        "%d epochs, %d optimizer steps, lr schedule %s",
+        spec.epochs,
+        total_steps,
+        training.lr_schedule,
+    )
     results = []
     for epoch in range(1, spec.epochs + 1):
-        results.append(train_epoch(model, optimizer, prepared.data, training, spec.seed, epoch))
-        torch.save(model.state_dict(), directory / f"epoch{epoch}.pt")
+        results.append(
+            train_epoch(model, optimizer, prepared.data, training, spec.seed, epoch, scheduler)
+        )
+    if sum(result.steps for result in results) != total_steps:
+        raise ValueError("the run took another number of steps than its schedule was built for")
+    torch.save(model.state_dict(), directory / f"epoch{spec.epochs}.pt")
     return tuple(results)
 
 
 def run_trial(inputs: TrialInputs, spec: TrialSpec) -> TrialResult:
-    """Train one configuration for one V fold and evaluate it after every epoch.
+    """Train one configuration for one V fold and evaluate its final model.
 
     Args:
         inputs: Configuration.
@@ -365,8 +542,8 @@ def run_trial(inputs: TrialInputs, spec: TrialSpec) -> TrialResult:
         The result; the caller writes the result rows.
 
     Raises:
-        ValueError: If the fold check fails (e.g. a T fold) or a sample file is
-            not the one LightGBM trained on.
+        ValueError: If the fold check fails (e.g. a T fold), a sample file is not
+            the one LightGBM trained on, or the input cache fails its check.
         FileExistsError: If the trial's folder exists.
     """
     folds = check_spec(inputs, spec)  # before anything is read
@@ -374,7 +551,8 @@ def run_trial(inputs: TrialInputs, spec: TrialSpec) -> TrialResult:
     device = torch.device(inputs.config.training.device)
     torch.set_num_threads(inputs.base.num_threads)
     started = time.perf_counter()
-    prepared = prepare_training(inputs, spec.target_fold, folds, device)
+    reader, cache_state = open_input_cache(inputs, spec.target_fold, folds)
+    prepared = prepare_training(inputs, spec.target_fold, folds, device, reader)
     directory.mkdir(parents=True)
     save_transform(prepared.transform, directory / TRANSFORM_FILE)
     prepare_seconds = time.perf_counter() - started
@@ -384,11 +562,10 @@ def run_trial(inputs: TrialInputs, spec: TrialSpec) -> TrialResult:
     # The training rows are not needed for scoring: release them first.
     del prepared
     started = time.perf_counter()
-    models = load_epoch_models(directory, transform, inputs, spec.epochs)
-    tops, n_scored_rows = score_target_fold(inputs, spec.target_fold, transform, models)
-    losses = {result.epoch: result.mean_loss for result in epochs}
+    model = load_final_model(directory, transform, inputs, spec.epochs)
+    top, n_scored_rows = score_target_fold(inputs, spec.target_fold, transform, model, reader)
     target = inputs.manifest.get(spec.target_fold)
-    metrics = evaluate_and_save(inputs, target, tops, losses, directory)
+    metrics = evaluate_and_save(inputs, target, top, epochs[-1], directory)
     score_seconds = time.perf_counter() - started
     result = TrialResult(
         config_id=deepfm_config_id(inputs.config),
@@ -401,8 +578,16 @@ def run_trial(inputs: TrialInputs, spec: TrialSpec) -> TrialResult:
         epochs=epochs,
         score_seconds=score_seconds,
         metrics=metrics,
+        input_cache=cache_state,
     )
-    summary = {"config_id": result.config_id, "seed": spec.seed, "epochs": spec.epochs}
+    summary = {
+        "config_id": result.config_id,
+        "seed": spec.seed,
+        "epochs": spec.epochs,
+        "input_cache": cache_state,
+        "epoch_mean_loss": {str(epoch.epoch): epoch.mean_loss for epoch in epochs},
+        "epoch_steps": {str(epoch.epoch): epoch.steps for epoch in epochs},
+    }
     (directory / DONE_FILE).write_text(json.dumps(summary), encoding="utf-8")
     return result
 
