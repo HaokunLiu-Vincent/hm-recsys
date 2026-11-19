@@ -1035,3 +1035,19 @@ Everything below was settled **before the features of any week were generated**.
   - "Range across seeds" = (max − min) / min of the three pooled values, each at the epoch its own curve gives by the epoch rule.
   - Pooled MAP@12 = weighted by queries over V1–V4, as in M7.
 - **This step** (step 1): the plan, the configs, the code with its tests, and the speed test (the only full-data run). The study itself (step 0 onwards) is not run in this step.
+
+## 2026-11-19 DeepFM device benchmark: MPS by the device rule (1.92 times faster than CPU); MPS does not repeat exactly from the same seed
+
+- **Run** (`scripts/m9_deepfm_benchmark.py`, commit `c81b050`, clean tree; `results/deepfm_benchmark.csv`): the default DeepFM model (configuration `653c29035939`) on the training rows of V1 (F1–F4, 10,714,226 rows), batch 4,096, 300 training steps with the first 20 not timed, each device in its own process.
+
+  | Device | Median step | Mean step | Same seed twice: identical losses | Scoring, 1 million rows | True peak (RSS) |
+  |---|---|---|---|---|---|
+  | CPU, 6 threads | 19.50 ms | 19.54 ms | yes (difference 0) | 727,851 rows/s | 7.71 GB |
+  | MPS | 10.13 ms | 10.28 ms | **no** (largest difference 9.06e-06) | 566,279 rows/s | 5.48 GB |
+
+- **Decision by the rule**: MPS is 19.50 / 10.13 = 1.92 times faster per training step, which is at least 1.5, so **`training.device: mps`** is written to `configs/deepfm.yaml`. The rule was fixed before the benchmark and is applied as written.
+- **What the user should know before the study starts**:
+  - **On MPS the same seed does not give the same losses.** The first loss is the same on both devices (0.6336061); after 300 steps it is 0.1059677 on CPU and 0.1059690 in the first MPS run, and the two MPS runs from the same seed are up to 9.06e-06 apart. So on MPS a training cannot be reproduced bit for bit, and the seed-to-seed range of step 0 will also contain this run-to-run part. On CPU a run repeats exactly.
+  - Scoring is faster on CPU (727,851 against 566,279 rows per second); the rule looks at the training step only.
+  - The process RSS on MPS does not include all memory the GPU side holds (unified memory); the encoded training rows on the device are 0.76 GB.
+  - Whether to keep MPS (faster, not exactly repeatable) or to use CPU (about twice the training time, exactly repeatable) is the user's decision; nothing is changed here beyond applying the rule.

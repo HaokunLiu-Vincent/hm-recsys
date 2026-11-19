@@ -40,10 +40,13 @@ training:
   weight_decay: 0.0
   epochs: 5                    # a checkpoint and an evaluation after every epoch
   seed: 42
-  # cpu, mps or undecided. It is decided by the device rule below from the device
-  # benchmark (results/deepfm_benchmark.csv) and written here afterwards. A training
-  # refuses to start while it is undecided.
-  device: undecided
+  # cpu, mps or undecided (a training refuses to start while it is undecided).
+  # Decided by the device rule below from the device benchmark of 2026-11-19
+  # (results/deepfm_benchmark.csv): median training step 19.50 ms on CPU (6 threads)
+  # and 10.13 ms on MPS, 1.92 times faster, so MPS. Note: on MPS two runs with the
+  # same seed did NOT give identical losses (largest difference 9.1e-06 over 300
+  # steps); on CPU they were identical (docs/decisions.md 2026-11-19).
+  device: mps
 
 scoring:
   rows_per_chunk: 262144       # candidate rows scored per forward pass (memory only)
