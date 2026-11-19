@@ -4,8 +4,8 @@ from pathlib import Path
 
 import polars as pl
 import pytest
-from conftest import D1_ANCHOR, FIXTURE_DAY_ZERO, make_transactions
 
+from conftest import D1_ANCHOR, FIXTURE_DAY_ZERO, make_transactions
 from hmrec.config import ActivePoolConfig, load_catalog_config
 from hmrec.data.catalog import build_active_pool, build_catalog, count_purchase_lines
 

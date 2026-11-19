@@ -35,8 +35,8 @@ from pathlib import Path
 
 import numpy as np
 import polars as pl
-from conftest import FIXTURE_DAY_ZERO
 
+from conftest import FIXTURE_DAY_ZERO
 from hmrec.config import load_features_config
 from hmrec.data.histories import recent_purchase_histories
 from hmrec.features.base import FoldData, HistoryArrays

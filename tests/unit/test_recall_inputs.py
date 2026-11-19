@@ -12,8 +12,8 @@ from datetime import timedelta
 from pathlib import Path
 
 import polars as pl
-from conftest import FIXTURE_DAY_ZERO, make_queries, make_transactions
 
+from conftest import FIXTURE_DAY_ZERO, make_queries, make_transactions
 from hmrec.config import load_base_config, load_catalog_config, load_preprocess_config
 from hmrec.data.day_index import day_index_to_date
 from hmrec.data.folds import Fold

@@ -5,14 +5,14 @@ from pathlib import Path
 import numpy as np
 import pytest
 import torch
+from test_twotower_model import TINY_MODEL
+
 from conftest import (
     TINY_N_ARTICLES,
     make_tiny_articles,
     make_tiny_customers,
     make_tiny_embeddings,
 )
-from test_twotower_model import TINY_MODEL
-
 from hmrec.config import TwoTowerTrainingConfig
 from hmrec.recall.twotower.data import (
     CategoryCodes,

@@ -30,8 +30,8 @@ import math
 
 import polars as pl
 import pytest
-from conftest import make_queries, make_recall_inputs
 
+from conftest import make_queries, make_recall_inputs
 from hmrec.config import RepurchaseConfig
 from hmrec.recall.base import add_age_days, validate_candidates
 from hmrec.recall.r2_repurchase import REP_SPEC, RepurchaseChannel

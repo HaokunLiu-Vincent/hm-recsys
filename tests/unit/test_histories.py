@@ -11,8 +11,8 @@ Poison (anchor day 10 and later): (0, 5, 10), (1, 3, 12), (2, 0, 10).
 
 import numpy as np
 import pytest
-from conftest import FIXTURE_DAY_ZERO, make_queries, make_recall_inputs, make_transactions
 
+from conftest import FIXTURE_DAY_ZERO, make_queries, make_recall_inputs, make_transactions
 from hmrec.data.day_index import day_index_to_date
 from hmrec.data.histories import (
     build_histories,

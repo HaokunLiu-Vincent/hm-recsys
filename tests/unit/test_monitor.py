@@ -25,8 +25,8 @@ from pathlib import Path
 
 import polars as pl
 import pytest
-from conftest import make_queries
 
+from conftest import make_queries
 from hmrec.config import CandidateRunConfig
 from hmrec.eval.monitor import (
     MONITOR_COLUMNS,
