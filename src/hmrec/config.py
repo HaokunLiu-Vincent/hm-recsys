@@ -3227,3 +3227,74 @@ def parse_t_eval_config(raw: Mapping[str, Any]) -> TEvalConfig:
 def load_t_eval_config(path: Path) -> TEvalConfig:
     """Read and validate configs/m9_t_eval.yaml."""
     return parse_t_eval_config(load_yaml(path))
+
+
+# ---------------------------------------------------------------- kaggle_deepfm.yaml
+
+
+@dataclass(frozen=True)
+class KaggleDeepFMConfig:
+    """Settings from configs/kaggle_deepfm.yaml: the Kaggle submission of the chosen DeepFM.
+
+    One submission of one model with one seed (docs/decisions.md 2026-11-20).
+
+    Attributes:
+        seed: The training seed of the one model.
+        config_id: The configuration id of the DeepFM configuration chosen on V
+            (configs/m9_t_eval.yaml); a configuration with another id is refused.
+        reference_area: The area of the stage-2 evaluation's records the rehearsal
+            is compared with ("m9_t").
+        lightgbm_private_score: Private score of the LightGBM submission.
+        lightgbm_public_score: Public score of the LightGBM submission.
+        same_below_relative_difference: A relative difference of the Private
+            scores below this is read as "cannot be told apart on this week".
+    """
+
+    seed: int
+    config_id: str
+    reference_area: str
+    lightgbm_private_score: float
+    lightgbm_public_score: float
+    same_below_relative_difference: float
+
+
+def parse_kaggle_deepfm_config(raw: Mapping[str, Any]) -> KaggleDeepFMConfig:
+    """Build a KaggleDeepFMConfig from the content of configs/kaggle_deepfm.yaml.
+
+    Raises:
+        ValueError: If a key is missing or unknown, or a value is out of range.
+    """
+    where = "kaggle_deepfm"
+    check_keys(raw, {"seed", "config_id", "rehearsal", "reading"}, where)
+    rehearsal = get_mapping(raw, "rehearsal", where)
+    check_keys(rehearsal, {"reference_area"}, f"{where}.rehearsal")
+    reading = get_mapping(raw, "reading", where)
+    reading_keys = {
+        "lightgbm_private_score",
+        "lightgbm_public_score",
+        "same_below_relative_difference",
+    }
+    check_keys(reading, reading_keys, f"{where}.reading")
+    config = KaggleDeepFMConfig(
+        seed=get_int(raw, "seed", where),
+        config_id=get_str(raw, "config_id", where),
+        reference_area=get_str(rehearsal, "reference_area", f"{where}.rehearsal"),
+        lightgbm_private_score=get_float(reading, "lightgbm_private_score", f"{where}.reading"),
+        lightgbm_public_score=get_float(reading, "lightgbm_public_score", f"{where}.reading"),
+        same_below_relative_difference=get_float(
+            reading, "same_below_relative_difference", f"{where}.reading"
+        ),
+    )
+    for name in ("seed", "lightgbm_private_score", "lightgbm_public_score"):
+        require_positive(getattr(config, name), f"{where}.{name}")
+    if not 0 < config.same_below_relative_difference < 1:
+        raise ValueError(
+            f"{where}.reading.same_below_relative_difference must be in (0, 1), got "
+            f"{config.same_below_relative_difference}"
+        )
+    return config
+
+
+def load_kaggle_deepfm_config(path: Path) -> KaggleDeepFMConfig:
+    """Read and validate configs/kaggle_deepfm.yaml."""
+    return parse_kaggle_deepfm_config(load_yaml(path))

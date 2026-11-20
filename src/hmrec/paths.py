@@ -893,6 +893,67 @@ class ProjectPaths:
         """results/m9_t_v_and_t.csv: pooled MAP@12 of the two models on V1-V4 and on T1-T4."""
         return self.results_root / "m9_t_v_and_t.csv"
 
+    # ------------------------------------------------------------ Kaggle: the DeepFM submission
+
+    @property
+    def kaggle_deepfm_config_file(self) -> Path:
+        """configs/kaggle_deepfm.yaml: the one DeepFM submission (seed, reading of the score)."""
+        return self.configs_dir / "kaggle_deepfm.yaml"
+
+    def kaggle_deepfm_run_dir(self, run: str) -> Path:
+        """artifacts/kaggle/deepfm/{run}/: every file the DeepFM ranker writes for a run.
+
+        The candidates and features of a run are NOT here: they are the files of the
+        LightGBM submission under artifacts/kaggle/{run}/, which are only read.
+        """
+        return self.kaggle_dir / "deepfm" / run
+
+    def kaggle_deepfm_log_file(self, run: str, label: str) -> Path:
+        """The log of one process: artifacts/kaggle/deepfm/{run}/logs/{label}.log."""
+        return self.kaggle_deepfm_run_dir(run) / "logs" / f"{label}.log"
+
+    def kaggle_deepfm_model_dir(self, run: str) -> Path:
+        """The run's DeepFM model: transform.json, epoch{T}.pt and training.json."""
+        return self.kaggle_deepfm_run_dir(run) / "model"
+
+    def kaggle_deepfm_top_file(self, run: str, shard: int) -> Path:
+        """The DeepFM Top-K of every query of one shard (query_id, rank, article_idx, score)."""
+        return self.kaggle_deepfm_run_dir(run) / "shards" / f"{shard:03d}" / "top.parquet"
+
+    def kaggle_deepfm_submission_file(self, run: str) -> Path:
+        """The DeepFM submission file of a run: artifacts/kaggle/deepfm/{run}/submission.csv."""
+        return self.kaggle_deepfm_run_dir(run) / "submission.csv"
+
+    def kaggle_deepfm_submission_gzip_file(self, run: str) -> Path:
+        """The gzip copy of the DeepFM submission file (same name plus .gz)."""
+        file = self.kaggle_deepfm_submission_file(run)
+        return file.with_name(file.name + ".gz")
+
+    @property
+    def kaggle_deepfm_runs_file(self) -> Path:
+        """results/kaggle_deepfm_runs.csv: one row per process (step, time, true memory peak)."""
+        return self.results_root / "kaggle_deepfm_runs.csv"
+
+    @property
+    def kaggle_deepfm_label_access_file(self) -> Path:
+        """results/kaggle_deepfm_label_access.csv: every read of T labels as training labels."""
+        return self.results_root / "kaggle_deepfm_label_access.csv"
+
+    @property
+    def kaggle_deepfm_rehearsal_file(self) -> Path:
+        """results/kaggle_deepfm_rehearsal.csv: the checks of the rehearsal against stage 2."""
+        return self.results_root / "kaggle_deepfm_rehearsal.csv"
+
+    @property
+    def kaggle_deepfm_files_file(self) -> Path:
+        """results/kaggle_deepfm_files.csv: the written submission files and their checks."""
+        return self.results_root / "kaggle_deepfm_files.csv"
+
+    @property
+    def kaggle_deepfm_submission_results_file(self) -> Path:
+        """results/kaggle_deepfm_submission.csv: the one submission and its two scores."""
+        return self.results_root / "kaggle_deepfm_submission.csv"
+
 
 def build_paths(config: BaseConfig, project_root: Path) -> ProjectPaths:
     """Derive ProjectPaths from a BaseConfig.
