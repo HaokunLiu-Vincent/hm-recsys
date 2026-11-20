@@ -1565,3 +1565,26 @@ Tables: `results/m9_arms.csv`, `results/m9_contrasts.csv`, `results/m9_groups.cs
 - Paired bootstrap on the seed mean (95%): DeepFM pointwise − LightGBM lambdarank −0.001561 [−0.001750, −0.001399]; DeepFM listwise − LightGBM lambdarank −0.001135 [−0.001313, −0.000972]; LightGBM lambdarank − LightGBM binary +0.000465 [+0.000330, +0.000596]; DeepFM listwise − DeepFM pointwise +0.000426 [+0.000300, +0.000566].
 - Ablations at the Arm 4 configuration (seed 42, relative to 0.031164): `first_order` −8.36%, `fm` −2.57%, `deep` −2.37%, numeric input `standardised` +3.59%; none is within the 3-seed range.
 - The T-phase evaluation of rule 10 of §16.8 is not implemented.
+
+### 16.10 Extension of 2026-11-20: the input representation (recorded before any run)
+
+**Why and when.** Added after the 2×2 results (§16.9) were seen, because of the seed-42 ablation with the standardised numeric input (+3.59%). V1–V4 only; it selects nothing for the main system and leaves the 2×2 records as they are.
+
+**Hypothesis under test** (not an established cause): the 32-bin encoding gives DeepFM a coarser view of the numeric features than LightGBM has. DeepFM default: 32 quantile bins plus a missing bin. Locked LightGBM (`configs/locks/ranker.lock.yaml`): `max_bin: 255`, `min_data_in_bin: 3`, `bin_construct_sample_cnt: 200000`, `use_missing: true`, `zero_as_missing: false`, `enable_bundle: true`, `feature_pre_filter: false`.
+
+**Runs** (`configs/hpo/deepfm_extension.yaml`): learning rate 1e-3, embedding dimension 16, dropout 0, T = 1 with its full cosine schedule, CPU, seeds 42, 43, 44, V1–V4.
+
+| Run | Numeric input | Loss | Arm |
+|---|---|---|---|
+| E1 | binned, 255 bins | pointwise | `deepfm_bins255_pointwise` |
+| E2 | binned, 255 bins | listwise | `deepfm_bins255_listwise` |
+| E3 | standardised (§16.3) | pointwise | `deepfm_standardised_pointwise` (seed 42 = the ablation run of §16.9) |
+| E4 | standardised (§16.3) | listwise | `deepfm_standardised_listwise` |
+
+No tuning, no selection. **Limitation: T is fixed at 1; the learning rate, embedding dimension and dropout are those of the 32-bin pointwise arm.**
+
+**Comparison (report only).** Eight arms: the two LightGBM arms and DeepFM with {32 bins, 255 bins, standardised} × {pointwise, listwise}; per arm the seeds, mean, sample standard deviation and range. Paired bootstrap of §10.2 on seed means: standardised − 32 bins and 255 bins − 32 bins for each loss; each standardised arm − the LightGBM arm with the same loss. The three query groups. Tables: `results/m9_ext_arms.csv`, `results/m9_ext_contrasts.csv`, `results/m9_ext_groups.csv`.
+
+**Memory (no result changes).** The standardised path peaked at 11.66 GB; it is lowered before the runs (aim: under 10 GB), with a test on small data that shows identical outputs.
+
+**T phase (replaces rule 10 of §16.8; implemented later).** One evaluation on T1–T4 of LightGBM binary and all six DeepFM arms, seeds 42, 43, 44, reported only and never used to select anything. LightGBM lambdarank with seed 42 on T is the M8 record and is not rerun.
