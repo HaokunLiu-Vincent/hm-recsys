@@ -729,6 +729,48 @@ class ProjectPaths:
         """results/deepfm_metrics.csv: one row per (configuration, seed, fold, epoch)."""
         return self.results_root / "deepfm_metrics.csv"
 
+    # ------------------------------------------------------------ M9: the evaluation on T1-T4
+
+    @property
+    def t_eval_config_file(self) -> Path:
+        """configs/m9_t_eval.yaml: the one configuration and the rules of the evaluation on T."""
+        return self.configs_dir / "m9_t_eval.yaml"
+
+    @property
+    def m9_t_trials_file(self) -> Path:
+        """results/m9_t_trials.csv: one row per training of the evaluation on T1-T4."""
+        return self.results_root / "m9_t_trials.csv"
+
+    @property
+    def m9_t_metrics_file(self) -> Path:
+        """results/m9_t_metrics.csv: the metric values of every training of that evaluation."""
+        return self.results_root / "m9_t_metrics.csv"
+
+    @property
+    def m9_t_rehearsal_check_file(self) -> Path:
+        """results/m9_t_rehearsal_check.csv: one row per comparison of a rehearsal with V4."""
+        return self.results_root / "m9_t_rehearsal_check.csv"
+
+    @property
+    def m9_t_label_access_file(self) -> Path:
+        """results/m9_t_label_access.csv: every read of T labels by the M9 evaluation."""
+        return self.results_root / "m9_t_label_access.csv"
+
+    @property
+    def m9_t_arms_file(self) -> Path:
+        """results/m9_t_arms.csv: DeepFM (per seed, summarised) and the M8 record on T1-T4."""
+        return self.results_root / "m9_t_arms.csv"
+
+    @property
+    def m9_t_contrasts_file(self) -> Path:
+        """results/m9_t_contrasts.csv: the bootstrap interval of DeepFM minus the M8 record."""
+        return self.results_root / "m9_t_contrasts.csv"
+
+    @property
+    def m9_t_v_and_t_file(self) -> Path:
+        """results/m9_t_v_and_t.csv: pooled MAP@12 of the two models on V1-V4 and on T1-T4."""
+        return self.results_root / "m9_t_v_and_t.csv"
+
 
 def build_paths(config: BaseConfig, project_root: Path) -> ProjectPaths:
     """Derive ProjectPaths from a BaseConfig.

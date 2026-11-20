@@ -2956,3 +2956,142 @@ def parse_deepfm_extension_config(raw: Mapping[str, Any]) -> DeepFMExtensionConf
 def load_deepfm_extension_config(path: Path) -> DeepFMExtensionConfig:
     """Read and validate configs/hpo/deepfm_extension.yaml."""
     return parse_deepfm_extension_config(load_yaml(path))
+
+
+# ---------------------------------------------------------------- M9: the evaluation on T1-T4
+
+T_EVAL_PHASE = "T"
+T_EVAL_CONFIG_ID_LENGTH = 12
+
+
+@dataclass(frozen=True)
+class TEvalConfig:
+    """Settings from configs/m9_t_eval.yaml (proposal §16.12).
+
+    ONE configuration, chosen on V, is evaluated on the T folds once and reported
+    only; nothing is tuned or selected.
+
+    Attributes:
+        phase: "T".
+        target_folds: The T folds, in time order.
+        seeds: The training seeds (also the seeds of the rehearsal).
+        rehearsal_target_fold: The V fold the rehearsal predicts.
+        arm: Name of the DeepFM arm in the result tables.
+        numeric_input: "binned" or "standardised".
+        n_bins: Quantile bins of the configuration (part of the configuration id
+            also for the standardised input, which does not use it).
+        loss: "pointwise_bce" or "listwise_softmax".
+        learning_rate: Adam learning rate.
+        embedding_dim: Embedding length.
+        dropout: Dropout after every hidden layer.
+        components: Model components.
+        epochs: T, the epochs (schedule length).
+        config_id: The configuration id the arm has on V; the code refuses to
+            run a configuration with another id.
+        m8_record_arm: Name of the arm that is the M8 record (LightGBM lambdarank).
+        m8_record_seed: The seed of that record.
+        m8_record_num_trees: Its number of trees.
+    """
+
+    phase: str
+    target_folds: tuple[str, ...]
+    seeds: tuple[int, ...]
+    rehearsal_target_fold: str
+    arm: str
+    numeric_input: str
+    n_bins: int
+    loss: str
+    learning_rate: float
+    embedding_dim: int
+    dropout: float
+    components: str
+    epochs: int
+    config_id: str
+    m8_record_arm: str
+    m8_record_seed: int
+    m8_record_num_trees: int
+
+
+def _check_t_eval_config(config: TEvalConfig, where: str) -> None:
+    """The value checks of parse_t_eval_config."""
+    if config.phase != T_EVAL_PHASE:
+        raise ValueError(f"{where}.phase must be {T_EVAL_PHASE!r}, got {config.phase!r}")
+    if not config.target_folds or len(set(config.target_folds)) != len(config.target_folds):
+        raise ValueError(f"{where}.target_folds must be non-empty and without repeats")
+    if len(set(config.seeds)) != len(config.seeds):
+        raise ValueError(f"{where}.seeds: a seed repeats: {config.seeds}")
+    _require_choice(config.numeric_input, DEEPFM_NUMERIC_INPUTS, f"{where}.deepfm.numeric_input")
+    _require_choice(config.loss, DEEPFM_LOSSES, f"{where}.deepfm.loss")
+    _require_choice(config.components, DEEPFM_COMPONENTS, f"{where}.deepfm.components")
+    if not 2 <= config.n_bins <= 255:
+        raise ValueError(f"{where}.deepfm.n_bins must be in 2..255, got {config.n_bins}")
+    for name in ("learning_rate", "embedding_dim", "epochs", "m8_record_num_trees"):
+        require_positive(getattr(config, name), f"{where}.{name}")
+    if not 0 <= config.dropout < 1:
+        raise ValueError(f"{where}.deepfm.dropout must be in [0, 1), got {config.dropout}")
+    if len(config.config_id) != T_EVAL_CONFIG_ID_LENGTH:
+        raise ValueError(
+            f"{where}.deepfm.config_id must have {T_EVAL_CONFIG_ID_LENGTH} characters, "
+            f"got {config.config_id!r}"
+        )
+    if config.arm == config.m8_record_arm:
+        raise ValueError(f"{where}: the two arms have the same name {config.arm!r}")
+    if config.m8_record_seed not in config.seeds:
+        raise ValueError(
+            f"{where}.m8_record.seed {config.m8_record_seed} is not one of the seeds {config.seeds}"
+        )
+
+
+def parse_t_eval_config(raw: Mapping[str, Any]) -> TEvalConfig:
+    """Build a TEvalConfig from the content of configs/m9_t_eval.yaml.
+
+    Raises:
+        ValueError: If a key is missing or unknown, the phase is not "T", or a
+            value is out of range.
+    """
+    where = "m9_t_eval"
+    check_keys(raw, {"phase", "target_folds", "seeds", "rehearsal", "deepfm", "m8_record"}, where)
+    rehearsal = get_mapping(raw, "rehearsal", where)
+    check_keys(rehearsal, {"target_fold"}, f"{where}.rehearsal")
+    m8_record = get_mapping(raw, "m8_record", where)
+    check_keys(m8_record, {"arm", "seed", "num_trees"}, f"{where}.m8_record")
+    deepfm = get_mapping(raw, "deepfm", where)
+    deepfm_keys = {
+        "arm",
+        "numeric_input",
+        "n_bins",
+        "loss",
+        "learning_rate",
+        "embedding_dim",
+        "dropout",
+        "components",
+        "epochs",
+        "config_id",
+    }
+    check_keys(deepfm, deepfm_keys, f"{where}.deepfm")
+    config = TEvalConfig(
+        phase=get_str(raw, "phase", where),
+        target_folds=get_str_list(raw, "target_folds", where),
+        seeds=_get_positive_int_list(raw, "seeds", where),
+        rehearsal_target_fold=get_str(rehearsal, "target_fold", f"{where}.rehearsal"),
+        arm=get_str(deepfm, "arm", f"{where}.deepfm"),
+        numeric_input=get_str(deepfm, "numeric_input", f"{where}.deepfm"),
+        n_bins=get_int(deepfm, "n_bins", f"{where}.deepfm"),
+        loss=get_str(deepfm, "loss", f"{where}.deepfm"),
+        learning_rate=get_float(deepfm, "learning_rate", f"{where}.deepfm"),
+        embedding_dim=get_int(deepfm, "embedding_dim", f"{where}.deepfm"),
+        dropout=get_float(deepfm, "dropout", f"{where}.deepfm"),
+        components=get_str(deepfm, "components", f"{where}.deepfm"),
+        epochs=get_int(deepfm, "epochs", f"{where}.deepfm"),
+        config_id=get_str(deepfm, "config_id", f"{where}.deepfm"),
+        m8_record_arm=get_str(m8_record, "arm", f"{where}.m8_record"),
+        m8_record_seed=get_int(m8_record, "seed", f"{where}.m8_record"),
+        m8_record_num_trees=get_int(m8_record, "num_trees", f"{where}.m8_record"),
+    )
+    _check_t_eval_config(config, where)
+    return config
+
+
+def load_t_eval_config(path: Path) -> TEvalConfig:
+    """Read and validate configs/m9_t_eval.yaml."""
+    return parse_t_eval_config(load_yaml(path))

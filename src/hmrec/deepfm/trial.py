@@ -32,11 +32,20 @@ Files of a trial, under artifacts/deepfm/{area}/{config_id}/seed{seed}/{fold}/:
     trial.json                written LAST: marks the trial as finished; it also
                               holds the mean training loss of every epoch
 Nothing is ever replaced: a folder that already exists is an error.
+
+run_trial is the entry point of the V phase and does all of the above. The steps
+that do not depend on WHICH fold is predicted (2 to 5, and the evaluation of a
+given evaluator) are in run_trial_through, which takes a TrialDoor: the training
+folds, the folder of the LightGBM Dataset record that names the sample files,
+and a function that opens the target fold's labels. run_trial builds the M7
+door (m7_door). The evaluation on T1-T4 (hmrec.t_eval, proposal §16.12) builds
+its own door after its own fold checks and its own gate; nothing in this package
+names a T-label loader.
 """
 
 import json
 import time
-from collections.abc import Iterator
+from collections.abc import Callable, Iterator
 from dataclasses import dataclass, replace
 from pathlib import Path
 from typing import Any
@@ -80,6 +89,7 @@ from hmrec.deepfm.train import (
     training_set,
 )
 from hmrec.eval.ranker_eval import load_m7_evaluator, ranking_scores
+from hmrec.eval.report import FoldEvaluator
 from hmrec.feature_files import METADATA_FILE, verify_feature_files
 from hmrec.locks import FeaturesLock, file_sha256
 from hmrec.logging_utils import get_logger
@@ -127,8 +137,9 @@ class TrialSpec:
     """One training to run.
 
     Attributes:
-        area: "speed_test" or "v_phase".
-        target_fold: The V fold to predict.
+        area: "speed_test" or "v_phase" (run_trial); the evaluation on T1-T4 uses
+            its own areas with run_trial_through.
+        target_fold: The fold to predict (run_trial: a V fold).
         seed: The training seed.
         epochs: Epochs to train = the schedule length; it must equal
             training.epochs of the trial's configuration (the configuration id
@@ -190,19 +201,36 @@ class TrialResult:
     input_cache: str
 
 
+@dataclass(frozen=True)
+class TrialDoor:
+    """The parts of a trial that depend on which fold is predicted (module docstring).
+
+    The caller builds it AFTER its own fold checks; run_trial_through checks no
+    fold itself.
+
+    Attributes:
+        folds: The training folds in time order.
+        dataset_dir: The folder of the LightGBM Dataset record of the target week
+            (dataset.json): it names the sample files LightGBM trained on, by sha256.
+        load_evaluator: Opens the target fold's labels through the caller's guarded
+            loader. Called once, after the target week is scored.
+    """
+
+    folds: tuple[Fold, ...]
+    dataset_dir: Path
+    load_evaluator: Callable[[], FoldEvaluator]
+
+
 # ---------------------------------------------------------------- checks
 
 
-def check_spec(inputs: TrialInputs, spec: TrialSpec) -> tuple[Fold, ...]:
-    """Check a trial before anything is read and return its training folds.
+def check_run_settings(inputs: TrialInputs, spec: TrialSpec) -> None:
+    """Check the settings of a trial that do not depend on its fold.
 
     Raises:
-        ValueError: If the area or the number of epochs is invalid, the device is
-            still undecided, the target is not a V fold or a training fold is
-            not an F / V fold (so every T fold is refused here).
+        ValueError: If the number of epochs is invalid or differs from the
+            configuration's, or the device is still undecided.
     """
-    if spec.area not in AREAS:
-        raise ValueError(f"area must be one of {AREAS}, got {spec.area!r}")
     if spec.epochs <= 0:
         raise ValueError(f"epochs must be > 0, got {spec.epochs}")
     if spec.epochs != inputs.config.training.epochs:
@@ -215,7 +243,43 @@ def check_spec(inputs: TrialInputs, spec: TrialSpec) -> tuple[Fold, ...]:
             "training.device of configs/deepfm.yaml is still undecided: run the device "
             "benchmark and write its outcome to the config first"
         )
+
+
+def check_spec(inputs: TrialInputs, spec: TrialSpec) -> tuple[Fold, ...]:
+    """Check a V-phase trial before anything is read and return its training folds.
+
+    Raises:
+        ValueError: If the area or the number of epochs is invalid, the device is
+            still undecided, the target is not a V fold or a training fold is
+            not an F / V fold (so every T fold is refused here).
+    """
+    if spec.area not in AREAS:
+        raise ValueError(f"area must be one of {AREAS}, got {spec.area!r}")
+    check_run_settings(inputs, spec)
     return m7_training_window(inputs.manifest, spec.target_fold, inputs.config.window_weeks)
+
+
+def m7_dataset_dir(inputs: TrialInputs, target_fold: str) -> Path:
+    """The folder of the LightGBM Dataset M7 built for a V target week."""
+    config = inputs.config
+    return inputs.paths.ranker_dataset_dir(
+        config.experiment, target_fold, config.negatives_per_positive
+    )
+
+
+def m7_door(inputs: TrialInputs, spec: TrialSpec) -> TrialDoor:
+    """The door of a V-phase trial: the M7 window, the M7 Dataset record, the M7 evaluator.
+
+    The fold check comes first (check_spec): a T fold raises before the door exists.
+    """
+    folds = check_spec(inputs, spec)
+    target = inputs.manifest.get(spec.target_fold)
+    return TrialDoor(
+        folds=folds,
+        dataset_dir=m7_dataset_dir(inputs, spec.target_fold),
+        # load_m7_evaluator checks the fold's phase before it opens the file.
+        load_evaluator=lambda: load_m7_evaluator(target, inputs.paths.labels_file(target.name)),
+    )
 
 
 def trial_dir(inputs: TrialInputs, spec: TrialSpec) -> Path:
@@ -261,14 +325,20 @@ def window_sample_files(inputs: TrialInputs, folds: tuple[Fold, ...]) -> dict[st
 
 
 def load_window_rows(
-    inputs: TrialInputs, target_fold: str, folds: tuple[Fold, ...], columns: FeatureColumns
+    inputs: TrialInputs,
+    target_fold: str,
+    folds: tuple[Fold, ...],
+    columns: FeatureColumns,
+    dataset_dir: Path | None = None,
 ) -> TrainingRows:
-    """Check the window's sample files against LightGBM's Dataset record, then read them."""
-    paths, config = inputs.paths, inputs.config
+    """Check the window's sample files against LightGBM's Dataset record, then read them.
+
+    `dataset_dir` is the folder of that record; None means the Dataset M7 built
+    for the target week.
+    """
     sample_files = window_sample_files(inputs, folds)
-    dataset_dir = paths.ranker_dataset_dir(
-        config.experiment, target_fold, config.negatives_per_positive
-    )
+    if dataset_dir is None:
+        dataset_dir = m7_dataset_dir(inputs, target_fold)
     check_sample_files(sample_files, lightgbm_sample_sha256(dataset_dir))
     return load_training_rows(list(sample_files.values()), columns)
 
@@ -290,10 +360,15 @@ def fit_window_transform(
     )
 
 
-def encode_window(inputs: TrialInputs, target_fold: str, folds: tuple[Fold, ...]) -> CachedTraining:
+def encode_window(
+    inputs: TrialInputs,
+    target_fold: str,
+    folds: tuple[Fold, ...],
+    dataset_dir: Path | None = None,
+) -> CachedTraining:
     """Read, check and encode the training rows of the window that predicts `target_fold`."""
     columns = feature_columns(inputs.lock)
-    rows = load_window_rows(inputs, target_fold, folds, columns)
+    rows = load_window_rows(inputs, target_fold, folds, columns, dataset_dir)
     transform = fit_window_transform(inputs, rows, columns)
     # reuse_numeric: with the standardised input the standardised values are written
     # over the raw values, so the two float32 [n_rows, n_numeric] arrays (2.7 GB each
@@ -322,7 +397,12 @@ def encoded_parts(
 # ---------------------------------------------------------------- the input cache
 
 
-def cache_source(inputs: TrialInputs, target_fold: str, folds: tuple[Fold, ...]) -> dict[str, Any]:
+def cache_source(
+    inputs: TrialInputs,
+    target_fold: str,
+    folds: tuple[Fold, ...],
+    dataset_dir: Path | None = None,
+) -> dict[str, Any]:
     """Everything the encoded inputs of a target week are computed from (the cache key).
 
     Only small record files are read here. The sample files' sha256 come from
@@ -334,9 +414,8 @@ def cache_source(inputs: TrialInputs, target_fold: str, folds: tuple[Fold, ...])
     """
     paths, config = inputs.paths, inputs.config
     columns = feature_columns(inputs.lock)
-    dataset_dir = paths.ranker_dataset_dir(
-        config.experiment, target_fold, config.negatives_per_positive
-    )
+    if dataset_dir is None:
+        dataset_dir = m7_dataset_dir(inputs, target_fold)
     lightgbm_sha256 = lightgbm_sample_sha256(dataset_dir)
     sample_sha256 = {
         fold: read_sample_record(record_file(file)).sha256
@@ -374,16 +453,20 @@ def cache_dir(inputs: TrialInputs, target_fold: str, source: dict[str, Any]) -> 
 
 
 def write_cache(
-    inputs: TrialInputs, target_fold: str, folds: tuple[Fold, ...], directory: Path
+    inputs: TrialInputs,
+    target_fold: str,
+    folds: tuple[Fold, ...],
+    directory: Path,
+    dataset_dir: Path | None = None,
 ) -> None:
     """Encode the training rows and all candidates of a target week and write them as a cache.
 
     The sample files and the wide table are fully verified (sha256) while they
     are read, exactly as in a training without a cache.
     """
-    training = encode_window(inputs, target_fold, folds)
+    training = encode_window(inputs, target_fold, folds, dataset_dir)
     # The folder is created only now: a sample file that fails its check leaves nothing behind.
-    writer = CacheWriter(directory, cache_source(inputs, target_fold, folds))
+    writer = CacheWriter(directory, cache_source(inputs, target_fold, folds, dataset_dir))
     writer.write_training(training)
     transform = training.transform
     # The training rows are not needed for the candidates: release them first.
@@ -396,7 +479,10 @@ def write_cache(
 
 
 def open_input_cache(
-    inputs: TrialInputs, target_fold: str, folds: tuple[Fold, ...]
+    inputs: TrialInputs,
+    target_fold: str,
+    folds: tuple[Fold, ...],
+    dataset_dir: Path | None = None,
 ) -> tuple[CacheReader | None, str]:
     """The verified input cache of a target week, written first if it does not exist.
 
@@ -406,13 +492,13 @@ def open_input_cache(
     """
     if inputs.config.model.numeric_input not in inputs.config.cached_numeric_inputs:
         return None, "off"
-    source = cache_source(inputs, target_fold, folds)
+    source = cache_source(inputs, target_fold, folds, dataset_dir)
     directory = cache_dir(inputs, target_fold, source)
     reader = open_cache(directory, source)
     if reader is not None:
         LOGGER.info("input cache verified and read: %s", directory)
         return reader, "read"
-    write_cache(inputs, target_fold, folds, directory)
+    write_cache(inputs, target_fold, folds, directory, dataset_dir)
     reader = open_cache(directory, source)
     if reader is None:
         raise ValueError(f"{directory} does not exist right after it was written")
@@ -425,10 +511,11 @@ def prepare_training(
     folds: tuple[Fold, ...],
     device: torch.device,
     reader: CacheReader | None = None,
+    dataset_dir: Path | None = None,
 ) -> PreparedTraining:
     """The encoded training rows of the window on the device, from the cache if there is one."""
     if reader is None:
-        training = encode_window(inputs, target_fold, folds)
+        training = encode_window(inputs, target_fold, folds, dataset_dir)
     else:
         training = reader.read_training()
     data = training_set(training.rows, training.labels, training.query_ids, device)
@@ -489,17 +576,17 @@ def score_target_fold(
 
 def evaluate_and_save(
     inputs: TrialInputs,
-    target: Fold,
+    evaluator: FoldEvaluator,
     top: pl.DataFrame,
     last_epoch: EpochResult,
     directory: Path,
 ) -> tuple[EpochMetrics, ...]:
-    """Evaluate the final model's Top-K on the target V fold and write the trial's two tables.
+    """Evaluate the final model's Top-K on the target fold and write the trial's two tables.
 
-    The labels are read through load_m7_evaluator, which checks the fold's phase
-    before it opens the file.
+    The evaluator comes from the trial's door: the caller's guarded loader read
+    the labels (V phase: load_m7_evaluator, which checks the fold's phase before
+    it opens the file).
     """
-    evaluator = load_m7_evaluator(target, inputs.paths.labels_file(target.name))
     scores = ranking_scores(evaluator, top, inputs.config.metrics)
     epoch_column = pl.lit(last_epoch.epoch, dtype=pl.Int32).alias(EPOCH)
     top.select(epoch_column, QUERY_ID, RANK, ARTICLE_IDX, SCORE).write_parquet(
@@ -555,13 +642,38 @@ def run_trial(inputs: TrialInputs, spec: TrialSpec) -> TrialResult:
             the one LightGBM trained on, or the input cache fails its check.
         FileExistsError: If the trial's folder exists.
     """
-    folds = check_spec(inputs, spec)  # before anything is read
+    door = m7_door(inputs, spec)  # the fold check, before anything is read
+    return run_trial_through(inputs, spec, door)
+
+
+def run_trial_through(inputs: TrialInputs, spec: TrialSpec, door: TrialDoor) -> TrialResult:
+    """Train one configuration for the door's target week and evaluate its final model.
+
+    No fold is checked here: the caller built the door after its own checks
+    (V phase: m7_door). Everything else is the same for every caller.
+
+    Args:
+        inputs: Configuration.
+        spec: The trial; spec.area names the folder of its files.
+        door: Training folds, Dataset record and label loader of the target week.
+
+    Returns:
+        The result; the caller writes the result rows.
+
+    Raises:
+        ValueError: If a setting is invalid, a sample file is not the one LightGBM
+            trained on, the input cache fails its check, or the door's evaluator
+            holds another fold than the trial predicts.
+        FileExistsError: If the trial's folder exists.
+    """
+    check_run_settings(inputs, spec)
+    folds, dataset_dir = door.folds, door.dataset_dir
     directory = trial_dir(inputs, spec)
     device = torch.device(inputs.config.training.device)
     torch.set_num_threads(inputs.base.num_threads)
     started = time.perf_counter()
-    reader, cache_state = open_input_cache(inputs, spec.target_fold, folds)
-    prepared = prepare_training(inputs, spec.target_fold, folds, device, reader)
+    reader, cache_state = open_input_cache(inputs, spec.target_fold, folds, dataset_dir)
+    prepared = prepare_training(inputs, spec.target_fold, folds, device, reader, dataset_dir)
     directory.mkdir(parents=True)
     save_transform(prepared.transform, directory / TRANSFORM_FILE)
     prepare_seconds = time.perf_counter() - started
@@ -573,8 +685,12 @@ def run_trial(inputs: TrialInputs, spec: TrialSpec) -> TrialResult:
     started = time.perf_counter()
     model = load_final_model(directory, transform, inputs, spec.epochs)
     top, n_scored_rows = score_target_fold(inputs, spec.target_fold, transform, model, reader)
-    target = inputs.manifest.get(spec.target_fold)
-    metrics = evaluate_and_save(inputs, target, top, epochs[-1], directory)
+    evaluator = door.load_evaluator()
+    if evaluator.fold != spec.target_fold:
+        raise ValueError(
+            f"the evaluator holds fold {evaluator.fold}, the trial predicts {spec.target_fold}"
+        )
+    metrics = evaluate_and_save(inputs, evaluator, top, epochs[-1], directory)
     score_seconds = time.perf_counter() - started
     result = TrialResult(
         config_id=deepfm_config_id(inputs.config),

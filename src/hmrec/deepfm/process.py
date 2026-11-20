@@ -10,6 +10,7 @@ import json
 import logging
 import time
 from dataclasses import replace
+from pathlib import Path
 
 import torch
 
@@ -148,12 +149,21 @@ def record_trial(
     started: float,
     peak: ProcessPeakMemory,
     stamp: RunStamp,
+    trials_file: Path | None = None,
+    metrics_file: Path | None = None,
 ) -> None:
     """Append the trial's metric row (the final model's evaluation), then its trial row.
 
     The trial row is written LAST and marks the trial as recorded.
+
+    By default the rows go to results/deepfm_metrics.csv and
+    results/deepfm_trials.csv (the V phase). The evaluation on T1-T4 gives its own
+    two tables (hmrec.t_eval), which have the same columns; the V tables are then
+    not touched.
     """
     paths, metrics = inputs.paths, inputs.config.metrics
+    trials_file = paths.deepfm_trials_file if trials_file is None else trials_file
+    metrics_file = paths.deepfm_metrics_file if metrics_file is None else metrics_file
     for epoch in result.metrics:
         row = {
             "area": spec.area,
@@ -167,7 +177,7 @@ def record_trial(
             "git_commit": stamp.git_commit,
             "finished_at": stamp_columns(stamp)["finished_at"],
         }
-        append_row(paths.deepfm_metrics_file, metric_columns(metrics), row)
+        append_row(metrics_file, metric_columns(metrics), row)
     train_seconds = sum(epoch.seconds for epoch in result.epochs)
     row = {
         "area": spec.area,
@@ -193,7 +203,7 @@ def record_trial(
         "torch_version": torch.__version__,
         **stamp_columns(stamp),
     }
-    append_row(paths.deepfm_trials_file, TRIAL_COLUMNS, row)
+    append_row(trials_file, TRIAL_COLUMNS, row)
     check_memory_limit(peak, inputs.base.memory.limit_gb, f"deepfm {spec.area} {spec.target_fold}")
 
 
