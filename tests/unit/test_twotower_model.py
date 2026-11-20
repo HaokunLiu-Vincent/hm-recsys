@@ -5,13 +5,13 @@ import math
 import numpy as np
 import pytest
 import torch
+
 from conftest import (
     TINY_N_ARTICLES,
     make_tiny_articles,
     make_tiny_customers,
     make_tiny_embeddings,
 )
-
 from hmrec.config import TwoTowerModelConfig
 from hmrec.recall.twotower.data import (
     Batch,

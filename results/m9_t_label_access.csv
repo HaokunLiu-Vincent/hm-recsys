@@ -1,0 +1,2 @@
+event,recorded_at,purpose,script,git_commit,git_dirty,rehearsal_commit,rehearsal_checked_at
+t_labels_read_for_m9_evaluation,2026-11-20T15:55:13,single evaluation on T1-T4 of the DeepFM configuration chosen on V (reported only),scripts/m9_t_eval.py,db8e9c7d2775baf04d2d39ea1f9387a4c0ecdbda,False,db8e9c7d2775baf04d2d39ea1f9387a4c0ecdbda,2026-11-20T15:54:57

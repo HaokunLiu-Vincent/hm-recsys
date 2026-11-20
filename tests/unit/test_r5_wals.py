@@ -21,8 +21,8 @@ import math
 import numpy as np
 import polars as pl
 import pytest
-from conftest import make_queries, make_recall_inputs
 
+from conftest import make_queries, make_recall_inputs
 from hmrec.config import WalsConfig
 from hmrec.recall.base import RecallInputs, validate_candidates
 from hmrec.recall.r5_wals import WALS_SPEC, WalsChannel, build_als_model

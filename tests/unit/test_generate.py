@@ -22,7 +22,6 @@ import numpy as np
 import polars as pl
 import pytest
 import torch
-from conftest import FIXTURE_DAY_ZERO, make_queries, make_recall_inputs
 from test_r1_popularity import ACTIVE_POOL, CUSTOMERS, ROWS, W1, W3
 from test_r1_popularity import ANCHOR_DAY as R1_ANCHOR_DAY
 from test_r1_popularity import QUERIES as R1_QUERIES
@@ -32,6 +31,7 @@ from test_twotower_chain import ALARM, LINES, MEMORY
 from test_twotower_chain import CONFIG as CHAIN_CONFIG
 from test_twotower_infer import CHUNKS, _resources
 
+from conftest import FIXTURE_DAY_ZERO, make_queries, make_recall_inputs
 from hmrec.config import (
     BaseConfig,
     CandidateRunConfig,

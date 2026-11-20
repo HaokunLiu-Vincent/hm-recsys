@@ -15,6 +15,8 @@ import numpy as np
 import polars as pl
 import pytest
 import torch
+from test_twotower_model import TINY_MODEL
+
 from conftest import (
     TINY_N_ARTICLES,
     make_queries,
@@ -23,8 +25,6 @@ from conftest import (
     make_tiny_customers,
     make_tiny_embeddings,
 )
-from test_twotower_model import TINY_MODEL
-
 from hmrec.config import load_twotower_config
 from hmrec.recall.base import validate_candidates
 from hmrec.recall.twotower.data import (

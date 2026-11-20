@@ -744,6 +744,155 @@ class ProjectPaths:
         """results/kaggle_submission.csv: the one submission (time, status, the two scores)."""
         return self.results_root / "kaggle_submission.csv"
 
+    # ------------------------------------------------------------ DeepFM (stage 2, M9)
+
+    @property
+    def deepfm_config_file(self) -> Path:
+        """configs/deepfm.yaml: the DeepFM model, its training and the speed test."""
+        return self.configs_dir / "deepfm.yaml"
+
+    @property
+    def deepfm_study_config_file(self) -> Path:
+        """configs/hpo/deepfm.yaml: the rules of the DeepFM study."""
+        return self.configs_dir / "hpo" / "deepfm.yaml"
+
+    @property
+    def deepfm_extension_config_file(self) -> Path:
+        """configs/hpo/deepfm_extension.yaml: the runs of the input-representation extension."""
+        return self.configs_dir / "hpo" / "deepfm_extension.yaml"
+
+    @property
+    def deepfm_dir(self) -> Path:
+        """artifacts/deepfm/: every file of the DeepFM study."""
+        return self.artifacts_root / "deepfm"
+
+    def deepfm_trial_dir(self, area: str, config_id: str, seed: int, fold: str) -> Path:
+        """The files of one training: artifacts/deepfm/{area}/{config_id}/seed{seed}/{fold}/."""
+        return self.deepfm_dir / area / config_id / f"seed{seed}" / fold
+
+    def deepfm_cache_dir(self, target_fold: str, numeric_input: str, key: str) -> Path:
+        """artifacts/deepfm/cache/{target_fold}_{numeric_input}_{key}/: encoded inputs of a week."""
+        return self.deepfm_dir / "cache" / f"{target_fold}_{numeric_input}_{key}"
+
+    def deepfm_log_file(self, label: str) -> Path:
+        """The log of one DeepFM process: artifacts/deepfm/logs/{label}.log."""
+        return self.deepfm_dir / "logs" / f"{label}.log"
+
+    @property
+    def deepfm_benchmark_file(self) -> Path:
+        """results/deepfm_benchmark.csv: the device benchmark, one row per device run."""
+        return self.results_root / "deepfm_benchmark.csv"
+
+    @property
+    def deepfm_trials_file(self) -> Path:
+        """results/deepfm_trials.csv: one row per training (time, true memory peak, device)."""
+        return self.results_root / "deepfm_trials.csv"
+
+    @property
+    def deepfm_study_file(self) -> Path:
+        """results/deepfm_study.csv: what the study's rules decided, one row per configuration."""
+        return self.results_root / "deepfm_study.csv"
+
+    @property
+    def m9_arms_file(self) -> Path:
+        """results/m9_arms.csv: the four arms of the M9 comparison, per seed and summarised."""
+        return self.results_root / "m9_arms.csv"
+
+    @property
+    def m9_contrasts_file(self) -> Path:
+        """results/m9_contrasts.csv: bootstrap intervals of the differences between arms."""
+        return self.results_root / "m9_contrasts.csv"
+
+    @property
+    def m9_groups_file(self) -> Path:
+        """results/m9_groups.csv: MAP@12 of the four arms in the three query groups."""
+        return self.results_root / "m9_groups.csv"
+
+    @property
+    def m9_ext_arms_file(self) -> Path:
+        """results/m9_ext_arms.csv: the eight arms of the input-representation extension."""
+        return self.results_root / "m9_ext_arms.csv"
+
+    @property
+    def m9_ext_contrasts_file(self) -> Path:
+        """results/m9_ext_contrasts.csv: bootstrap intervals of the extension's contrasts."""
+        return self.results_root / "m9_ext_contrasts.csv"
+
+    @property
+    def m9_ext_groups_file(self) -> Path:
+        """results/m9_ext_groups.csv: MAP@12 of the eight arms in the three query groups."""
+        return self.results_root / "m9_ext_groups.csv"
+
+    @property
+    def m9_lgb_trials_file(self) -> Path:
+        """results/m9_lgb_trials.csv: one row per training of the two LightGBM arms of M9."""
+        return self.results_root / "m9_lgb_trials.csv"
+
+    @property
+    def m9_lgb_metrics_file(self) -> Path:
+        """results/m9_lgb_metrics.csv: one row per (arm, seed, fold, number of trees)."""
+        return self.results_root / "m9_lgb_metrics.csv"
+
+    def m9_lgb_predictions_file(self, arm: str, seed: int, fold: str) -> Path:
+        """artifacts/predictions/m9_lgb/{arm}_s{seed}/{fold}.parquet: Top-K rows of an arm."""
+        return self.predictions_file(f"m9_lgb/{arm}_s{seed}", fold)
+
+    def m9_lgb_per_query_file(self, arm: str, seed: int, fold: str) -> Path:
+        """artifacts/predictions/m9_lgb/{arm}_s{seed}/{fold}_per_query.parquet."""
+        predictions = self.m9_lgb_predictions_file(arm, seed, fold)
+        return predictions.with_name(f"{fold}_per_query.parquet")
+
+    def m9_lgb_model_file(self, arm: str, seed: int, fold: str) -> Path:
+        """artifacts/models/ranker/m9_lgb/{arm}_s{seed}/{fold}/model.txt."""
+        return self.model_dir("ranker", "m9_lgb") / f"{arm}_s{seed}" / fold / "model.txt"
+
+    @property
+    def deepfm_metrics_file(self) -> Path:
+        """results/deepfm_metrics.csv: one row per (configuration, seed, fold, epoch)."""
+        return self.results_root / "deepfm_metrics.csv"
+
+    # ------------------------------------------------------------ M9: the evaluation on T1-T4
+
+    @property
+    def t_eval_config_file(self) -> Path:
+        """configs/m9_t_eval.yaml: the one configuration and the rules of the evaluation on T."""
+        return self.configs_dir / "m9_t_eval.yaml"
+
+    @property
+    def m9_t_trials_file(self) -> Path:
+        """results/m9_t_trials.csv: one row per training of the evaluation on T1-T4."""
+        return self.results_root / "m9_t_trials.csv"
+
+    @property
+    def m9_t_metrics_file(self) -> Path:
+        """results/m9_t_metrics.csv: the metric values of every training of that evaluation."""
+        return self.results_root / "m9_t_metrics.csv"
+
+    @property
+    def m9_t_rehearsal_check_file(self) -> Path:
+        """results/m9_t_rehearsal_check.csv: one row per comparison of a rehearsal with V4."""
+        return self.results_root / "m9_t_rehearsal_check.csv"
+
+    @property
+    def m9_t_label_access_file(self) -> Path:
+        """results/m9_t_label_access.csv: every read of T labels by the M9 evaluation."""
+        return self.results_root / "m9_t_label_access.csv"
+
+    @property
+    def m9_t_arms_file(self) -> Path:
+        """results/m9_t_arms.csv: DeepFM (per seed, summarised) and the M8 record on T1-T4."""
+        return self.results_root / "m9_t_arms.csv"
+
+    @property
+    def m9_t_contrasts_file(self) -> Path:
+        """results/m9_t_contrasts.csv: the bootstrap interval of DeepFM minus the M8 record."""
+        return self.results_root / "m9_t_contrasts.csv"
+
+    @property
+    def m9_t_v_and_t_file(self) -> Path:
+        """results/m9_t_v_and_t.csv: pooled MAP@12 of the two models on V1-V4 and on T1-T4."""
+        return self.results_root / "m9_t_v_and_t.csv"
+
 
 def build_paths(config: BaseConfig, project_root: Path) -> ProjectPaths:
     """Derive ProjectPaths from a BaseConfig.

@@ -13,9 +13,9 @@ from pathlib import Path
 
 import polars as pl
 import pytest
-from conftest import make_queries, make_recall_inputs
 from test_union_precheck import D1_CONTEXT
 
+from conftest import make_queries, make_recall_inputs
 from hmrec.config import load_base_config
 from hmrec.data.folds import load_fold_manifest
 from hmrec.eval.report import FoldEvaluator

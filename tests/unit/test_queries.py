@@ -5,8 +5,8 @@ from pathlib import Path
 
 import polars as pl
 import pytest
-from conftest import D1, D2, FIXTURE_DAY_ZERO, make_transactions
 
+from conftest import D1, D2, FIXTURE_DAY_ZERO, make_transactions
 from hmrec.config import load_queries_config
 from hmrec.data.folds import Fold, FoldManifest, load_fold_manifest
 from hmrec.data.queries import (

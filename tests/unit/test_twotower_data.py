@@ -27,8 +27,8 @@ import numpy as np
 import polars as pl
 import pytest
 import torch
-from conftest import FIXTURE_DAY_ZERO, make_transactions
 
+from conftest import FIXTURE_DAY_ZERO, make_transactions
 from hmrec.config import TrainingWindow
 from hmrec.data.day_index import day_index_to_date
 from hmrec.recall.twotower.data import (

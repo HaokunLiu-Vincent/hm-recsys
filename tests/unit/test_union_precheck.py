@@ -24,8 +24,8 @@ from pathlib import Path
 
 import polars as pl
 import pytest
-from conftest import make_queries, make_recall_inputs
 
+from conftest import make_queries, make_recall_inputs
 from hmrec.config import load_base_config, load_selection_rule, load_yaml
 from hmrec.data.folds import Fold
 from hmrec.eval.report import FoldEvaluator, MultiFoldSummary

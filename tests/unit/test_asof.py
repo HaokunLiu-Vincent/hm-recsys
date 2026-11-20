@@ -4,8 +4,8 @@ from pathlib import Path
 
 import polars as pl
 import pytest
-from conftest import D1, D1_ANCHOR, D2, FIXTURE_DAY_ZERO, make_transactions
 
+from conftest import D1, D1_ANCHOR, D2, FIXTURE_DAY_ZERO, make_transactions
 from hmrec.data.asof import (
     _assert_inside_window,
     history_window,

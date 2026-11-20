@@ -1,0 +1,76 @@
+# The rules of the M9 study (stage 2; proposal §16.8). Read by
+# hmrec.config.load_deepfm_study_config.
+#
+# REVISED on 2026-11-20, after the step-0 results of 2026-11-19 on V1-V4 were seen
+# and without any T data (docs/decisions.md). The first version of this file was
+# committed before any DeepFM result existed; step 0 ran with it and stopped (seed range
+# 1.85% > 1%). Four of its rules are withdrawn: 5 epochs at a constant learning rate, the
+# epoch rule over the checkpoints of one run, the 10-epoch extension, and the stop at a
+# seed range above 1%. This version was committed before any run of the revised study.
+#
+# The study is a 2x2 comparison: {LightGBM, DeepFM} x {listwise, pointwise}.
+# Everything is compared and selected on V1-V4 only (AGENTS.md §3.2). The code refuses
+# T folds. One evaluation on T1-T4 of the three new arms is planned AFTER the V study:
+# run once, reported only, never used to select anything; it is not implemented yet.
+
+phase: V
+target_folds: [V1, V2, V3, V4]
+metric: map@12                 # pooled over the four folds, weighted by queries (as in M7)
+
+# The schedule length T (epochs of a run) is a hyperparameter. A run with T epochs has
+# its own cosine schedule over exactly its T epochs and is evaluated once, at the end.
+schedule_epochs: [1, 2, 3]
+# Epoch rule: the smallest T whose pooled MAP@12 is within this relative tolerance of the
+# best T (hmrec.hpo.selection.choose_num_trees on the curve T -> pooled MAP@12).
+epoch_tolerance: 0.01
+
+# Step 0 (DeepFM, pointwise): the default configuration with these seeds and every T; T is
+# chosen on the seed mean. range = (max - min) / min of the seeds' pooled MAP@12 at that T.
+#   range <  max_seed_range   tuning uses selection_seed only;
+#   range >= max_seed_range   NO stop: every tuning candidate of both DeepFM arms is run
+#                             with all noise seeds and compared on seed means.
+noise:
+  seeds: [42, 43, 44]
+  max_seed_range: 0.01
+
+# Tuning, one factor at a time, with the existing selection rule of
+# configs/selection_rule.yaml (at least 1% relative gain of the pooled MAP@12 and strictly
+# better in at least 3 of the 4 weeks).
+selection_seed: 42
+steps:
+  # Candidates in priority order: the value closer to the default first; at equal
+  # distance the smaller value first. The first entry is the current value.
+  # In the learning-rate step every candidate is run for every T and gets its own T by
+  # the epoch rule. The later steps use the T selected together with the learning rate.
+  - {name: learning_rate, parameter: learning_rate, candidates: [0.001, 0.0003, 0.003]}
+  - {name: embedding_dim, parameter: embedding_dim, candidates: [16, 8, 32]}
+  - {name: dropout, parameter: dropout, candidates: [0.0, 0.1, 0.3]}
+
+# DeepFM with the listwise loss: the embedding dimension and dropout selected above, and
+# its own learning-rate step (every candidate with every T, as above; first = current).
+listwise:
+  learning_rate: [0.001, 0.0003, 0.003]
+
+# Ablations at the selected pointwise configuration and its T, selection_seed only,
+# without separate tuning (reported only).
+ablations:
+  components: [first_order, fm, deep, full]
+  numeric_input: [standardised]
+
+# Final report: the selected configuration of each DeepFM arm with these seeds.
+final_seeds: [42, 43, 44]
+
+# If a selected value lies on the edge of its grid (T and the number of trees included),
+# the grid is NOT extended; the value is flagged in the report.
+extend_grid_on_edge: false
+
+# The two LightGBM arms (hmrec.hpo.lgb_arms; LightGBM side). The configuration is the
+# locked one (configs/locks/ranker.lock.yaml). A seed is set as the locked training sets
+# it: the parameter `seed` only.
+#   lambdarank   seed 42 is the M7 record (500 trees); the other seeds are trained here.
+#   binary       only the objective differs. The first seed is trained to
+#                binary_num_trees trees and evaluated at every checkpoint; k* by the
+#                number-of-trees rule with epoch_tolerance; the other seeds to k* trees.
+lightgbm:
+  seeds: [42, 43, 44]
+  binary_num_trees: 1000

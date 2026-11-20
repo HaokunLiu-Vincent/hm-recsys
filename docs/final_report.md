@@ -4,7 +4,7 @@
 > Date: 2026-11-19. Tag `v0.1`.
 > The design reference is `docs/proposal.md`; every decision made along the way is logged in `docs/decisions.md`. This report is written for readers who did not take part in the project and can be read on its own; for details, follow the sections and files it points to.
 > **Where the numbers come from.** Every result comes from a file under `results/` or from `docs/decisions.md`, cited below the table or at the end of the sentence. Numbers derived from result tables (relative changes, query-weighted pooled values) say how they were computed. Configuration values (quotas, windows, τ and so on) come from the four lock files under `configs/locks/` and from `configs/fold_manifest.yaml`.
-> **What this report does not do.** It gives no Kaggle rank (see §7.3 for why), and it does not present correlation as causation (§5).
+> **What this report does not do.** It gives no official Kaggle rank (§7.3 says why the T1–T4 result is not compared with the leaderboard; §4.6 reports one late submission and labels where its score would stand), and it does not present correlation as causation (§5).
 
 ---
 
@@ -402,6 +402,47 @@ So a narrow interval does not mean "the result is stable around 0.039"; it only 
 
 ---
 
+### 4.6 Kaggle late submission
+
+After the T1–T4 evaluation, **one late submission** was made to the Kaggle competition `h-and-m-personalized-fashion-recommendations` with the locked system. The procedure was recorded before anything was run; one submission was made; the score is only reported, and nothing was tuned, selected or changed because of it.
+
+| Quantity | Value |
+|---|---|
+| Public score (MAP@12, computed by Kaggle) | 0.03548 |
+| Private score (the one that counts) | **0.03600** |
+| Submitted | 2026-11-19 (received by Kaggle at 2026-11-18 18:24:50 UTC); submission ref 58521284 |
+| Produced by | branch `kaggle-late-submission`, commit `507cff5d50b81eb388414ca45454c52ca7335986` (the scores are recorded in commit `84b25be` of that branch) |
+| Where the Private score would stand | position 4 of the 2,954 teams of the final leaderboard: **late submission, not an official rank** |
+
+Source: `docs/decisions.md` 2026-11-19, "Kaggle late submission". The result tables (`results/kaggle_*.csv`) are on branch `kaggle-late-submission`, which is not merged into main.
+
+How the submission week differs from T1–T4:
+
+- **The week.** 2020-09-23 to 2020-09-29, the week after the data end. Its labels are not in the data: the score is computed by Kaggle. T1–T4 are the last 4 weeks inside the data, scored with the project's own labels.
+- **The customers.** The file holds 12 articles for every one of the 1,371,980 customers of `sample_submission.csv`. A T week has 68,984–80,253 queries: only the customers who bought in that week.
+- **The training data.** Everything up to 2020-09-22 is used: R1–R5 are recomputed as of 2020-09-23, R6 is fine-tuned once more (on the T4 week), and the ranker is trained from scratch on T1–T4. The labels of T1–T4 are therefore training labels here; for T4 this is new (in M8 it was only evaluated).
+- **One week.** The score is for a single week; 0.039194 is pooled over 4 weeks, and §4.4 shows how much single weeks differ. The two numbers are not compared here.
+
+Before the real run, the same code path was rehearsed on T4: it trained the same ranker as M8 (the same 500 trees), and for 68,984 of the 68,984 T4 queries its Top-12 list was identical to the one M8 saved.
+
+The position says where the Private score would stand. Kaggle does not rank a late submission, and the submission was made years after the competition ended; this report states no other rank.
+
+**Context: autonomous runs by other models.** Outside this repository, the user also made three runs in which a model worked on its own. Each model was given the dataset and the same precomputed text and image embeddings, and no guidance on the design. The table puts their scores next to this project's; they are as the user reported them on 2026-11-19.
+
+| System | Public | Private |
+|---|---|---|
+| This project (human-directed design, Claude Code as implementer) | 0.03548 | 0.03600 |
+| Claude Fable 5.2, autonomous | 0.03443 | 0.03486 |
+| Gemini Hydrogen Extra, autonomous | 0.03368 | 0.03330 |
+| GPT 6.0 Astra Ultra, autonomous | not submitted | not submitted |
+
+- **One run was not submitted.** The GPT 6.0 Astra Ultra run has no Kaggle score: its offline MAP@12 on T1–T4, from that run's own evaluation, was about 0.029, and the user did not submit it. That offline number is not a Kaggle score and is not compared with the scores in the table.
+- **What is not recorded.** The conditions of the three runs were not written down: how many submissions the two submitted runs made, and each run's time budget, prompts and dates. Their code is not in this repository. So, unlike the other numbers of this report, these scores cannot be traced to a file under `results/` or to `docs/decisions.md`.
+- **The differences.** On the Private leaderboard this project is 3.3% above the Claude Fable 5.2 run (0.03600 / 0.03486 − 1) and 8.1% above the Gemini Hydrogen Extra run (0.03600 / 0.03330 − 1).
+- **This is background, not a controlled experiment.** Each system has one result, and the systems differ in many ways at once. The difference cannot be attributed to any single cause.
+
+---
+
 ## 5. Why T is higher than V
 
 Pooled MAP@12 on T1–T4 is 19.8% higher than on V1–V4 (0.032713 → 0.039194). This is contrary to the prior expectation: the configuration was selected on V, so V should have been the optimistic one. After the formal run, four descriptive tables were produced (`results/t_diag_*.csv`); the subsections below go through them. **These tables only describe results that were already recorded; no experiment was run. They were not, and may not be, used to select or change anything.**
@@ -599,7 +640,7 @@ In the same week the share of purchases on new articles was 31.87% (§5.2). Why 
 - **A different training cut-off.** Here T4 is predicted with data up to 09-15 only; a competition submission can use data up to 09-22.
 - The metric definition (AP@12 with denominator `min(12, number of labels)`) is the same as the competition's, and in both cases the customers evaluated are those with purchases in that week. But these two points alone are not enough to put the two numbers in one table.
 
-This report therefore **states no rank**, and does not compare 0.039194 with any score on the leaderboard. Getting a comparable number requires a late submission as described in §9.
+This report therefore **states no rank for the T1–T4 result**, and does not compare 0.039194 with any score on the leaderboard. A number from Kaggle itself requires a late submission as described in §9.1; one was made afterwards, and its scores are in §4.6.
 
 ---
 
@@ -710,6 +751,8 @@ Adding up the rows of the table (with the R6 base training counted at its estima
 Everything below **may only be compared and selected on V1–V4**, under the rule of §3.3; T1–T4 is no longer used for any selection.
 
 ### 9.1 Getting a number that can be compared externally
+
+**Done: the late submission was made on 2026-11-19, and its scores are in §4.6.** The rest of this subsection is the plan as it was written before the submission.
 
 **Kaggle late submission.** This is the only way to put this system next to public results (§7.3). What it takes:
 

@@ -34,8 +34,8 @@ import math
 
 import polars as pl
 import pytest
-from conftest import make_queries, make_recall_inputs
 
+from conftest import make_queries, make_recall_inputs
 from hmrec.config import PopularityConfig
 from hmrec.recall.base import validate_candidates
 from hmrec.recall.r1_popularity import POP_SPEC, PopularityChannel, fallback_diagnostics

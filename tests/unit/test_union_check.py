@@ -21,7 +21,6 @@ from pathlib import Path
 import polars as pl
 import pytest
 import torch
-from conftest import make_queries, make_recall_inputs
 from test_twotower_infer import CHUNKS, LINES, QUERIES, _resources
 from test_twotower_infer import CONFIG as R6_CONFIG
 from test_union_precheck import (
@@ -35,6 +34,7 @@ from test_union_precheck import (
     _selected,
 )
 
+from conftest import make_queries, make_recall_inputs
 from hmrec.config import UnionCheckConfig, load_base_config, load_yaml
 from hmrec.eval.metrics import macro_mean
 from hmrec.eval.report import FoldEvaluator

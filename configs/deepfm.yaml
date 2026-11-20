@@ -1,0 +1,93 @@
+# DeepFM as an alternative ranker (stage 2, M9; proposal §16). Read by
+# hmrec.config.load_deepfm_config.
+#
+# The comparison with LightGBM is controlled: the same candidates, the same 71 locked
+# features, the same 4-week training window and the same training rows (the M7 sample
+# files with 40 negatives per positive). Only the model differs. Nothing here changes
+# the locked system; DeepFM is not a replacement for the LightGBM ranker.
+
+experiment: full               # all six channels and all 71 features
+negatives_per_positive: 40     # the M7 sample files of the locked ratio (not sampled again)
+window_weeks: 4                # training weeks before the target week, as for LightGBM
+top_k: 12
+metric: map@12                 # the main metric
+extra_metrics: [recall@12, ndcg@12]
+
+model:
+  embedding_dim: 16            # shared by the FM part and the deep part
+  hidden_units: [256, 128, 64] # the deep part: MLP with ReLU, then one output unit
+  dropout: 0.0                 # after every hidden layer
+  # first_order = bias + first-order weights only; fm = first + second order;
+  # deep = the MLP only; full = first + second order + MLP (the default).
+  components: full
+  # binned = quantile bins (one embedding per bin); standardised = the value itself,
+  # standardised and clipped, with a separate indicator for missing values (§16.3).
+  numeric_input: binned
+  embedding_init_std: 0.01     # normal(0, std) for every embedding; first-order weights start at 0
+
+binning:
+  n_bins: 32                   # quantile bins of a numeric feature; one more bin holds missing values
+
+standardise:
+  # Percentiles of the non-missing training values; a value outside them is clipped.
+  clip_low_percentile: 0.1
+  clip_high_percentile: 99.9
+
+training:
+  loss: pointwise_bce          # or listwise_softmax (batches of whole queries, §16.3)
+  learning_rate: 0.001         # Adam, default betas; the rate of the first step
+  # cosine (from 2026-11-20, proposal §16.8) or constant (the step-0 runs of 2026-11-19).
+  # cosine: with N = all optimizer steps of the run and t = 0 ... N - 1,
+  #   lr(t) = lr_min + (learning_rate - lr_min) * (1 + cos(pi * t / N)) / 2
+  # so the rate falls within the run, whatever its number of epochs.
+  lr_schedule: cosine
+  min_lr_ratio: 0.01           # lr_min = learning_rate * min_lr_ratio
+  batch_rows: 4096             # rows per batch (listwise: at most this many rows of whole queries)
+  weight_decay: 0.0
+  # Epochs of one run = the length T of its schedule. The model is evaluated once, after
+  # the last epoch. The study runs T = 1, 2, 3 as separate trainings (configs/hpo/deepfm.yaml).
+  # It was 5 with a checkpoint after every epoch until 2026-11-20.
+  epochs: 3
+  seed: 42
+  # cpu, mps or undecided (a training refuses to start while it is undecided).
+  # CPU, a decision by the user on 2026-11-19 that DEVIATES from the device rule
+  # below. The device benchmark (results/deepfm_benchmark.csv) measured a median
+  # training step of 19.50 ms on CPU (6 threads) and 10.13 ms on MPS; MPS is 1.92
+  # times faster, so the rule would pick MPS. But on MPS two runs with the same
+  # seed did not give identical losses, and on CPU they did. The user chose CPU so
+  # that every result of the study can be reproduced from its seed
+  # (docs/decisions.md 2026-11-19). The speed test itself ran on MPS.
+  device: cpu
+
+scoring:
+  # Candidate rows per forward pass. NOT changed to save memory: the first-order term of
+  # a value field is a matrix-vector product (values @ weights), and its last bits depend
+  # on how many rows one call holds, so another chunk size changes scores by about 1e-7.
+  rows_per_chunk: 262144
+  # Memory only (2026-11-20, proposal §16.10). Inside a forward pass the field embeddings
+  # and the second-order term are built for this many rows at a time: element-wise
+  # operations, so every row's numbers are the same bits whatever the block size
+  # (tests/unit/test_deepfm_model.py). Building them for a whole chunk at once is what the
+  # memory peak was made of (11.66 GB with the standardised input). The MLP and the
+  # first-order term are matrix products and still run once per chunk.
+  rows_per_block: 32768
+
+input_cache:
+  # Speed only (proposal §16.8): the encoded inputs of a target week (its training rows
+  # and its candidates) are written to artifacts/deepfm/cache/ by the first training that
+  # needs them and read back by the later ones, after every file's sha256 was checked.
+  # Only the modes listed here are cached. standardised is left out: one ablation uses it
+  # once per week, so its cache would never be read.
+  numeric_inputs: [binned]
+
+device_rule:
+  # MPS is used only if one training step on MPS is at least this many times faster
+  # than on CPU with num_threads threads; otherwise CPU.
+  min_mps_speedup: 1.5
+
+speed_test:
+  target_fold: V1
+  benchmark_steps: 300         # training steps of the device benchmark, default model, batch_rows rows
+  benchmark_discard_steps: 20  # the first steps are not timed (warm-up)
+  benchmark_scoring_rows: 1000000
+  epochs: 1                    # the V1 training of the speed test
