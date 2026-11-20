@@ -1,0 +1,2 @@
+run,csv_file,n_rows,csv_bytes,csv_sha256,gzip_file,gzip_bytes,gzip_sha256,n_checks,failed_checks,passed,git_commit,git_dirty,written_at
+rehearsal,artifacts/kaggle/deepfm/rehearsal/submission.csv,118984,23439871,55a0dccffe6925f0dd48469f8e9da25bc9be0688b77f89d19d50095ac80e9354,artifacts/kaggle/deepfm/rehearsal/submission.csv.gz,8350925,a311bac4a87554cdf90e76c37ed1d7cc6e623c2d567c021387af6f1a8ac5f70e,9,,True,e45e667b3c9982bbb2a3c70b7580272110ed1ff8,False,2026-11-20T19:06:19

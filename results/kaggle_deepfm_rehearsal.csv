@@ -1,0 +1,2 @@
+checked_at,git_commit,git_dirty,n_customers,n_shards,loss_equal,new_train_loss,stage2_train_loss,n_fold_queries,n_identical_top,identical_top_share,min_identical_top_share,format_checks_passed,passed
+2026-11-20T19:06:21,e45e667b3c9982bbb2a3c70b7580272110ed1ff8,False,118984,2,True,3.420158852101507,3.420158852101507,68984,68984,1.0,0.999,True,True

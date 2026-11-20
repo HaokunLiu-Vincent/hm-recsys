@@ -1,0 +1,2 @@
+recorded_at,git_commit,git_dirty,run,folds,purpose,script
+2026-11-20T19:03:44,e45e667b3c9982bbb2a3c70b7580272110ed1ff8,False,rehearsal,V4 T1 T2 T3,DeepFM training labels: label column of the sample files,scripts/deepfm_kaggle_step.py --step train
