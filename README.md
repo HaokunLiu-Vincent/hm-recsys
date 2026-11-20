@@ -58,6 +58,13 @@ read; the verdict was written by code to `results/t_phase_goals.csv`):
 procedure was recorded before the run and the score is only reported): Public 0.03548, Private
 0.03600 (§4.6 of the report; branch `kaggle-late-submission`).
 
+**Stage 2: DeepFM as an alternative ranker** (§10 of the report; the ranker of the system is still
+LambdaMART). With the same candidates, features and training rows, the DeepFM configuration chosen
+on V and LambdaMART cannot be told apart: pooled MAP@12 0.032765 against 0.032701 on V1–V4 and
+0.039341 against 0.039194 on T1–T4 (both 95% intervals of the difference include zero), and Kaggle
+Private 0.03588 against 0.03600 (−0.33%, inside the band of 1% fixed before the run; one late
+submission, seed 42). "Cannot be told apart" does not mean that the two are equal.
+
 **Three things to know when reading these numbers:**
 
 1. **T is 19.8% higher than V** (V1–V4 pooled: 0.032713, `results/v_phase_metrics.csv`), contrary
@@ -67,8 +74,9 @@ procedure was recorded before the run and the score is only reported): Public 0.
    0.042435, and the results carry a seasonal component (§4.4, §7.2 of the report).
 2. **One run, one seed, offline evaluation only.** There is no online A/B test, and no repeated
    runs to give a range of variation (§7.2 of the report).
-3. **T1–T4 has been used once.** Any later change may only be compared and selected on V1–V4
-   (`AGENTS.md` §3.2).
+3. **T1–T4 is used data.** Its labels were read for the final evaluation and on 4 more occasions
+   afterwards; every occasion is recorded (§7.2 item 5 of the report). Any later change may only be
+   compared and selected on V1–V4 (`AGENTS.md` §3.2).
 
 ## Documents
 

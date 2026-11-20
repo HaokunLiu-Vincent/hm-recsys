@@ -45,7 +45,9 @@ Sources: `results/t_phase_metrics.csv`, `results/t_phase_recall.csv`. "Pooled" m
 
 1. **T is 19.8% higher than V** (V1–V4 pooled: 0.032713, `results/v_phase_metrics.csv`), contrary to the prior expectation that "V is optimistically biased and T may fall below 0.032". §5 uses four descriptive tables to give an explanation consistent with the numbers; it is a correlation, not a verified cause. Single-week MAP@12 over V1–T4 ranges from 0.030112 to 0.042435, and the results carry a seasonal component (§4.4, §7.2).
 2. **One run, one seed, offline evaluation only.** There is no online A/B test, and no repeated runs to give a range of variation (§7.2).
-3. **T1–T4 has been used once.** Any later change may only be compared and selected on V1–V4 (`AGENTS.md` §3.2).
+3. **T1–T4 is used data.** Its labels were read for the final evaluation and on 4 more occasions afterwards; every occasion is recorded (§7.2 item 5). Any later change may only be compared and selected on V1–V4 (`AGENTS.md` §3.2).
+
+**Stage 2 (added 2026-11-20): DeepFM as an alternative ranker.** With the same candidates, features and training rows, a DeepFM ranker was compared with LambdaMART (§10). The configuration chosen on V (standardised numeric input, listwise loss) has a pooled MAP@12 of 0.032765 on V1–V4 against 0.032701 for LambdaMART (means of 3 seeds), and 0.039341 on T1–T4 against 0.039194 (LambdaMART: 1 seed); both 95% intervals of the difference include zero. One Kaggle late submission scored Private 0.03588 against 0.03600, a difference of −0.33%, inside the band of 1% fixed before the run (Public: 0.03492 against 0.03548, −1.58%). In all three comparisons the two rankers cannot be told apart, which does not mean that they are equal. The ranker of the system is still LambdaMART.
 
 ---
 
@@ -614,7 +616,7 @@ In the same week the share of purchases on new articles was 31.87% (§5.2). Why 
 2. **Offline evaluation only, no online A/B test.** MAP@12 measures "whether the recommended articles appear among what the customer actually bought". It does not measure whether recommendations change customer behaviour, nor diversity, novelty or revenue. An offline gain does not guarantee an online effect.
 3. **Only "customers who bought something that week" are evaluated.** A query is defined as a customer who bought at least one article in the label week. The system was not asked to judge who will come and buy, and was not evaluated on customers who did not purchase.
 4. **The results carry a seasonal component.** T1–T4 run from late August to late September, when purchase concentration and the share of new articles are both at their highest level of the 16 weeks (§5.2), and the scores rise in step with them. 0.039 is the result for these 4 weeks, not the level of the system over a full year; V1 and V2 score only about 0.030–0.031 (§4.4).
-5. **T1–T4 has been used once.** It is no longer unseen data. Any later change may only be compared and selected on V1–V4; T results may no longer be used to pick anything.
+5. **T1–T4 is used data: its labels have been read on 5 occasions.** Each one is recorded: (1) the final evaluation of M8, 2026-11-18, with its independent check at the same commit (`results/t_phase_label_access.csv`); (2) the descriptive diagnostics of §5, 2026-11-19 (`results/t_diag_label_access.csv`); (3) the Kaggle late submission of §4.6, 2026-11-19, as training labels of the ranker (3 rows in `results/kaggle_label_access.csv` on branch `kaggle-late-submission`); (4) the stage-2 evaluation of §10.5, 2026-11-20, of one configuration with 3 seeds (`results/m9_t_label_access.csv`); (5) the DeepFM Kaggle submission of §10.6, 2026-11-20, as training labels (2 rows in `results/kaggle_deepfm_label_access.csv` on branch `kaggle-deepfm-submission`). Occasions 1 and 4 evaluated a model on T; in both, the labels of T1–T3 were also training labels of the models of the later T weeks. None of them was used to select or change anything. Any later change may only be compared and selected on V1–V4; T results may no longer be used to pick anything.
 6. **The T phase is not completely unseen data.** The earlier project, before this one was restarted, had looked at weeks around T3 and T4 (`docs/proposal.md` §12). The new project reused none of the old code, configurations or conclusions, but the designer of the plan had seen data from that period. T results should be read as a retrospective test.
 7. **The scores on the D weeks and the V weeks are optimistically biased.** They took part in selecting configurations and can only be used to compare configurations. D3 and D4 look like promotion weeks (not verified): their query counts are 46.9% and 41.8% above the 16-week mean (`docs/decisions.md` 2026-11-16) and they carry 60.3% of the weight in the D-phase pooled score, so the selected recall configurations may lean towards the purchase patterns of these two weeks.
 
@@ -769,6 +771,8 @@ Rules for the submission:
 
 ### 9.2 Model comparison
 
+**Done: the comparison was made in stage 2 (2026-11-19 to 2026-11-20), and its results are in §10.** The rest of this subsection is the plan as it was written before that work.
+
 **DeepFM comparison.** With the same candidates, the same 71 features and the same 4-week training window, replace LambdaMART with DeepFM and compare MAP@12 on V1–V4. The purpose is to understand the difference between a pointwise deep model and a listwise GBDT; **replacing LambdaMART is not the goal**. The question it answers: with candidates and features held fixed, does a different ranking model make a difference of 1% or more. Two further ablations: remove the FM part, and remove the deep part, to see how much each contributes. The plateau conclusion of §4.2 covers only a few LightGBM parameters, not the type of model. To be fixed in advance: how DeepFM's hyperparameters are selected (the same selection rule), how categorical features and missing values are handled, and how randomness is controlled (several seeds at least, since neural networks vary more than tree models).
 
 ### 9.3 Alternatives already listed in `docs/decisions.md`
@@ -802,3 +806,211 @@ The system today is a set of scripts started by hand in order, and the traceabil
 - **Cadence of re-selection**: hyperparameters have not been re-selected since the lock. Seasonal change is evident (§5.2), so a rule is needed: how often, on which weeks and by what criterion to re-select.
 - **Environment**: pin the libomp version (a container or a locked system dependency) to remove the risk in §7.2 item 17.
 - **Online evaluation**: beyond offline metrics, an A/B experiment design is needed (§7.2 item 2).
+
+---
+
+## 10. Stage 2: DeepFM as an alternative ranker
+
+This section was added on 2026-11-20, after the report above was written. It covers the work recorded in `docs/proposal.md` §16 and in the entries of 2026-11-19 and 2026-11-20 in `docs/decisions.md`. **The system of §2 is unchanged: no lock file, no existing result and no code of M0–M8 was modified, and the ranker of the system is still LightGBM LambdaMART.**
+
+### 10.1 Purpose and the controlled design
+
+**Purpose.** To see what changes when only the ranking model is replaced: a deep model (DeepFM) instead of the gradient-boosted trees, on exactly the same inputs. Replacing LambdaMART was not the goal (§9.2 as it was planned).
+
+**What is held fixed** (`docs/proposal.md` §16.1):
+
+| Item | Value |
+|---|---|
+| Candidates | The frozen candidates of M6, the same as for LambdaMART |
+| Features | The 71 locked features, read from the frozen wide tables after their sha256 check |
+| Training window | The 4 weeks before the target week |
+| Training rows | The same rows LambdaMART trained on: the sample files with 40 negatives per positive. A file is used only if its sha256 equals its own record and the record of the LightGBM Dataset of that target week. Nothing is sampled again |
+| Scoring and metric | All candidates of the target week are scored; Top-12 by score; MAP@12 with the existing evaluation code |
+
+**What each data set was used for:**
+
+| Data | Use | How often |
+|---|---|---|
+| V1–V4 | Every comparison and every choice of stage 2 | 192 DeepFM trainings and 20 LightGBM trainings (`results/deepfm_trials.csv`, `results/m9_lgb_trials.csv`) |
+| T1–T4 | One test of the one configuration chosen on V; reported only | 12 trainings, run once (`results/m9_t_trials.csv`) |
+| Kaggle | One late submission of the same configuration; reported only | 1 submission (branch `kaggle-deepfm-submission`) |
+
+### 10.2 The model and the training setup
+
+- **Fields.** Each of the 71 features is one field. The 8 categorical features use their integer codes (0 = missing).
+- **Numeric input, two forms.** *Binned* (the default): 32 quantile bins per numeric feature plus one bin for missing values; the bin edges come from the training rows of the window. *Standardised*: `g(x) = sign(x) · log(1 + |x|)`, clipped to the 0.1st and 99.9th percentiles of the training rows, then `z = (clip(g(x)) − mean) / std`; a missing value has `z = 0` and an indicator of its own. The statistics come from the training rows only.
+- **Model.** Embedding dimension 16. FM part: first-order weights plus the second-order interactions of all pairs of fields. Deep part: the 71 embeddings concatenated → 256 → 128 → 64 (ReLU) → 1. The output is the sum of the two parts.
+- **Loss, two forms.** *Pointwise*: binary cross-entropy on "bought in the label week". *Listwise*: softmax cross-entropy over the candidates of one query.
+- **Training.** Adam, learning rate 1e-3, batches of 4,096 rows (listwise: whole queries packed into batches of at most 4,096 rows), no weight decay. The learning rate follows a cosine schedule down to 1% of its start over the whole run; the length of the run in epochs, T ∈ {1, 2, 3}, is a hyperparameter, and a run is evaluated once, at its end. Seeds 42, 43, 44.
+- **Device.** CPU, 6 threads. This deviates from the rule recorded in advance, which gave MPS (1.92 times faster per training step, `results/deepfm_benchmark.csv`): on MPS a training does not repeat from the same seed, on CPU it does. The user made this decision after the benchmark and one 1-epoch number on V1 were seen (`docs/decisions.md` 2026-11-19).
+- **LightGBM arms.** The locked configuration with the `lambdarank` objective (500 trees), and the same configuration with only the objective changed to `binary` (pointwise; 500 trees by the 1% number-of-trees rule on seed 42). A seed is set through LightGBM's `seed` only.
+- **What the seeds do not vary.** All arms train on the same sampled rows (negative sampling used seed 42 once), and LightGBM uses the bin boundaries of the Datasets built with seed 42. So the seed-to-seed variation below excludes sampling and bin boundaries.
+
+### 10.3 What happened, in order
+
+Items marked **(changed after results were seen)** are changes of the plan that were made with results on V1–V4 in view. None of them used any T data. Each was recorded in `docs/decisions.md` before the runs it governs.
+
+1. **The first plan (2026-11-19, recorded before any DeepFM result).** Pointwise DeepFM with 32 bins against the locked LambdaMART; a constant learning rate for 5 epochs with an evaluation after every epoch; an epoch rule (the smallest epoch within 1% of the best); a stop rule: if the pooled MAP@12 of 3 seeds differs by more than 1%, stop before any tuning.
+2. **Step 0 stopped the study.** With seeds 42, 43, 44, pooled MAP@12 was highest after epoch 1 for every seed and fell in every later epoch (epoch 1: 0.030704, 0.030222, 0.030147; epoch 5: 0.028596, 0.028717, 0.028533). The seed range at epoch 1 was (0.030704 − 0.030147) / 0.030147 = **1.85%**, above the limit of 1%, so by the recorded rule the study stopped: no tuning, no ablation, no comparison (`docs/decisions.md` 2026-11-19, "step 0"; `results/deepfm_metrics.csv`).
+3. **Revision of the training and of the design (changed after results were seen).** Made by the user after the step-0 results: (a) the constant learning rate, the 5 epochs, the epoch rule over checkpoints and the stop rule were withdrawn; (b) the cosine schedule of §10.2, with the schedule length T as the hyperparameter; (c) a new noise rule: if the seed range at the selected T is below 1%, tuning uses seed 42, otherwise every candidate is run with 3 seeds; (d) **the 2×2 design**, {LightGBM, DeepFM} × {listwise, pointwise}, so that the model family and the loss are not mixed up (`docs/decisions.md` 2026-11-20, "M9 revised after step 0").
+4. **The 2×2 study ran as recorded.** New step 0: seed-mean pooled MAP@12 0.031141 (T = 1), 0.030921 (T = 2), 0.030556 (T = 3); T = 1 was selected, with a seed range of 0.55%, so tuning used seed 42. No tuning candidate of either DeepFM arm passed the selection rule (§10.4).
+5. **The input-representation extension (changed after results were seen).** Added by the user after the 2×2 results, because of one ablation number: the standardised input scored +3.59% with seed 42. Four more DeepFM arms were run with 3 seeds each: 255 bins and the standardised input, each with both losses. It was recorded before the runs as "trained and reported only", with one hypothesis under test: that 32 bins give DeepFM a coarser view of the numeric features than LightGBM has (the locked LightGBM uses `max_bin: 255`).
+6. **The configuration for T was chosen on V.** After the extension, the user chose the DeepFM arm with the highest seed-mean pooled MAP@12 among the six DeepFM arms: standardised input with the listwise loss (0.032765; configuration id `f8811fb59b79`). **This is a choice made on V, not an outcome of the one-factor selection rule recorded at the start.**
+7. **The T evaluation was narrowed from seven arms to one before any T label was read for it.** The plans recorded earlier, the last one in commit `c2abcb7`, would have evaluated LightGBM binary and all six DeepFM arms on T1–T4. The user narrowed it to the one chosen configuration. The reason as recorded: T1–T4 is the final test set, not a second validation set; the other arms would add looks at T that no conclusion needs. When it was narrowed, `results/m9_t_label_access.csv` did not exist, and no rehearsal and no training of that step had run (`docs/decisions.md` 2026-11-20, "narrowed before any T label was read").
+8. **The T evaluation ran once** (§10.5), then **one Kaggle submission** was made (§10.6). For both, the procedure was recorded before the run, and for Kaggle also how the score would be read.
+
+### 10.4 Results on V1–V4
+
+**The eight arms.** Pooled MAP@12 over V1–V4 (300,764 queries), per seed, with the mean, the sample standard deviation and the range `(max − min) / min` of the 3 seeds; Recall@12 and NDCG@12 are seed means.
+
+| Arm | Numeric input | Loss | Seed 42 | Seed 43 | Seed 44 | Mean | Std | Range | Recall@12 | NDCG@12 |
+|---|---|---|---|---|---|---|---|---|---|---|
+| LightGBM lambdarank (the locked system) | LightGBM bins | listwise | 0.032713 | 0.032691 | 0.032701 | 0.032701 | 0.000011 | 0.07% | 0.073117 | 0.050887 |
+| LightGBM binary | LightGBM bins | pointwise | 0.032183 | 0.032270 | 0.032256 | 0.032236 | 0.000047 | 0.27% | 0.072060 | 0.050226 |
+| DeepFM | 32 bins | listwise | 0.031563 | 0.031557 | 0.031580 | 0.031566 | 0.000012 | 0.07% | 0.071081 | 0.049342 |
+| DeepFM | 32 bins | pointwise | 0.031164 | 0.031215 | 0.031043 | 0.031141 | 0.000088 | 0.55% | 0.070221 | 0.048768 |
+| DeepFM | 255 bins | listwise | 0.030540 | 0.030297 | 0.030381 | 0.030406 | 0.000123 | 0.80% | 0.068858 | 0.047598 |
+| DeepFM | 255 bins | pointwise | 0.029945 | 0.029947 | 0.029888 | 0.029927 | 0.000034 | 0.20% | 0.068063 | 0.046990 |
+| **DeepFM (chosen)** | standardised | listwise | 0.032738 | 0.032739 | 0.032818 | **0.032765** | 0.000046 | 0.24% | 0.073030 | 0.050964 |
+| DeepFM | standardised | pointwise | 0.032283 | 0.032257 | 0.032189 | 0.032243 | 0.000048 | 0.29% | 0.071960 | 0.050237 |
+
+Source: `results/m9_ext_arms.csv`. Seed 42 of LightGBM lambdarank is the M7 record of §4.2 and was not rerun. Every DeepFM arm: T = 1.
+
+**Tuning outcome.** One factor at a time, with seed 42 and the selection rule of §3.3 (a relative gain of at least 1% and strictly better in at least 3 of the 4 weeks), for the 32-bin arms. No candidate passed, so both arms kept learning rate 1e-3, embedding dimension 16 and dropout 0.
+
+| Arm | Factor | Candidate | Pooled MAP@12 | Change against the current value | Weeks better |
+|---|---|---|---|---|---|
+| Pointwise (current: 0.031164) | Learning rate | 3e-4, at its own T = 2 | 0.031291 | +0.41% | 4 |
+| | Learning rate | 3e-3, at its own T = 1 | 0.030744 | −1.35% | 0 |
+| | Embedding dimension | 8 | 0.031100 | −0.21% | 2 |
+| | Embedding dimension | 32 | 0.031077 | −0.28% | 2 |
+| | Dropout | 0.1 | 0.031049 | −0.37% | 1 |
+| | Dropout | 0.3 | 0.030875 | −0.93% | 1 |
+| Listwise (current: 0.031563) | Learning rate | 3e-4, at its own T = 2 | 0.031672 | +0.35% | 3 |
+| | Learning rate | 3e-3, at its own T = 1 | 0.030617 | −3.00% | 0 |
+
+Source: `results/deepfm_study.csv`. In the learning-rate step every candidate was run for T = 1, 2, 3 and compared at the T the epoch rule gave it. The listwise arm used the embedding dimension and dropout kept for the pointwise arm.
+
+**Component ablation.** At the 32-bin pointwise configuration, T = 1, seed 42, without separate tuning; reported only. The 3-seed range of the full model is 0.55%, and every difference below is larger than that.
+
+| Variant | Pooled MAP@12 | Change against the full model (0.031164) |
+|---|---|---|
+| First-order terms only | 0.028557 | −8.36% |
+| FM part only (first and second order) | 0.030362 | −2.57% |
+| Deep part only | 0.030426 | −2.37% |
+| Full model, standardised numeric input | 0.032283 | +3.59% |
+
+Source: `results/deepfm_study.csv`.
+
+**Bootstrap contrasts.** Difference of pooled MAP@12 on seed means, with the paired bootstrap over customers of §4.5 (1,000 replicates, 95%; 234,382 customers). The interval reflects the sampling of customers only.
+
+| Contrast (first − second) | Difference | 95% interval | Zero inside |
+|---|---|---|---|
+| DeepFM 32 bins pointwise − LightGBM lambdarank | −0.001561 | [−0.001750, −0.001399] | no |
+| DeepFM 32 bins listwise − LightGBM lambdarank | −0.001135 | [−0.001313, −0.000972] | no |
+| LightGBM lambdarank − LightGBM binary | +0.000465 | [+0.000330, +0.000596] | no |
+| DeepFM 32 bins: listwise − pointwise | +0.000426 | [+0.000300, +0.000566] | no |
+| DeepFM pointwise: standardised − 32 bins | +0.001103 | [+0.000952, +0.001261] | no |
+| DeepFM listwise: standardised − 32 bins | +0.001199 | [+0.001035, +0.001367] | no |
+| DeepFM pointwise: 255 bins − 32 bins | −0.001214 | [−0.001385, −0.001047] | no |
+| DeepFM listwise: 255 bins − 32 bins | −0.001160 | [−0.001336, −0.000989] | no |
+| DeepFM standardised pointwise − LightGBM binary | +0.000007 | [−0.000142, +0.000165] | **yes** |
+| DeepFM standardised listwise − LightGBM lambdarank | +0.000064 | [−0.000104, +0.000238] | **yes** |
+
+Sources: `results/m9_contrasts.csv` (the first 4 rows), `results/m9_ext_contrasts.csv` (the other 6).
+
+**Three query groups.** MAP@12 on seed means, pooled over V1–V4, by the customer's history before the anchor (the grouping of §5.3).
+
+| Arm | No history (20,257 queries, 6.74%) | Purchase in the last 30 days (144,999, 48.21%) | Other (135,508, 45.05%) |
+|---|---|---|---|
+| LightGBM lambdarank | 0.007947 | 0.047688 | 0.020365 |
+| LightGBM binary | 0.008298 | 0.047126 | 0.019883 |
+| DeepFM 32 bins listwise | 0.006897 | 0.046399 | 0.019383 |
+| DeepFM 32 bins pointwise | 0.006939 | 0.046003 | 0.018855 |
+| DeepFM 255 bins listwise | 0.006801 | 0.045020 | 0.018298 |
+| DeepFM 255 bins pointwise | 0.006849 | 0.044498 | 0.017784 |
+| DeepFM standardised listwise (chosen) | 0.007369 | 0.047824 | 0.020449 |
+| DeepFM standardised pointwise | 0.006768 | 0.047337 | 0.019900 |
+
+Source: `results/m9_ext_groups.csv`. No interval was computed per group.
+
+### 10.5 Result on T1–T4
+
+The chosen configuration (standardised input, listwise loss, T = 1) was trained with seeds 42, 43, 44 for each T week, with the training windows and the sample files of M8, and evaluated once. Before any T label was read, the same code path was run with V4 as the target week for the 3 seeds: all 12 checks were bit-identical to the V4 records, and the read of the T labels was then recorded (2026-11-20T15:55:13, `results/m9_t_label_access.csv`). LightGBM lambdarank is the M8 record of §4.3 (500 trees, seed 42); it was not rerun.
+
+| Model | Seed | MAP@12 T1 | MAP@12 T2 | MAP@12 T3 | MAP@12 T4 | MAP@12 pooled |
+|---|---|---|---|---|---|---|
+| DeepFM | 42 | 0.035494 | 0.040229 | 0.039568 | 0.042256 | 0.039260 |
+| DeepFM | 43 | 0.035674 | 0.040465 | 0.039577 | 0.042591 | 0.039449 |
+| DeepFM | 44 | 0.035238 | 0.040335 | 0.039720 | 0.042505 | 0.039313 |
+| DeepFM | mean | 0.035468 | 0.040343 | 0.039622 | 0.042451 | **0.039341** |
+| LightGBM lambdarank (M8) | 42 | 0.034960 | 0.040270 | 0.039673 | 0.042435 | **0.039194** |
+
+Source: `results/m9_t_arms.csv`; pooled over the 297,078 queries. DeepFM pooled MAP@12 over the 3 seeds: standard deviation 0.000097, range 0.48%. Seed means of DeepFM: Recall@12 0.087564, NDCG@12 0.060095; the M8 record: 0.087135 and 0.059852.
+
+**Interval.** DeepFM (seed mean) − LightGBM lambdarank, pooled MAP@12, with the same paired bootstrap over customers (1,000 replicates, 95%; 233,174 customers): **+0.000147, 95% interval [−0.000059, +0.000334]** (`results/m9_t_contrasts.csv`). The interval includes zero.
+
+### 10.6 Result on Kaggle
+
+One late submission of the same configuration was made, the same way as the LightGBM submission of §4.6: the same candidates and the same 71 features for the week 2020-09-23 to 2020-09-29, the ranker trained on T1–T4 with the same sample files. **One submission, one model, seed 42; a late submission, not an official rank.**
+
+Fixed before the run (`docs/decisions.md` of branch `kaggle-deepfm-submission`, commit `6f447b9`): **the Private score is the one that counts**; a relative difference of the Private scores below 1% is reported as "cannot be told apart on this week", a larger one as a difference on a single week; whatever the score is, nothing is changed and nothing else is submitted.
+
+| | Public | Private |
+|---|---|---|
+| DeepFM (standardised input, listwise loss), seed 42 | 0.03492 | **0.03588** |
+| LightGBM LambdaMART (§4.6) | 0.03548 | 0.03600 |
+| Relative difference, (DeepFM − LightGBM) / LightGBM | −1.58% | **−0.33%** |
+
+- **The reading.** The Private difference, −0.33%, is inside the band of 1% fixed in advance, so by that reading the two submissions **cannot be told apart on this week**.
+- **The Public difference is larger than 1%** (−1.58%). It is stated here and changes nothing: the Private score was fixed in advance as the one that counts, and the Public score was recorded only.
+- **Where the Private score would stand.** Position 4 of the 2,954 teams of the final leaderboard, the same place as the LightGBM submission: late submission, not an official rank.
+- **No interval.** One week and one seed.
+- **Rehearsal on T4 before the real run.** The training loss equalled the one of the T evaluation of §10.5 for T4 and seed 42, and for 68,984 of the 68,984 T4 queries the Top-12 list was identical to the one that evaluation saved.
+
+Submission ref 58603890, received by Kaggle at 2026-11-20 08:22:24 UTC. Sources: `docs/decisions.md` 2026-11-20, "Kaggle late submission of the DeepFM configuration"; the full record and the result table `results/kaggle_deepfm_submission.csv` are on branch `kaggle-deepfm-submission` (the file was produced at commit `e23eb7c`, the scores are recorded in commit `8d86cf4`), which is not merged.
+
+### 10.7 The three comparisons side by side
+
+DeepFM is the chosen configuration in all three rows.
+
+| Comparison | DeepFM | LightGBM LambdaMART | Difference | How it reads |
+|---|---|---|---|---|
+| V1–V4, pooled MAP@12 | 0.032765 (mean of 3 seeds) | 0.032701 (mean of 3 seeds) | +0.000064, interval [−0.000104, +0.000238] | The interval includes zero |
+| T1–T4, pooled MAP@12 | 0.039341 (mean of 3 seeds) | 0.039194 (seed 42) | +0.000147, interval [−0.000059, +0.000334] | The interval includes zero |
+| Kaggle Private score | 0.03588 (seed 42) | 0.03600 (seed 42) | −0.00012 (−0.33%), no interval | Inside the band of 1% fixed in advance |
+
+The three rows are different weeks and different sets of customers (§7.3), so their levels are not compared with each other. On V the configuration was chosen among six arms on these same weeks, so its V value is optimistically biased.
+
+### 10.8 What can and cannot be concluded
+
+**How the words are used.** An interval that includes zero, or a difference inside the band fixed in advance, means that the two **cannot be told apart** with this data. It does not mean that they are equal.
+
+What the results support:
+
+1. **With the same candidates, features and training rows, the chosen DeepFM configuration and LambdaMART cannot be told apart**: on V, on T, and on the Kaggle Private score (§10.7). The sign of the difference is positive in the two offline comparisons and negative on Kaggle.
+2. **On V, the listwise loss scored higher than the pointwise loss** for LightGBM (+0.000465) and for DeepFM with 32 bins (+0.000426); both intervals exclude zero. For the two other inputs the listwise arm also has the higher mean (§10.4), without an interval.
+3. **On V, the input representation of the numeric features made the largest difference among the DeepFM arms**: the standardised input is above 32 bins (+0.001103 and +0.001199) and 255 bins are below 32 bins (−0.001214 and −0.001160); all four intervals exclude zero.
+4. **The guess that 32 bins were too coarse was refuted.** If it held, 255 bins should have scored at least as high as 32 bins; they scored lower with both losses.
+5. **On V, DeepFM with the default 32-bin input is below LambdaMART** (−0.001561 pointwise, −0.001135 listwise; both intervals exclude zero).
+
+What they do not support:
+
+- **The effects of the loss and of the input representation are findings on V only.** They were not tested on T: only one configuration was evaluated there (§10.3 item 7).
+- **No mechanism was tested.** Why binning does worse than the standardised input, why more bins do worse than fewer, and why MAP@12 fell after the first epoch at a constant learning rate: every explanation of these is a hypothesis. The explanation recorded with the revision (overfitting after epoch 1 at a constant rate) is one of them.
+- **Nothing says that DeepFM is better than LambdaMART, or worse.** The three comparisons do not separate them.
+- **The Kaggle result is one week and one seed.** It does not confirm or contradict the offline comparisons.
+- **The plateau of §4.2 is not extended to all models.** Two model families were compared, each at one tuned or chosen configuration.
+
+### 10.9 Limitations
+
+1. **The standardised arms were not tuned separately.** Their learning rate, embedding dimension, dropout and schedule length are the ones kept for the 32-bin pointwise arm.
+2. **The selected schedule length, T = 1, is at the lower edge of its grid {1, 2, 3}.** The grid was not extended (the rule recorded in advance); dropout 0 is on an edge too.
+3. **A lower learning rate with a longer schedule showed a gain of about 1% at the grid edge and was not pursued.** With learning rate 3e-4, seed 42, the 32-bin arms scored highest at T = 3, the upper edge: pointwise 0.031545 (+1.22% against 0.031164), listwise 0.031803 (+0.76% against 0.031563) (`results/deepfm_study.csv`; the changes are computed here). By the epoch rule these candidates were compared at T = 2 and did not pass the selection rule. The standardised arms were never run with this setting.
+4. **LightGBM has one seed on T** (the M8 record). The interval of §10.5 covers the sampling of customers, not the seed of LightGBM.
+5. **The Kaggle comparison is one week and one seed**, with no interval.
+6. **The memory peak of the standardised path is close to the limit.** The true peak of a training process was up to 11.66 GB before a change that lowered it without changing any result, and 9.08–11.36 GB after it on V (the aim of under 10 GB was not reached), 8.98–10.29 GB on T; the limit is 12 GB (`results/deepfm_trials.csv`, `results/m9_t_trials.csv`).
+7. **The ablations and the tuning used one seed** (42).
+8. **The configuration tested on T and on Kaggle was chosen on V among six arms**, after an extension that was added with results in view (§10.3 items 5 and 6).
+9. **The seed variation excludes negative sampling and bin boundaries** (§10.2).
+10. **The main system is still LightGBM LambdaMART and was not replaced.** Stage 2 changed no lock file; the results of §1–§6 stand as they were.
