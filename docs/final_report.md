@@ -1,10 +1,10 @@
 # H&M Personalized Fashion Recommendation — Final Report
 
 > **Language.** This English version is the original; `docs/final_report.zh-CN.md` is its Chinese translation. The numbers are identical; where the two differ, the English version prevails.
-> Date: 2026-11-19. Tag `v0.1`.
+> Dates and tags: sections 1–9, 2026-11-19, tag `v0.1`; section 10 and the pointers to it were added on 2026-11-20, tag `v0.2`.
 > The design reference is `docs/proposal.md`; every decision made along the way is logged in `docs/decisions.md`. This report is written for readers who did not take part in the project and can be read on its own; for details, follow the sections and files it points to.
 > **Where the numbers come from.** Every result comes from a file under `results/` or from `docs/decisions.md`, cited below the table or at the end of the sentence. Numbers derived from result tables (relative changes, query-weighted pooled values) say how they were computed. Configuration values (quotas, windows, τ and so on) come from the four lock files under `configs/locks/` and from `configs/fold_manifest.yaml`.
-> **What this report does not do.** It gives no official Kaggle rank (§7.3 says why the T1–T4 result is not compared with the leaderboard; §4.6 reports one late submission and labels where its score would stand), and it does not present correlation as causation (§5).
+> **What this report does not do.** It gives no official Kaggle rank (§7.3 says why the T1–T4 result is not compared with the leaderboard; §4.6 and §10.6 report two late submissions and label where their scores would stand), and it does not present correlation as causation (§5).
 
 ---
 
@@ -44,7 +44,7 @@ Sources: `results/t_phase_metrics.csv`, `results/t_phase_recall.csv`. "Pooled" m
 **Three things to know when reading these numbers:**
 
 1. **T is 19.8% higher than V** (V1–V4 pooled: 0.032713, `results/v_phase_metrics.csv`), contrary to the prior expectation that "V is optimistically biased and T may fall below 0.032". §5 uses four descriptive tables to give an explanation consistent with the numbers; it is a correlation, not a verified cause. Single-week MAP@12 over V1–T4 ranges from 0.030112 to 0.042435, and the results carry a seasonal component (§4.4, §7.2).
-2. **One run, one seed, offline evaluation only.** There is no online A/B test, and no repeated runs to give a range of variation (§7.2).
+2. **One run, one seed, offline evaluation only.** The results of the system on T come from one training per week with seed 42. There is no online A/B test, and no repeated runs on T to give a range of variation (§7.2). Stage 2 later trained LambdaMART with 3 seeds on V1–V4: the range of the pooled MAP@12 is 0.07% (§10.4).
 3. **T1–T4 is used data.** Its labels were read for the final evaluation and on 4 more occasions afterwards; every occasion is recorded (§7.2 item 5). Any later change may only be compared and selected on V1–V4 (`AGENTS.md` §3.2).
 
 **Stage 2 (added 2026-11-20): DeepFM as an alternative ranker.** With the same candidates, features and training rows, a DeepFM ranker was compared with LambdaMART (§10). The configuration chosen on V (standardised numeric input, listwise loss) has a pooled MAP@12 of 0.032765 on V1–V4 against 0.032701 for LambdaMART (means of 3 seeds), and 0.039341 on T1–T4 against 0.039194 (LambdaMART: 1 seed); both 95% intervals of the difference include zero. One Kaggle late submission scored Private 0.03588 against 0.03600, a difference of −0.33%, inside the band of 1% fixed before the run (Public: 0.03492 against 0.03548, −1.58%). In all three comparisons the two rankers cannot be told apart, which does not mean that they are equal. The ranker of the system is still LambdaMART.
@@ -612,7 +612,7 @@ In the same week the share of purchases on new articles was 31.87% (§5.2). Why 
 
 **Scope of the evaluation**
 
-1. **One run, one seed.** Every ranker model was trained once (seed 42); the R6 training chain also has only one instance in the F–T phases (seed 42; variation was looked at with 3 seeds in the D phase only). There is no range of variation from repeated training. The interval in §4.5 covers customer sampling only.
+1. **One run, one seed.** For the results of the system on T, every ranker model was trained once (seed 42); the R6 training chain also has only one instance in the F–T phases (seed 42; variation was looked at with 3 seeds in the D phase only). On T there is no range of variation from repeated training. Stage 2 later trained LambdaMART with 3 seeds on V1–V4 (seeds 42, 43, 44, on the same sampled rows): pooled MAP@12 0.032713, 0.032691 and 0.032701, a range of 0.07% (§10.4). The interval in §4.5 covers customer sampling only.
 2. **Offline evaluation only, no online A/B test.** MAP@12 measures "whether the recommended articles appear among what the customer actually bought". It does not measure whether recommendations change customer behaviour, nor diversity, novelty or revenue. An offline gain does not guarantee an online effect.
 3. **Only "customers who bought something that week" are evaluated.** A query is defined as a customer who bought at least one article in the label week. The system was not asked to judge who will come and buy, and was not evaluated on customers who did not purchase.
 4. **The results carry a seasonal component.** T1–T4 run from late August to late September, when purchase concentration and the share of new articles are both at their highest level of the 16 weeks (§5.2), and the scores rise in step with them. 0.039 is the result for these 4 weeks, not the level of the system over a full year; V1 and V2 score only about 0.030–0.031 (§4.4).
@@ -655,7 +655,7 @@ This report therefore **states no rank for the T1–T4 result**, and does not co
 | Machine | MacBook Pro, Apple M1 Max, 32 GB of physical memory (`docs/decisions.md` 2026-11-18); the project uses 6 threads; everything runs on CPU (R6 included: in the 200-step speed test of the real model, CPU took 30.4 ms per step and MPS 45.2 ms, `docs/decisions.md` 2026-11-17) |
 | Python | 3.12, managed by uv; exact dependency versions are in `uv.lock` |
 | LightGBM / libomp | 4.7.0 / 22.1.4 (recorded in every ranker result row; `results/v_phase.csv`, `results/t_phase.csv`). libomp is installed with `brew install libomp` and is not pinned by `uv.lock` |
-| Memory | Project budget 12 GB (an alert threshold on the true peak of a single process); the highest measured value is 7.25 GB (§8.4) |
+| Memory | Project budget 12 GB (an alert threshold on the true peak of a single process); the highest measured value of M0–M8 is 7.25 GB (§8.4); for stage 2 see §10.9 item 6 |
 | Data | The three CSV files under `data/raw/`, plus precomputed image (CLIP ViT-B/32) and text (all-MiniLM-L6-v2) embeddings; `data/` and `artifacts/` are not in git |
 
 torch and LightGBM each ship their own OpenMP runtime and cannot be loaded in the same process; the ranker code does not import torch, and the tests also run in two processes.
@@ -731,7 +731,7 @@ The "true peak" is the maximum resident set size of a process as recorded by the
 | D total | 54 trials | About 2.3 hours (sum of trial run times: 8,265 s; excludes training the R6 base model) | — | same as above |
 | M5 | Candidates regenerated once per channel on D1 | Generation step: R1 0.5 s, R2 0.3 s, R3 0.4 s, R4 25.8 s, R5 169.6 s, R6 13.6 s | True peak 0.99–4.20 GB (highest: R4) | `results/m5_lock_check.csv` |
 | M6 candidates | The 12 weeks F1–T4, one process per (week, channel) | Per week and channel: R1, R2, R3 under 2 s, R4 23–27 s, R5 170–180 s, R6 18–95 s (including the weekly fine-tuning of 52–71 s); all processes together 3,371 s, about 56 minutes | Highest true peak 4.70 GB (R6 in F2) | `results/m6_runs.csv`, `results/m6_twotower_chain.csv` |
-| M6 features | Wide tables of the 12 weeks, 281,750,956 rows in total, 17.8 GB on disk | 48–61 s per week, 659 s in total, about 11 minutes | True peak 6.10–7.25 GB (highest: V2, **the highest of the whole project**) | `results/m6_runs.csv`, `docs/decisions.md` 2026-11-18 |
+| M6 features | Wide tables of the 12 weeks, 281,750,956 rows in total, 17.8 GB on disk | 48–61 s per week, 659 s in total, about 11 minutes | True peak 6.10–7.25 GB (highest: V2, **the highest of M0–M8**; for stage 2 see §10.9 item 6) | `results/m6_runs.csv`, `docs/decisions.md` 2026-11-18 |
 | M7 | Sampling; building the training sets | Sampling 20–24 s per week (6–8 s for the set without R6); 5–12 s per training set | True peak: sampling 3.42–4.13 GB, training sets 1.55–2.92 GB | `results/m7_runs.csv` |
 | M7 | 32 trials of 1000 trees (8 configurations × 4 weeks) | 433–706 s each (training 0.27–0.53 s per tree, scoring plus evaluation 148–286 s) | True peak 2.63–3.67 GB | `results/v_phase.csv` |
 | M7 | 4 trials of 500 trees without R6 | 210–221 s each | True peak 3.45–3.84 GB | `results/v_phase.csv` |
@@ -744,7 +744,7 @@ The "true peak" is the maximum resident set size of a process as recorded by the
 
 Two items are not recorded in `results/` or `docs/decisions.md`: the actual training time of the R6 base model (6 epochs) (there is only the prior estimate: about 36–37 minutes, `docs/decisions.md` 2026-11-17); and the run time and peak of the descriptive diagnostics (in the run log `artifacts/runs/m8_diagnostics/run.log`).
 
-Adding up the rows of the table (with the R6 base training counted at its estimate), the computation from the D phase to the final evaluation totals about 10 hours and fits on one laptop; among the processes with a recorded true peak, the highest is 7.25 GB.
+Adding up the rows of the table (with the R6 base training counted at its estimate), the computation from the D phase to the final evaluation totals about 10 hours and fits on one laptop; among the processes of M0–M8 with a recorded true peak, the highest is 7.25 GB. Stage 2 went higher; its peaks are in §10.9 item 6.
 
 ---
 
@@ -1014,3 +1014,27 @@ What they do not support:
 8. **The configuration tested on T and on Kaggle was chosen on V among six arms**, after an extension that was added with results in view (§10.3 items 5 and 6).
 9. **The seed variation excludes negative sampling and bin boundaries** (§10.2).
 10. **The main system is still LightGBM LambdaMART and was not replaced.** Stage 2 changed no lock file; the results of §1–§6 stand as they were.
+
+### 10.10 Cost, and why the system keeps LambdaMART
+
+One model per T week, each in its own process, on CPU with 6 threads, from the same sample files:
+
+| Per T week | LambdaMART (M8, 4 trainings) | DeepFM, the chosen configuration (12 trainings) |
+|---|---|---|
+| Getting the training rows into the process | 0.6–0.7 s to load the binary Dataset, which was built once per week before (6.6–6.8 s, true peak 1.81–1.84 GB) | 27.0–27.8 s to read, standardise and encode the sample files |
+| Training | 153.9–160.7 s (500 trees) | 43.8–47.7 s (1 epoch) |
+| Scoring and evaluating the week (20,984,180–24,592,808 candidate rows) | 105.6–124.3 s | 46.7–56.2 s |
+| The whole process | 267.2–279.0 s | 120.8–132.7 s |
+| True peak memory of the process | **2.94–3.14 GB** | **8.98–10.29 GB** |
+
+Sources: `results/t_phase.csv` and `results/m8_runs.csv` (LambdaMART); `results/m9_t_trials.csv` (DeepFM).
+
+**Scoring on its own.** In the two Kaggle runs the 366,750,625 candidate rows of the 1,371,980 customers were scored in a process that did nothing else: LambdaMART 1,683.5 s with a true peak of 2.64 GB (`results/kaggle_runs.csv` on branch `kaggle-late-submission`), DeepFM 773.1 s with a true peak of 8.31 GB (`results/kaggle_deepfm_runs.csv` on branch `kaggle-deepfm-submission`). The training processes of those runs: LambdaMART 149.5 s, 1.94 GB; DeepFM 77.4 s, 5.39 GB.
+
+So DeepFM needs less time, for training and for scoring, and LambdaMART needs less memory.
+
+**Seed-to-seed variation** (§10.4, V1–V4, 3 seeds each): the pooled MAP@12 of LambdaMART has a standard deviation of 0.000011 and a range of 0.07%; that of the chosen DeepFM configuration 0.000046 and 0.24%. On T, LambdaMART has one seed, so the two cannot be compared there.
+
+**Reproducibility does not separate the two.** Each reproduced its earlier records bit for bit when it was trained again: LambdaMART in the rehearsals of §3.5 and §4.6, DeepFM in the rehearsals of §10.5 and §10.6. For DeepFM this holds on CPU; on MPS a training does not repeat from the same seed (§10.2).
+
+**A judgement, not a result.** With two rankers that cannot be told apart (§10.7), the system keeps LambdaMART because it needs less memory (2.94–3.14 GB against 8.98–10.29 GB per process, under a budget of 12 GB) and because its seed-to-seed variation on V is smaller (a range of 0.07% against 0.24%).
