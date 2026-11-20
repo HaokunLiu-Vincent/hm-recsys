@@ -1541,7 +1541,7 @@ All comparisons and selections are on V1–V4, with the pooled MAP@12 (weighted 
 7. **LightGBM seeds.** In the locked parameters two things are random: `feature_fraction: 0.8` and `bagging_fraction: 0.8` with `bagging_freq: 1`. A seed is set as the locked training sets it: the parameter `seed` only (LightGBM derives its sub-seeds from it). The bin boundaries (the M7 binary Datasets) and the negative sampling (seed 42) are the same for every seed and every arm, so **the seed variation excludes sampling**.
 8. **Grid edges** (§16.5 item 8): a selected value on the edge of its grid, T and k* included, is flagged and the grid is not extended.
 9. **Comparison (report only).** Per arm: pooled MAP@12 per seed, mean, sample standard deviation and range; Recall@12 and NDCG@12 as seed means. The customer-level paired bootstrap of §10.2 (1,000 replicates, seed 42, 95%), on seed 42 and on every query's 3-seed mean AP@12, for: DeepFM-pointwise − LGB-lambdarank, DeepFM-listwise − LGB-lambdarank, LGB-lambdarank − LGB-binary, DeepFM-listwise − DeepFM-pointwise. MAP@12 of the four arms in the three query groups. An independent naive recomputation of MAP@12 for the selected Arm 4 configuration, seed 42.
-10. **T phase (recorded now, implemented later).** After the V study is finished: one evaluation on T1–T4 of the three new arms at their selected configurations, seeds 42, 43, 44, reported only and never used to select anything. LGB-lambdarank with seed 42 on T is the M8 record and is not rerun. Until it is implemented, every entry point of M9 refuses T folds.
+10. **T phase (recorded now, implemented later).** After the V study is finished: one evaluation on T1–T4 of the three new arms at their selected configurations, seeds 42, 43, 44, reported only and never used to select anything. LGB-lambdarank with seed 42 on T is the M8 record and is not rerun. Until it is implemented, every entry point of M9 refuses T folds. *(Superseded on 2026-11-20 by §16.12: only the configuration chosen on V is evaluated on T.)*
 
 **Speed only.** The encoded inputs (training rows and the target week's candidates) of the binned input are cached per target week under `artifacts/deepfm/cache/` and verified by sha256 before reuse. The device stays CPU.
 
@@ -1591,7 +1591,7 @@ How: the peak was the scoring of one chunk of 262,144 rows (the [rows, fields, d
 
 **Code added.** `src/hmrec/deepfm/extension.py` with `scripts/m9_deepfm_extension.py` (the runs); `scripts/m9_deepfm_compare.py --extension` (the eight-arm tables); `src/hmrec/deepfm/rescore.py` with `scripts/m9_deepfm_rescore.py` (the check above); `--n-bins` of `scripts/m9_deepfm_trial.py`.
 
-**T phase (replaces rule 10 of §16.8; implemented later).** One evaluation on T1–T4 of LightGBM binary and all six DeepFM arms, seeds 42, 43, 44, reported only and never used to select anything. LightGBM lambdarank with seed 42 on T is the M8 record and is not rerun.
+**T phase (replaces rule 10 of §16.8; implemented later).** One evaluation on T1–T4 of LightGBM binary and all six DeepFM arms, seeds 42, 43, 44, reported only and never used to select anything. LightGBM lambdarank with seed 42 on T is the M8 record and is not rerun. *(Superseded on 2026-11-20 by §16.12: only the configuration chosen on V is evaluated on T.)*
 
 ### 16.11 Results of the extension on V1–V4 (2026-11-20; report only)
 
@@ -1615,30 +1615,22 @@ Tables: `results/m9_ext_arms.csv`, `results/m9_ext_contrasts.csv`, `results/m9_e
 
 ### 16.12 The single evaluation on T1–T4 (2026-11-20; recorded before any run)
 
-The evaluation announced in §16.8 (rule 10) and §16.10. **Run once, reported only, never used to select or change anything; nothing may be changed after the T results are seen.** The user consented to this read of the T labels (AGENTS.md §3.2). Config: `configs/m9_t_eval.yaml`. The full record is the entry of 2026-11-20 in `docs/decisions.md`.
+**This section replaces its first version** (commit `c2abcb7`), which planned seven arms on T: LightGBM binary and six DeepFM arms. The scope was narrowed by the user **before any T label was read for this step**; the earlier T-phase notes (rule 10 of §16.8, the T-phase paragraph of §16.10) are superseded too. **Reason: T1–T4 is the final test set, not a second validation set. Only the configuration chosen on V is tested on T; the other arms would add looks at T that no conclusion needs.** The full record is the entry of 2026-11-20 in `docs/decisions.md`.
 
-**Arms** (configurations exactly as fixed on V; seeds 42, 43, 44):
+**Run once, reported only; nothing may be changed after the T result is seen.** The user consented to this read of the T labels (AGENTS.md §3.2). Config: `configs/m9_t_eval.yaml`.
 
-| Arm | Numeric input | Loss | Configuration id | Schedule length |
-|---|---|---|---|---|
-| `lgb_binary` | LightGBM bins | pointwise | locked configuration, objective `binary` | 500 trees |
-| `deepfm_pointwise` | 32 bins | pointwise | `3cb19c17461b` | T = 1 |
-| `deepfm_listwise` | 32 bins | listwise | `19ba76cfd205` | T = 1 |
-| `deepfm_bins255_pointwise` | 255 bins | pointwise | `a2c85d468c6a` | T = 1 |
-| `deepfm_bins255_listwise` | 255 bins | listwise | `c5330af47be1` | T = 1 |
-| `deepfm_standardised_pointwise` | standardised | pointwise | `08775a5d6efb` | T = 1 |
-| `deepfm_standardised_listwise` | standardised | listwise | `f8811fb59b79` | T = 1 |
+**The chosen configuration**: DeepFM with the standardised numeric input and the listwise loss, learning rate 1e-3, embedding dimension 16, dropout 0, schedule length T = 1; configuration id `f8811fb59b79` (arm `deepfm_standardised_listwise` of §16.11). It was chosen on V as the DeepFM arm with the highest seed-mean pooled MAP@12 among the six arms (0.032765), after the input-representation extension. **It is a choice made on V, not an outcome of the one-factor selection rule of §16.5 / §16.8.**
 
-LightGBM lambdarank with seed 42 is the M8 record (§10.1) and is not rerun.
+**Not tested on T**: the effects of the input representation and of the loss; they remain findings on V only. The explanation for why binning does worse (§16.10) is a hypothesis and was not tested.
 
-**Inputs.** Training windows as in M8 (§10.1): T1 ← V1–V4, T2 ← V2 V3 V4 T1, T3 ← V3 V4 T1 T2, T4 ← V4 T1 T2 T3. No new sampling: the sample files and the LightGBM Datasets of M8 are reused after their sha256 checks. The frozen candidates and features of T1–T4 are verified before they are read.
+**What is run**: the chosen configuration with seeds 42, 43, 44 on T1–T4, 12 trainings. Training windows as in M8 (§10.1): T1 ← V1–V4, T2 ← V2 V3 V4 T1, T3 ← V3 V4 T1 T2, T4 ← V4 T1 T2 T3. No new sampling: the sample files of M8 are reused after their sha256 checks. LightGBM lambdarank is the M8 record (500 trees, seed 42), read only. No other arm is run on T.
 
 **Order.** Code and tests on small data → commit → rehearsal → formal run → comparison.
 
-1. **Rehearsal** (`scripts/m9_t_eval.py --stage rehearsal`; reads no T label): the new code path with V4 as the target week, seed 42, all seven arms. Each result must be bit-identical to the V4 record of that arm (the three metrics and the number of queries, the saved Top-12 with its scores, the per-query values; DeepFM also the training loss). Outcome: `results/m9_t_rehearsal_check.csv`.
-2. **Gate** (`src/hmrec/t_eval/gate.py`): T labels are read only if the latest rehearsal passed at the commit of HEAD on a clean working tree. Before any T label is opened a row is appended to `results/m9_t_label_access.csv` (time, commit, purpose, script). An interrupted formal run is resumed with the same command and refused at another commit.
-3. **Formal run** (`scripts/m9_t_eval.py --stage formal`): 84 trainings, one process each; `results/m9_t_trials.csv`, `results/m9_t_metrics.csv`.
-4. **Comparison** (`scripts/m9_t_compare.py`; saved per-query values only): the eight-arm table on T, the bootstrap contrasts of §16.10 on T and listwise − pointwise within each model, V and T side by side. `results/m9_t_arms.csv`, `results/m9_t_contrasts.csv`, `results/m9_t_v_and_t.csv`.
+1. **Rehearsal** (`scripts/m9_t_eval.py --stage rehearsal`; reads no T label): the new code path with V4 as the target week, seeds 42, 43, 44. Each result must be bit-identical to the V4 record of the configuration and seed (the three metrics, the number of queries and the training loss; the saved Top-12 with its scores; the per-query values). Outcome: `results/m9_t_rehearsal_check.csv`.
+2. **Gate** (`src/hmrec/t_eval/gate.py`): T labels are read only if the latest rehearsal passed at the commit of HEAD on a clean working tree. Before any T label is opened a row is appended to `results/m9_t_label_access.csv` (time, commit, purpose, script). An interrupted formal run is continued with the same command and refused at another commit.
+3. **Formal run** (`scripts/m9_t_eval.py --stage formal`): 12 trainings, one process each; `results/m9_t_trials.csv`, `results/m9_t_metrics.csv`.
+4. **Comparison** (`scripts/m9_t_compare.py`; saved per-query values only): MAP@12 per week and pooled for every seed with mean, standard deviation and range, next to the M8 record; the paired customer-level bootstrap of §10.2 for DeepFM (seed mean) minus LightGBM lambdarank; V and T side by side for the two models. `results/m9_t_arms.csv`, `results/m9_t_contrasts.csv`, `results/m9_t_v_and_t.csv`.
 
 **A third entry point for T labels** (besides §10.1 and §10.2): `src/hmrec/eval/t_eval_labels.py` with a `TEvalPermit` that only `src/hmrec/t_eval/gate.py` creates; only `src/hmrec/t_eval/` and `scripts/m9_t_*.py` may import it (`tests/unit/test_t_eval_code_rules.py`). The other entry points and every fold guard of M6, M7 and of the V-phase code of M9 are unchanged.
 

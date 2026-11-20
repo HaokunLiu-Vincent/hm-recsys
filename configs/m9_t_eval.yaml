@@ -1,0 +1,49 @@
+# Stage 2, step 4 (M9): the single evaluation on T1-T4 (proposal §16.12).
+# Read by hmrec.config.load_t_eval_config.
+#
+# WRITTEN AND COMMITTED BEFORE ANY RUN OF THIS EVALUATION (2026-11-20).
+# T1-T4 is the final test set, not a second validation set: ONLY the configuration chosen
+# on V1-V4 is evaluated here, once, and the result is reported only. It is never used to
+# select or change anything. DO NOT CHANGE this file after the rehearsal: T labels are read
+# only at the commit of a passed rehearsal (hmrec.t_eval.gate), and nothing may be changed
+# after the T result is seen.
+#
+# This file replaces the seven-arm plan of commit c2abcb7, which was narrowed before any
+# T label was read for this step (docs/decisions.md, 2026-11-20).
+
+phase: T
+target_folds: [T1, T2, T3, T4]
+seeds: [42, 43, 44]
+
+# The rehearsal: the new code path predicts this V fold for every seed above (training
+# folds F4 V1 V2 V3). It reads no label of a T fold. Every result must be bit-identical
+# to the V4 record of the configuration and seed (results/deepfm_metrics.csv and the
+# saved files of the V-phase trials).
+rehearsal:
+  target_fold: V4
+
+# The chosen configuration: DeepFM with the standardised numeric input and the listwise
+# loss. Chosen on V as the DeepFM arm with the highest seed-mean pooled MAP@12 among the
+# six arms, after the input-representation extension (proposal §16.11). It is a choice
+# made on V, not an outcome of the one-factor selection rule of proposal §16.5.
+deepfm:
+  arm: deepfm_standardised_listwise
+  numeric_input: standardised
+  # The standardised input does not use n_bins, but n_bins is part of a configuration id.
+  n_bins: 32
+  loss: listwise_softmax
+  learning_rate: 0.001
+  embedding_dim: 16
+  dropout: 0.0
+  components: full
+  epochs: 1                      # T = 1, with its full cosine schedule
+  # The configuration id the arm has in results/deepfm_*.csv on V. The code computes the
+  # id of the configuration above and refuses to run if it is another one.
+  config_id: f8811fb59b79
+
+# LightGBM lambdarank is NOT trained here: it is the M8 record on T1-T4, read only
+# (results/t_phase*.csv; per-query values under artifacts/predictions/t_phase/full/).
+m8_record:
+  arm: lgb_lambdarank
+  seed: 42
+  num_trees: 500
