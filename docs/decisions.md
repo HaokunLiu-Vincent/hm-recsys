@@ -1326,3 +1326,28 @@ All runs are from committed code on a clean working tree (the 44 trainings and t
   - The comparison checks that the saved per-query values of M8 give the recorded MAP@12 of every T week (`results/t_phase_metrics.csv`, tolerance 1e-12) before it uses them.
   - The query groups are not computed on T. The standardised input is not cached (as on V).
 - **Limitations.** As on V: T = 1 and the learning rate, embedding dimension and dropout were tuned for the 32-bin pointwise arm only; the seed variation excludes negative sampling. One seed for LightGBM lambdarank on T. The chosen configuration was picked on V among six arms, so its V value is optimistically biased as a V estimate.
+
+## 2026-11-20 M9 step 4: the single evaluation on T1–T4 of the configuration chosen on V: results (report only)
+
+The evaluation recorded in the entry above was run once. Code, rehearsal, formal run and comparison are all at commit `db8e9c7` on a clean working tree, device CPU, 6 threads. **Nothing is selected or changed with these numbers, and nothing may be changed now that they are seen.** The M8 code and records, the diagnostics code and records, the lock files and every earlier result table are unchanged. The numbers are recorded without an interpretation of their cause.
+
+- **Rehearsal** (V4 as the target week, seeds 42, 43, 44; no T label read): **passed**, 12 of 12 checks (`results/m9_t_rehearsal_check.csv`, checked at 2026-11-20T15:54:57). For every seed: recorded at HEAD on a clean tree; the number of queries (72,035), MAP@12, Recall@12, NDCG@12 and the mean training loss equal the V4 record (float64 `==`): MAP@12 0.034552 / 0.034511 / 0.035079; all 864,420 saved Top-12 rows equal with their scores; all 72,035 per-query rows equal.
+- **Read of T labels** (`results/m9_t_label_access.csv`, one row): event `t_labels_read_for_m9_evaluation`, recorded at 2026-11-20T15:55:13, purpose "single evaluation on T1-T4 of the DeepFM configuration chosen on V (reported only)", script `scripts/m9_t_eval.py`, commit `db8e9c7d2775baf04d2d39ea1f9387a4c0ecdbda`, clean tree, rehearsal of the same commit. The run was not interrupted.
+- **MAP@12 on T1–T4** (DeepFM standardised listwise, `f8811fb59b79`, T = 1; LightGBM lambdarank = the M8 record, 500 trees, seed 42; pooled = all 297,078 queries):
+
+  | Model | Seed | MAP@12 T1 | MAP@12 T2 | MAP@12 T3 | MAP@12 T4 | MAP@12 pooled |
+  |---|---|---|---|---|---|---|
+  | DeepFM | 42 | 0.035494 | 0.040229 | 0.039568 | 0.042256 | 0.039260 |
+  | DeepFM | 43 | 0.035674 | 0.040465 | 0.039577 | 0.042591 | 0.039449 |
+  | DeepFM | 44 | 0.035238 | 0.040335 | 0.039720 | 0.042505 | 0.039313 |
+  | DeepFM | mean | 0.035468 | 0.040343 | 0.039622 | 0.042451 | **0.039341** |
+  | LightGBM lambdarank (M8) | 42 | 0.034960 | 0.040270 | 0.039673 | 0.042435 | **0.039194** |
+
+  DeepFM pooled MAP@12 over the three seeds: sample standard deviation 0.000097, range 0.4807%. Seed means of DeepFM: Recall@12 0.087564, NDCG@12 0.060095. The M8 record: Recall@12 0.087135, NDCG@12 0.059852.
+- **Paired customer-level bootstrap on T** (1,000 replicates, seed 42, 95%; 233,174 customers, 297,078 queries; difference of pooled MAP@12): DeepFM (seed mean) − LightGBM lambdarank **+0.000147 [−0.000059, +0.000334]**. On the basis "seed 42 of both": +0.000067 [−0.000139, +0.000273].
+- **V and T side by side** (pooled MAP@12): DeepFM, seed mean: V 0.032765, T 0.039341. LightGBM lambdarank, seed 42: V 0.032713, T 0.039194 (its three-seed mean on V: 0.032701).
+- **The saved per-query values of M8** give the recorded MAP@12 of every T week (`results/t_phase_metrics.csv`, tolerance 1e-12).
+- **Cost.** Rehearsal: 3 trainings, 397 s wall clock, true peaks 10.72 / 9.24 / 8.50 GB. Formal run: 12 trainings, 1,563 s wall clock (sum of the processes 1,530 s), true peaks 8.98–10.29 GB. Comparison: 4 s. **Highest true peak of the step: 10.72 GB** (rehearsal, seed 42); limit 12 GB. No loss was NaN (mean training loss 3.4174–3.5468) and no stop condition applied.
+- **Not tested on T, as recorded**: the effects of the input representation and of the loss; the other five DeepFM arms and LightGBM binary were not run on T.
+- **Limitations, as recorded.** One seed for LightGBM lambdarank on T; T = 1 and the other DeepFM settings were tuned for the 32-bin pointwise arm; the seed variation excludes negative sampling; the configuration was chosen on V among six arms.
+- **Deviation in the order of work.** The first attempt at this step (seven arms) was stopped by the user before any run; its uncommitted code is in the git stash "abandoned step 4, seven arms". The door refactor of `deepfm/trial.py` and the modules `eval/t_eval_labels.py` and `t_eval/gate.py` of this step were taken from that draft and adapted to one configuration; the other modules were written again.

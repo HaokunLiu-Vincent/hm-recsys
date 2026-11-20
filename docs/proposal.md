@@ -1635,3 +1635,23 @@ Tables: `results/m9_ext_arms.csv`, `results/m9_ext_contrasts.csv`, `results/m9_e
 **A third entry point for T labels** (besides §10.1 and §10.2): `src/hmrec/eval/t_eval_labels.py` with a `TEvalPermit` that only `src/hmrec/t_eval/gate.py` creates; only `src/hmrec/t_eval/` and `scripts/m9_t_*.py` may import it (`tests/unit/test_t_eval_code_rules.py`). The other entry points and every fold guard of M6, M7 and of the V-phase code of M9 are unchanged.
 
 **Stop conditions.** The rehearsal fails; a loss becomes NaN or a training diverges; a true memory peak above 12 GB; any check or test fails.
+
+### 16.13 Result of the evaluation on T1–T4 (2026-11-20; report only)
+
+Run once at commit `db8e9c7`; tables `results/m9_t_*.csv`; the full record is the results entry of 2026-11-20 in `docs/decisions.md`. Nothing is selected or changed with these numbers. They are recorded without an interpretation of their cause.
+
+- Rehearsal on V4 (seeds 42, 43, 44): passed, 12 of 12 checks bit-identical to the V4 records. T labels were read once, recorded at 2026-11-20T15:55:13 (`results/m9_t_label_access.csv`).
+
+| Model | Seed | MAP@12 T1 | MAP@12 T2 | MAP@12 T3 | MAP@12 T4 | MAP@12 pooled |
+|---|---|---|---|---|---|---|
+| DeepFM standardised listwise | 42 | 0.035494 | 0.040229 | 0.039568 | 0.042256 | 0.039260 |
+| DeepFM standardised listwise | 43 | 0.035674 | 0.040465 | 0.039577 | 0.042591 | 0.039449 |
+| DeepFM standardised listwise | 44 | 0.035238 | 0.040335 | 0.039720 | 0.042505 | 0.039313 |
+| DeepFM standardised listwise | mean | 0.035468 | 0.040343 | 0.039622 | 0.042451 | 0.039341 |
+| LightGBM lambdarank (M8 record) | 42 | 0.034960 | 0.040270 | 0.039673 | 0.042435 | 0.039194 |
+
+- DeepFM pooled MAP@12 over the seeds: standard deviation 0.000097, range 0.4807%; Recall@12 0.087564 and NDCG@12 0.060095 (seed means). M8 record: Recall@12 0.087135, NDCG@12 0.059852.
+- Paired customer-level bootstrap (§10.2; 95%): DeepFM (seed mean) − LightGBM lambdarank on T, pooled MAP@12: +0.000147 [−0.000059, +0.000334].
+- V and T, pooled MAP@12: DeepFM (seed mean) 0.032765 → 0.039341; LightGBM lambdarank (seed 42) 0.032713 → 0.039194.
+- Highest true memory peak 10.72 GB; no NaN loss; no stop condition applied.
+- The effects of the input representation and of the loss were not tested on T (§16.12).
