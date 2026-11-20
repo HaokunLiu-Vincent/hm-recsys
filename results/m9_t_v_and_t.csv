@@ -1,0 +1,4 @@
+arm,metric,v_basis,v_n_seeds,v_value,t_basis,t_n_seeds,t_value,git_commit,git_dirty,finished_at
+deepfm_standardised_listwise,map@12,seed_mean,3,0.03276531692117731,seed_mean,3,0.039340757886831945,db8e9c7d2775baf04d2d39ea1f9387a4c0ecdbda,False,2026-11-20T16:21:33
+lgb_lambdarank,map@12,seed_42,1,0.032712644875495474,seed_42,1,0.039193596845611765,db8e9c7d2775baf04d2d39ea1f9387a4c0ecdbda,False,2026-11-20T16:21:33
+lgb_lambdarank,map@12,seed_mean,3,0.032701317354008635,seed_42,1,0.039193596845611765,db8e9c7d2775baf04d2d39ea1f9387a4c0ecdbda,False,2026-11-20T16:21:33

@@ -1,0 +1,7 @@
+first_arm,second_arm,basis,metric,quantity,estimate,ci_low,ci_high,confidence_level,n_replicates,bootstrap_seed,n_customers,n_queries,git_commit,git_dirty,finished_at
+deepfm_standardised_listwise,lgb_lambdarank,seed_42,map@12,first,0.039260300937620764,0.03871808812512983,0.039794510965018286,0.95,1000,42,233174,297078,db8e9c7d2775baf04d2d39ea1f9387a4c0ecdbda,False,2026-11-20T16:21:33
+deepfm_standardised_listwise,lgb_lambdarank,seed_42,map@12,second,0.039193596845611765,0.03867204860725157,0.03972054000101793,0.95,1000,42,233174,297078,db8e9c7d2775baf04d2d39ea1f9387a4c0ecdbda,False,2026-11-20T16:21:33
+deepfm_standardised_listwise,lgb_lambdarank,seed_42,map@12,difference,6.67040920089984e-05,-0.0001385257992478921,0.0002730772448555119,0.95,1000,42,233174,297078,db8e9c7d2775baf04d2d39ea1f9387a4c0ecdbda,False,2026-11-20T16:21:33
+deepfm_standardised_listwise,lgb_lambdarank,seed_mean,map@12,first,0.039340757886831945,0.038789276054923966,0.039873315567432746,0.95,1000,42,233174,297078,db8e9c7d2775baf04d2d39ea1f9387a4c0ecdbda,False,2026-11-20T16:21:33
+deepfm_standardised_listwise,lgb_lambdarank,seed_mean,map@12,second,0.039193596845611765,0.03867204860725157,0.03972054000101793,0.95,1000,42,233174,297078,db8e9c7d2775baf04d2d39ea1f9387a4c0ecdbda,False,2026-11-20T16:21:33
+deepfm_standardised_listwise,lgb_lambdarank,seed_mean,map@12,difference,0.00014716104122017987,-5.906889956535915e-05,0.00033373495611939153,0.95,1000,42,233174,297078,db8e9c7d2775baf04d2d39ea1f9387a4c0ecdbda,False,2026-11-20T16:21:33
