@@ -1592,3 +1592,23 @@ How: the peak was the scoring of one chunk of 262,144 rows (the [rows, fields, d
 **Code added.** `src/hmrec/deepfm/extension.py` with `scripts/m9_deepfm_extension.py` (the runs); `scripts/m9_deepfm_compare.py --extension` (the eight-arm tables); `src/hmrec/deepfm/rescore.py` with `scripts/m9_deepfm_rescore.py` (the check above); `--n-bins` of `scripts/m9_deepfm_trial.py`.
 
 **T phase (replaces rule 10 of §16.8; implemented later).** One evaluation on T1–T4 of LightGBM binary and all six DeepFM arms, seeds 42, 43, 44, reported only and never used to select anything. LightGBM lambdarank with seed 42 on T is the M8 record and is not rerun.
+
+### 16.11 Results of the extension on V1–V4 (2026-11-20; report only)
+
+Tables: `results/m9_ext_arms.csv`, `results/m9_ext_contrasts.csv`, `results/m9_ext_groups.csv`; the full record is the results entry of 2026-11-20 in `docs/decisions.md`. Nothing was tuned or selected, the locked system is unchanged, and no T data was read. The numbers are recorded without an interpretation of their cause.
+
+| Arm | Numeric input | Loss | Pooled MAP@12 (seeds 42 / 43 / 44) | Mean | Std | Range |
+|---|---|---|---|---|---|---|
+| LightGBM lambdarank | LightGBM bins | listwise | 0.032713 / 0.032691 / 0.032701 | 0.032701 | 0.000011 | 0.0675% |
+| LightGBM binary | LightGBM bins | pointwise | 0.032183 / 0.032270 / 0.032256 | 0.032236 | 0.000047 | 0.2702% |
+| DeepFM listwise | 32 bins | listwise | 0.031563 / 0.031557 / 0.031580 | 0.031566 | 0.000012 | 0.0728% |
+| DeepFM pointwise | 32 bins | pointwise | 0.031164 / 0.031215 / 0.031043 | 0.031141 | 0.000088 | 0.5526% |
+| E2 | 255 bins | listwise | 0.030540 / 0.030297 / 0.030381 | 0.030406 | 0.000123 | 0.8022% |
+| E1 | 255 bins | pointwise | 0.029945 / 0.029947 / 0.029888 | 0.029927 | 0.000034 | 0.1986% |
+| E4 | standardised | listwise | 0.032738 / 0.032739 / 0.032818 | 0.032765 | 0.000046 | 0.2450% |
+| E3 | standardised | pointwise | 0.032283 / 0.032257 / 0.032189 | 0.032243 | 0.000048 | 0.2912% |
+
+- Paired bootstrap on the seed mean (95%): standardised − 32 bins: pointwise +0.001103 [+0.000952, +0.001261], listwise +0.001199 [+0.001035, +0.001367]; 255 bins − 32 bins: pointwise −0.001214 [−0.001385, −0.001047], listwise −0.001160 [−0.001336, −0.000989]; DeepFM standardised pointwise − LightGBM binary +0.000007 [−0.000142, +0.000165]; DeepFM standardised listwise − LightGBM lambdarank +0.000064 [−0.000104, +0.000238].
+- E3 with seed 42 is the ablation run of §16.9 and was not repeated; the other 44 trainings ran at T = 1 without a NaN loss.
+- Memory of the standardised path with the changes of §16.10: true peak 9.08–11.36 GB over 20 trainings (median 10.75 GB), against 11.38–11.66 GB before. The aim of under 10 GB was not reached; the limit of 12 GB was not exceeded. The rescore check reproduced all saved Top-12 rows of V1–V4 bit for bit.
+- Limitation, as recorded: T is fixed at 1 and nothing is tuned for the new inputs. The T-phase evaluation of §16.10 is not implemented.

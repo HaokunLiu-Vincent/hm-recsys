@@ -1215,3 +1215,48 @@ All runs are from committed code on a clean working tree (LightGBM arms at `32b5
 - **Identical outputs.** Tests on small data: the logits are bit-identical for block sizes 1, 7, 50, … for every component variant with code fields and with value fields (`test_deepfm_model.py`, `test_deepfm_train.py`); in-place standardising gives the same bytes (`test_deepfm_inputs.py`); a whole standardised trial (model file, transform, predictions with their scores, per-query metrics) is identical with one pass and with blocks of 7 rows, for both losses (`test_deepfm_trial.py`). With random arrays of the real shapes (3.05 million rows, the real model sizes) the scores are bit-identical and the peak added by scoring falls from 6.2 GB to 2.6 GB (standardised).
 - **An added check on the real data, before the runs** (the agent's addition): `scripts/m9_deepfm_rescore.py` loads the saved seed-42 model of the standardised ablation (`08775a5d6efb`, trained and scored before these changes), scores all candidates of V1–V4 again with the new code and compares the Top-12 with the saved predictions, bit for bit. It reads no label and writes nothing. If a single row differs, the extension stops.
 - The 255-bin runs use the same scoring code; their encoded inputs are cached as before.
+
+## 2026-11-20 M9 step 3, the input-representation extension on V1–V4: results (report only; no lock file, no T data)
+
+All runs are from committed code on a clean working tree (the 44 trainings and the rescore check at `1310ae3`, the eight-arm comparison at `6126ba0`), device CPU, 6 threads, V1–V4 only. Nothing was tuned or selected; `configs/locks/`, the 2×2 tables (`results/m9_arms.csv`, `results/m9_contrasts.csv`, `results/m9_groups.csv`, `results/deepfm_study.csv`, `results/m9_lgb_*.csv`) and `results/v_phase*.csv`, `results/t_phase*.csv`, `results/m8_*.csv` are unchanged. The numbers below are recorded without an interpretation of their cause.
+
+- **Rescore check before the runs** (`scripts/m9_deepfm_rescore.py`, configuration `08775a5d6efb`, seed 42, the model trained and scored before the memory changes): V1–V4 all OK. Candidate rows scored again: 25,226,147 / 22,935,793 / 21,965,434 / 22,293,247; saved Top-12 rows compared: 993,624 / 897,996 / 853,128 / 864,420; rows that differ: 0; largest score difference: 0.0. True peak of the scoring-only process: 8.24 / 8.10 / 8.42 / 8.32 GB.
+- **Runs.** 44 trainings: E1 (`a2c85d468c6a`) 12, E2 (`c5330af47be1`) 12, E3 (`08775a5d6efb`) 8, E4 (`f8811fb59b79`) 12. The 4 trainings of E3 with seed 42 are the ablation runs of the 2×2 study (same configuration id, trained at `4cd83c0`) and were not repeated. No loss was NaN (mean training loss per run: pointwise 0.1052–0.1063, listwise 3.5615–3.5997) and no stop condition applied.
+- **The eight arms (pooled MAP@12 on V1–V4; seeds 42 / 43 / 44; mean; sample standard deviation; range; Recall@12 and NDCG@12 as seed means)**. The first four rows are the 2×2 records and were not rerun.
+
+  | Arm | Numeric input | Loss | Seed 42 | Seed 43 | Seed 44 | Mean | Std | Range | Recall@12 | NDCG@12 |
+  |---|---|---|---|---|---|---|---|---|---|---|
+  | LightGBM lambdarank | LightGBM bins | listwise | 0.032713 | 0.032691 | 0.032701 | 0.032701 | 0.000011 | 0.0675% | 0.073117 | 0.050887 |
+  | LightGBM binary | LightGBM bins | pointwise | 0.032183 | 0.032270 | 0.032256 | 0.032236 | 0.000047 | 0.2702% | 0.072060 | 0.050226 |
+  | DeepFM listwise | 32 bins | listwise | 0.031563 | 0.031557 | 0.031580 | 0.031566 | 0.000012 | 0.0728% | 0.071081 | 0.049342 |
+  | DeepFM pointwise | 32 bins | pointwise | 0.031164 | 0.031215 | 0.031043 | 0.031141 | 0.000088 | 0.5526% | 0.070221 | 0.048768 |
+  | E2 `deepfm_bins255_listwise` | 255 bins | listwise | 0.030540 | 0.030297 | 0.030381 | 0.030406 | 0.000123 | 0.8022% | 0.068858 | 0.047598 |
+  | E1 `deepfm_bins255_pointwise` | 255 bins | pointwise | 0.029945 | 0.029947 | 0.029888 | 0.029927 | 0.000034 | 0.1986% | 0.068063 | 0.046990 |
+  | E4 `deepfm_standardised_listwise` | standardised | listwise | 0.032738 | 0.032739 | 0.032818 | 0.032765 | 0.000046 | 0.2450% | 0.073030 | 0.050964 |
+  | E3 `deepfm_standardised_pointwise` | standardised | pointwise | 0.032283 | 0.032257 | 0.032189 | 0.032243 | 0.000048 | 0.2912% | 0.071960 | 0.050237 |
+
+- **Paired customer-level bootstrap (1,000 replicates, seed 42, 95%; difference of pooled MAP@12; 234,382 customers, 300,764 queries)**:
+
+  | Contrast | Seed 42 | Seed mean |
+  |---|---|---|
+  | standardised − 32 bins, pointwise | +0.001119 [+0.000931, +0.001309] | +0.001103 [+0.000952, +0.001261] |
+  | standardised − 32 bins, listwise | +0.001176 [+0.000987, +0.001365] | +0.001199 [+0.001035, +0.001367] |
+  | 255 bins − 32 bins, pointwise | −0.001219 [−0.001422, −0.001008] | −0.001214 [−0.001385, −0.001047] |
+  | 255 bins − 32 bins, listwise | −0.001022 [−0.001237, −0.000813] | −0.001160 [−0.001336, −0.000989] |
+  | DeepFM standardised pointwise − LightGBM binary | +0.000100 [−0.000079, +0.000296] | +0.000007 [−0.000142, +0.000165] |
+  | DeepFM standardised listwise − LightGBM lambdarank | +0.000026 [−0.000149, +0.000210] | +0.000064 [−0.000104, +0.000238] |
+
+- **Query groups (pooled V1–V4, seed mean, MAP@12)**:
+
+  | Group | Queries | Share | 255 bins pointwise | 255 bins listwise | Standardised pointwise | Standardised listwise | LightGBM lambdarank | LightGBM binary | 32 bins listwise | 32 bins pointwise |
+  |---|---|---|---|---|---|---|---|---|---|---|
+  | No history | 20,257 | 6.74% | 0.006849 | 0.006801 | 0.006768 | 0.007369 | 0.007947 | 0.008298 | 0.006897 | 0.006939 |
+  | Purchase in the last 30 days | 144,999 | 48.21% | 0.044498 | 0.045020 | 0.047337 | 0.047824 | 0.047688 | 0.047126 | 0.046399 | 0.046003 |
+  | Other | 135,508 | 45.05% | 0.017784 | 0.018298 | 0.019900 | 0.020449 | 0.020365 | 0.019883 | 0.019383 | 0.018855 |
+
+  Per week and for seed 42: `results/m9_ext_groups.csv`.
+- **Independent check** (`scripts/checks/check_deepfm_eval.py`, T = 1): all 48 trials of the four new arms (4 configurations × 3 seeds × V1–V4) OK, largest absolute difference 2.7e-16 (tolerance 1e-12).
+- **Memory of the standardised path.** True peak of a whole trial process with the new code (20 trainings of E3 and E4): lowest 9.08 GB, median 10.75 GB, highest **11.36 GB**; 2 of the 20 are under 10 GB. Before the change (the 4 ablation runs of seed 42): 11.38–11.66 GB. **The aim of under 10 GB was not reached**; no peak was above the limit of 12 GB, so the runs went ahead as recorded. The scoring-only process of the rescore check peaks at 8.10–8.42 GB. The 255-bin runs peak at 4.26–7.58 GB (6.98–7.58 GB in the four runs that built the input cache, at most 4.80 GB in the other 20).
+- **Cost.** Rescore check: 4 processes, 209 s. Extension: 44 trainings, 4,839 s wall clock (sum of the trial processes 4,736 s: E1 1,279 s, E2 906 s, E3 1,023 s, E4 1,528 s). Eight-arm comparison: 25 s, true peak 1.36 GB.
+- **Limitations (as recorded before the run).** T is fixed at 1; the learning rate, embedding dimension and dropout are those kept for the 32-bin pointwise arm and are not tuned for the new inputs; the seed variation excludes negative sampling and bin boundaries.
+- **Not done.** The T-phase evaluation (LightGBM binary and the six DeepFM arms) is recorded in the entry "M9 step 3: an input-representation extension" above and is not implemented.
