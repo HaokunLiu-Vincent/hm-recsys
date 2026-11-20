@@ -1142,3 +1142,42 @@ Everything below was settled **before the features of any week were generated**.
   - The grid-edge flag (no extension) also applies to T ∈ {1, 2, 3} and to k* of Arm 2.
   - The input cache is written for the binned input only: the standardised input is used by one ablation, once per week, so a cache of it would never be read.
   - A recorded training satisfies a requested one only if it ran on the configured device (the device is part of the lookup).
+
+## 2026-11-20 M9 2×2 study on V1–V4: results (report only; no lock file, no T data)
+
+All runs are from committed code on a clean working tree (LightGBM arms at `32b5ade`, DeepFM step 0 at `41f8517`, the rest of the DeepFM study at `4cd83c0`, the comparison at `25672e4`), device CPU, 6 threads, V1–V4 only. Nothing was selected for the locked system; `configs/locks/` and `results/v_phase*.csv`, `results/t_phase*.csv`, `results/m8_*.csv` are unchanged.
+
+- **LightGBM randomness.** The locked parameters that make training random are `feature_fraction: 0.8` and `bagging_fraction: 0.8` with `bagging_freq: 1`. The seed was set through `seed` only. For every week the first trees of the lambdarank models of seeds 43 and 44 differ from the M7 model of seed 42. Sampling seed 42 and the M7 binary Datasets (bins of seed 42) were used by all arms, so the seed variation excludes sampling and bin boundaries.
+- **Arm 2 (LightGBM, binary), seed 42, pooled MAP@12 at 100 … 1,000 trees**: 0.030783, 0.031432, 0.031766, 0.032016, 0.032183, 0.032332, 0.032372, 0.032374, 0.032439, 0.032500. Number-of-trees rule (1%): **k\* = 500** (best at 1,000; k\* is not on the grid edge).
+- **Step 0 (Arm 4, default configuration, seeds 42, 43, 44), seed-mean pooled MAP@12**: T = 1: 0.031141; T = 2: 0.030921; T = 3: 0.030556. Epoch rule: **T = 1** (on the grid edge, flagged). 3-seed range at T = 1: **0.5526%** (at T = 2: 1.1424%; at T = 3: 0.7491%). Below 1%, so **tuning used seed 42** (first branch of the noise rule). The seed mean is above the RRF baseline 0.019419. The hypothesis recorded before the run is neither confirmed nor refuted here beyond these numbers.
+- **Arm 4 tuning (seed 42; change relative to the current default 0.031164; weeks better of 4).**
+  - Learning rate (pooled at T = 1 / 2 / 3 → T by the epoch rule): 1e-3: 0.031164 / 0.031063 / 0.030630 → T = 1; 3e-4: 0.030202 / 0.031291 / 0.031545 → T = 2, 0.031291, +0.41%, 4 weeks; 3e-3: 0.030744 / 0.030535 / 0.030112 → T = 1, 0.030744, −1.35%, 0 weeks. No candidate passes the selection rule: **1e-3, T = 1 kept**.
+  - Embedding dimension (T = 1): 8: 0.031100, −0.21%, 2 weeks; 32: 0.031077, −0.28%, 2 weeks. **16 kept.**
+  - Dropout (T = 1): 0.1: 0.031049, −0.37%, 1 week; 0.3: 0.030875, −0.93%, 1 week. **0.0 kept** (on the grid edge, flagged).
+  - Selected Arm 4 configuration = the default (`3cb19c17461b`, T = 1).
+- **Arm 3 learning rate (seed 42, embedding dimension 16, dropout 0; pooled at T = 1 / 2 / 3)**: 1e-3: 0.031563 / 0.031239 / 0.030709 → T = 1; 3e-4: 0.030696 / 0.031672 / 0.031803 → T = 2, 0.031672, +0.35%, 3 weeks; 3e-3: 0.030617 / 0.030306 / 0.029742 → T = 1, 0.030617, −3.00%, 0 weeks. No candidate passes: **1e-3, T = 1 kept** (`19ba76cfd205`; T on the grid edge, flagged).
+- **The four arms (pooled MAP@12 on V1–V4; seeds 42 / 43 / 44; mean; sample standard deviation; range)**:
+
+  | Arm | Selected | Seed 42 | Seed 43 | Seed 44 | Mean | Std | Range | Recall@12 (mean) | NDCG@12 (mean) |
+  |---|---|---|---|---|---|---|---|---|---|
+  | LightGBM lambdarank | 500 trees (locked) | 0.032713 | 0.032691 | 0.032701 | 0.032701 | 0.000011 | 0.0675% | 0.073117 | 0.050887 |
+  | LightGBM binary | k\* = 500 | 0.032183 | 0.032270 | 0.032256 | 0.032236 | 0.000047 | 0.2702% | 0.072060 | 0.050226 |
+  | DeepFM listwise | T = 1 | 0.031563 | 0.031557 | 0.031580 | 0.031566 | 0.000012 | 0.0728% | 0.071081 | 0.049342 |
+  | DeepFM pointwise | T = 1 | 0.031164 | 0.031215 | 0.031043 | 0.031141 | 0.000088 | 0.5526% | 0.070221 | 0.048768 |
+
+  Seed 42 of LightGBM lambdarank is the M7 record and was not rerun.
+- **Ablations (Arm 4 configuration, T = 1, seed 42; change relative to 0.031164; the default's 3-seed range is 0.5526%)**: `first_order` 0.028557 (−8.36%); `fm` 0.030362 (−2.57%); `deep` 0.030426 (−2.37%); numeric input `standardised` 0.032283 (+3.59%; −1.31% relative to LightGBM lambdarank seed 42). No difference is within seed noise. The ablations select nothing.
+- **Paired customer-level bootstrap (1,000 replicates, seed 42, 95%; difference of pooled MAP@12)**:
+
+  | Contrast | Seed 42 | Seed mean |
+  |---|---|---|
+  | DeepFM pointwise − LightGBM lambdarank | −0.001549 [−0.001757, −0.001352] | −0.001561 [−0.001750, −0.001399] |
+  | DeepFM listwise − LightGBM lambdarank | −0.001150 [−0.001356, −0.000961] | −0.001135 [−0.001313, −0.000972] |
+  | LightGBM lambdarank − LightGBM binary | +0.000529 [+0.000376, +0.000695] | +0.000465 [+0.000330, +0.000596] |
+  | DeepFM listwise − DeepFM pointwise | +0.000399 [+0.000215, +0.000588] | +0.000426 [+0.000300, +0.000566] |
+
+- **Query groups (pooled V1–V4, seed mean, MAP@12; LightGBM lambdarank / LightGBM binary / DeepFM listwise / DeepFM pointwise)**: no history (20,257 queries, 6.74%): 0.007947 / 0.008298 / 0.006897 / 0.006939; purchase in the last 30 days (144,999, 48.21%): 0.047688 / 0.047126 / 0.046399 / 0.046003; other (135,508, 45.05%): 0.020365 / 0.019883 / 0.019383 / 0.018855. Per week and for seed 42: `results/m9_groups.csv`.
+- **Independent check** (`scripts/checks/check_deepfm_eval.py`, configuration `3cb19c17461b`, seed 42, T = 1): V1–V4 all OK, largest absolute difference 9.0e-17 (tolerance 1e-12).
+- **Cost.** LightGBM arms: 20 trainings, 5,323 s, highest true peak 3.99 GB. DeepFM: 136 trainings (36 of step 0), 15,231 s, highest true peak **11.66 GB** (the `standardised` ablation, V2; limit 12 GB); without that ablation 9.47 GB (embedding dimension 32). No loss was NaN and no stop condition applied.
+- **Limitations (as recorded before the run).** T is not re-tuned after the learning-rate step; Arm 3 uses the embedding dimension and dropout tuned for Arm 4; the seed variation excludes negative sampling and bin boundaries; the ablations and the tuning steps are single-seed (seed 42).
+- **Not done.** The T-phase evaluation of the three new arms is recorded in the 2026-11-20 revision entry and is not implemented.

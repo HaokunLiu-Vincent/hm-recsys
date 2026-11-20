@@ -1548,3 +1548,20 @@ All comparisons and selections are on V1–V4, with the pooled MAP@12 (weighted 
 **Outputs added.** `results/m9_lgb_trials.csv`, `results/m9_lgb_metrics.csv` (LightGBM arms; nothing is appended to `results/v_phase*.csv`); `results/deepfm_study.csv` (what the rules decided); `results/m9_arms.csv`, `results/m9_contrasts.csv`, `results/m9_groups.csv` (the comparison). A cosine run has its own configuration id (it includes the schedule and T), so its rows do not mix with the step-0 rows of 2026-11-19.
 
 **Code added.** `src/hmrec/hpo/lgb_arms.py` with `scripts/m9_lgb_trial.py` and `scripts/m9_lgb_comparison.py` (LightGBM side: the configuration comes from `ranker/locked.py`, the fold guard and the evaluator are M7's); `src/hmrec/deepfm/cache.py`, `study.py`, `study_run.py`, `compare.py` (torch side).
+
+### 16.9 Results of the 2×2 study on V1–V4 (2026-11-20; report only)
+
+Tables: `results/m9_arms.csv`, `results/m9_contrasts.csv`, `results/m9_groups.csv`, `results/deepfm_study.csv`, `results/m9_lgb_*.csv`; the full record is the entry of 2026-11-20 in `docs/decisions.md`. Nothing here changes the locked system, and no T data was read.
+
+| Arm | Selected | Pooled MAP@12 (seeds 42 / 43 / 44) | Mean | Std | Range |
+|---|---|---|---|---|---|
+| LightGBM lambdarank (Arm 1) | 500 trees (locked) | 0.032713 / 0.032691 / 0.032701 | 0.032701 | 0.000011 | 0.0675% |
+| LightGBM binary (Arm 2) | k\* = 500 | 0.032183 / 0.032270 / 0.032256 | 0.032236 | 0.000047 | 0.2702% |
+| DeepFM listwise (Arm 3) | 1e-3, T = 1 | 0.031563 / 0.031557 / 0.031580 | 0.031566 | 0.000012 | 0.0728% |
+| DeepFM pointwise (Arm 4) | default, T = 1 | 0.031164 / 0.031215 / 0.031043 | 0.031141 | 0.000088 | 0.5526% |
+
+- Step 0: seed-mean pooled MAP@12 0.031141 (T = 1), 0.030921 (T = 2), 0.030556 (T = 3); T = 1 selected; 3-seed range 0.5526%, so tuning used seed 42.
+- No tuning candidate of either DeepFM arm passed the selection rule of §4.2; both arms keep learning rate 1e-3, embedding dimension 16, dropout 0. Values on a grid edge (flagged, not extended): T = 1 and dropout 0.
+- Paired bootstrap on the seed mean (95%): DeepFM pointwise − LightGBM lambdarank −0.001561 [−0.001750, −0.001399]; DeepFM listwise − LightGBM lambdarank −0.001135 [−0.001313, −0.000972]; LightGBM lambdarank − LightGBM binary +0.000465 [+0.000330, +0.000596]; DeepFM listwise − DeepFM pointwise +0.000426 [+0.000300, +0.000566].
+- Ablations at the Arm 4 configuration (seed 42, relative to 0.031164): `first_order` −8.36%, `fm` −2.57%, `deep` −2.37%, numeric input `standardised` +3.59%; none is within the 3-seed range.
+- The T-phase evaluation of rule 10 of §16.8 is not implemented.
