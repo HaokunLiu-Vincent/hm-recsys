@@ -1,0 +1,34 @@
+# Kaggle late submission of the DeepFM configuration chosen in stage 2
+# (docs/decisions.md 2026-11-20). Read by hmrec.config.load_kaggle_deepfm_config.
+#
+# WRITTEN AND COMMITTED BEFORE ANY RUN. One submission, of one model, with one seed.
+# Whatever the score is, nothing is changed and nothing else is submitted.
+#
+# The submission week, the shards and the rehearsal's customers are the ones of
+# configs/kaggle_submission.yaml; the candidates and features are the files the LightGBM
+# submission wrote under artifacts/kaggle/. Nothing is regenerated.
+
+# The training seed of the one model.
+seed: 42
+
+# The ranker: the DeepFM configuration chosen on V. Its settings are read from
+# configs/m9_t_eval.yaml; this is its configuration id, and the code refuses to train a
+# configuration with another id.
+config_id: f8811fb59b79
+
+rehearsal:
+  # The area of the stage-2 evaluation's records (results/m9_t_metrics.csv, files under
+  # artifacts/deepfm/{area}/): the rehearsal on T4 is compared with its record of T4 and
+  # the seed above (training loss equal; Top-12 lists identical for at least the share
+  # rehearsal.min_identical_top12_share of configs/kaggle_submission.yaml).
+  reference_area: m9_t
+
+# How the result is read (fixed before the score exists): against the LightGBM submission.
+# With d = (DeepFM Private - lightgbm_private_score) / lightgbm_private_score:
+#   |d| <  same_below_relative_difference  ->  "cannot be told apart on this week"
+#   |d| >= same_below_relative_difference  ->  "a difference on a single week"
+# No interval is available: one week, one seed.
+reading:
+  lightgbm_private_score: 0.03600
+  lightgbm_public_score: 0.03548
+  same_below_relative_difference: 0.01
