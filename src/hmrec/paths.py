@@ -635,6 +635,11 @@ class ProjectPaths:
         return self.configs_dir / "hpo" / "deepfm.yaml"
 
     @property
+    def deepfm_extension_config_file(self) -> Path:
+        """configs/hpo/deepfm_extension.yaml: the runs of the input-representation extension."""
+        return self.configs_dir / "hpo" / "deepfm_extension.yaml"
+
+    @property
     def deepfm_dir(self) -> Path:
         """artifacts/deepfm/: every file of the DeepFM study."""
         return self.artifacts_root / "deepfm"
@@ -680,6 +685,21 @@ class ProjectPaths:
     def m9_groups_file(self) -> Path:
         """results/m9_groups.csv: MAP@12 of the four arms in the three query groups."""
         return self.results_root / "m9_groups.csv"
+
+    @property
+    def m9_ext_arms_file(self) -> Path:
+        """results/m9_ext_arms.csv: the eight arms of the input-representation extension."""
+        return self.results_root / "m9_ext_arms.csv"
+
+    @property
+    def m9_ext_contrasts_file(self) -> Path:
+        """results/m9_ext_contrasts.csv: bootstrap intervals of the extension's contrasts."""
+        return self.results_root / "m9_ext_contrasts.csv"
+
+    @property
+    def m9_ext_groups_file(self) -> Path:
+        """results/m9_ext_groups.csv: MAP@12 of the eight arms in the three query groups."""
+        return self.results_root / "m9_ext_groups.csv"
 
     @property
     def m9_lgb_trials_file(self) -> Path:

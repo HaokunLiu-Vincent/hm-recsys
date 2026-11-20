@@ -14,7 +14,9 @@ recorded RRF baseline of that fold. One training per process; clean tree only.
 
 The study (scripts/m9_deepfm_study.py) starts this script with the settings of
 one configuration: --learning-rate, --embedding-dim, --dropout, --components,
---numeric-input, --loss and --epochs replace the values of the config.
+--numeric-input, --loss and --epochs replace the values of the config. The
+input-representation extension (scripts/m9_deepfm_extension.py) also passes
+--n-bins, the number of quantile bins of the binned input.
 """
 
 # Thread setup must run before polars is imported (see hmrec.threads).
@@ -39,6 +41,7 @@ from hmrec.deepfm.process import (  # noqa: E402
     speed_test_spec,
     start_process,
     with_epochs,
+    with_n_bins,
     with_seed,
 )
 from hmrec.deepfm.records import read_reference_scores  # noqa: E402
@@ -68,6 +71,7 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--components", choices=DEEPFM_COMPONENTS)
     parser.add_argument("--numeric-input", choices=DEEPFM_NUMERIC_INPUTS)
     parser.add_argument("--loss", choices=DEEPFM_LOSSES)
+    parser.add_argument("--n-bins", type=int, help="quantile bins (default: the config's)")
     return parser.parse_args()
 
 
@@ -86,7 +90,10 @@ def configuration(config: DeepFMConfig, args: argparse.Namespace) -> DeepFMConfi
     values = {
         name: getattr(default, name) if value is None else value for name, value in given.items()
     }
-    return apply_variant(config, Variant(**values))
+    changed = apply_variant(config, Variant(**values))
+    if args.n_bins is None:
+        return changed
+    return with_n_bins(changed, args.n_bins)
 
 
 def main() -> None:

@@ -320,13 +320,30 @@ def encode_categorical(categorical: np.ndarray, sizes: tuple[int, ...]) -> np.nd
     return categorical.astype(CODE_DTYPE)
 
 
-def encode_rows(rows: RawRows, transform: InputTransform) -> EncodedRows:
+def encode_rows(
+    rows: RawRows, transform: InputTransform, reuse_numeric: bool = False
+) -> EncodedRows:
     """Apply a fitted transform to rows (training rows or the target week's candidates).
+
+    Args:
+        rows: The raw feature values.
+        transform: The fitted transform.
+        reuse_numeric: Memory only, and only for the standardised input: write
+            the standardised values INTO `rows.numeric` (column by column, each
+            column is read before it is overwritten) instead of into a new
+            array of the same size. The returned values are the same numbers
+            either way (tests/unit/test_deepfm_inputs.py), but afterwards
+            `rows.numeric` no longer holds the raw values: the caller must not
+            read it again. The binned input never changes `rows`.
 
     Returns:
         Binned: codes uint8 [n, n_numeric + n_categorical] (numeric bins first).
         Standardised: codes uint8 [n, n_categorical], values float32 and missing
         uint8 [n, n_numeric].
+
+    Raises:
+        ValueError: If reuse_numeric is asked for an array that is not a
+            writeable float32 array.
     """
     n_numeric = len(transform.numeric_names)
     categorical = encode_categorical(rows.categorical, transform.categorical_sizes)
@@ -336,7 +353,12 @@ def encode_rows(rows: RawRows, transform: InputTransform) -> EncodedRows:
             codes[:, column] = bin_values(rows.numeric[:, column], transform.edges[column])
         codes[:, n_numeric:] = categorical
         return EncodedRows(codes, None, None)
-    values = np.empty((rows.n_rows, n_numeric), dtype=np.float32)
+    if reuse_numeric:
+        if rows.numeric.dtype != np.float32 or not rows.numeric.flags.writeable:
+            raise ValueError("reuse_numeric needs a writeable float32 array of raw values")
+        values = rows.numeric
+    else:
+        values = np.empty((rows.n_rows, n_numeric), dtype=np.float32)
     missing = np.empty((rows.n_rows, n_numeric), dtype=CODE_DTYPE)
     for column in range(n_numeric):
         values[:, column], missing[:, column] = standardise_values(

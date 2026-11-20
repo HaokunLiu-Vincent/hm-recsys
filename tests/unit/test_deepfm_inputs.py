@@ -149,6 +149,36 @@ def test_standardised_rows_keep_values_and_a_missing_indicator() -> None:
 
 
 @pytest.mark.parametrize("numeric_input", [BINNED, STANDARDISED])
+def test_reusing_the_raw_array_gives_the_same_encoded_rows(numeric_input: str) -> None:
+    # Memory only (proposal §16.10): the standardised values written over the raw
+    # values must be EXACTLY the values written into a new array.
+    transform = _fit(numeric_input)
+    expected = encode_rows(TRAIN, transform)
+    assert np.array_equal(TRAIN.numeric, np.array(TRAIN_NUMERIC, dtype=np.float32), equal_nan=True)
+    consumed = RawRows(TRAIN.numeric.copy(), TRAIN.categorical.copy())
+    reused = encode_rows(consumed, transform, reuse_numeric=True)
+    assert np.array_equal(reused.codes, expected.codes)
+    if numeric_input == BINNED:
+        # The binned input has no value array: the raw values are left as they were.
+        assert reused.values is None and expected.values is None
+        assert np.array_equal(consumed.numeric, TRAIN.numeric, equal_nan=True)
+        return
+    assert reused.values is not None and expected.values is not None
+    assert reused.missing is not None and expected.missing is not None
+    assert reused.values.tobytes() == expected.values.tobytes()
+    assert np.array_equal(reused.missing, expected.missing)
+    # No second array: the returned values ARE the caller's array, now overwritten.
+    assert reused.values is consumed.numeric
+    read_only = TRAIN.numeric.copy()
+    read_only.flags.writeable = False
+    with pytest.raises(ValueError, match="writeable float32"):
+        encode_rows(RawRows(read_only, TRAIN.categorical), transform, reuse_numeric=True)
+    float64 = RawRows(TRAIN.numeric.astype(np.float64), TRAIN.categorical)
+    with pytest.raises(ValueError, match="writeable float32"):
+        encode_rows(float64, transform, reuse_numeric=True)
+
+
+@pytest.mark.parametrize("numeric_input", [BINNED, STANDARDISED])
 def test_target_week_values_never_change_what_was_fitted(numeric_input: str) -> None:
     transform = _fit(numeric_input)
     before = json.dumps([e.tolist() for e in transform.edges] + [transform.mean.tolist()])

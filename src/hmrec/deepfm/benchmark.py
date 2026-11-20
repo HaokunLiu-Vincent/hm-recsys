@@ -115,7 +115,9 @@ def scoring_throughput(inputs: TrialInputs, data: TrainingSet, prepared: Prepare
     model = build_model(prepared.transform.layout, config.model, config.training.seed, device)
     synchronize(device)
     started = time.perf_counter()
-    score_device_rows(model, data.rows, n_rows, config.scoring_rows_per_chunk)
+    score_device_rows(
+        model, data.rows, n_rows, config.scoring_rows_per_chunk, config.scoring_rows_per_block
+    )
     synchronize(device)
     return n_rows / (time.perf_counter() - started)
 

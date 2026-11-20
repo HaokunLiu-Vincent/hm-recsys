@@ -60,7 +60,17 @@ training:
   device: cpu
 
 scoring:
-  rows_per_chunk: 262144       # candidate rows scored per forward pass (memory only)
+  # Candidate rows per forward pass. NOT changed to save memory: the first-order term of
+  # a value field is a matrix-vector product (values @ weights), and its last bits depend
+  # on how many rows one call holds, so another chunk size changes scores by about 1e-7.
+  rows_per_chunk: 262144
+  # Memory only (2026-11-20, proposal §16.10). Inside a forward pass the field embeddings
+  # and the second-order term are built for this many rows at a time: element-wise
+  # operations, so every row's numbers are the same bits whatever the block size
+  # (tests/unit/test_deepfm_model.py). Building them for a whole chunk at once is what the
+  # memory peak was made of (11.66 GB with the standardised input). The MLP and the
+  # first-order term are matrix products and still run once per chunk.
+  rows_per_block: 32768
 
 input_cache:
   # Speed only (proposal §16.8): the encoded inputs of a target week (its training rows

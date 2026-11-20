@@ -1,0 +1,46 @@
+# Stage 2, step 3 (M9): the input-representation extension on V1-V4 (proposal §16.10).
+# Read by hmrec.config.load_deepfm_extension_config.
+#
+# ADDED on 2026-11-20, AFTER the results of the 2x2 study were seen: its seed-42 ablation
+# with the standardised numeric input scored +3.59% relative to the 32-bin default. The
+# hypothesis under test (not an established cause): the 32-bin encoding gives DeepFM a
+# coarser view of the numeric features than LightGBM has (the locked LightGBM uses
+# max_bin 255). This file was committed before any run of the extension.
+#
+# The runs are trained and reported. NOTHING is tuned and NOTHING is selected: not for the
+# main system and not between the runs. V folds only; the code refuses T folds.
+
+phase: V
+target_folds: [V1, V2, V3, V4]
+seeds: [42, 43, 44]
+
+# Fixed for every run: the settings the 2x2 study kept for the 32-bin pointwise arm.
+# LIMITATION: T (epochs) is fixed at 1 and none of these is tuned again for the new inputs.
+learning_rate: 0.001
+embedding_dim: 16
+dropout: 0.0
+components: full
+epochs: 1                      # T = 1, with its full cosine schedule
+
+runs:
+  # binned with 255 bins: the quantile binning of proposal §16.2 with n_bins = 255, plus
+  # the missing bin (256 codes, the most a uint8 code holds).
+  - {name: E1, arm: deepfm_bins255_pointwise, numeric_input: binned, n_bins: 255, loss: pointwise_bce}
+  - {name: E2, arm: deepfm_bins255_listwise, numeric_input: binned, n_bins: 255, loss: listwise_softmax}
+  # The standardised input does not use n_bins, but n_bins is part of a configuration id.
+  # 32 (the value of configs/deepfm.yaml) gives E3 the id of the 2x2 ablation run
+  # (08775a5d6efb), whose seed 42 is therefore reused and not trained again.
+  - {name: E3, arm: deepfm_standardised_pointwise, numeric_input: standardised, n_bins: 32, loss: pointwise_bce}
+  - {name: E4, arm: deepfm_standardised_listwise, numeric_input: standardised, n_bins: 32, loss: listwise_softmax}
+
+# The comparison has eight arms: lgb_lambdarank, lgb_binary, deepfm_listwise and
+# deepfm_pointwise (the four arms of the 2x2 study, 32 bins, taken from its records) and
+# the four arms above. Bootstrap contrasts "first minus second" (the paired
+# customer-level bootstrap of proposal §10.2):
+contrasts:
+  - [deepfm_standardised_pointwise, deepfm_pointwise]   # standardised - 32 bins, pointwise
+  - [deepfm_standardised_listwise, deepfm_listwise]     # standardised - 32 bins, listwise
+  - [deepfm_bins255_pointwise, deepfm_pointwise]        # 255 bins - 32 bins, pointwise
+  - [deepfm_bins255_listwise, deepfm_listwise]          # 255 bins - 32 bins, listwise
+  - [deepfm_standardised_pointwise, lgb_binary]         # same loss family: pointwise
+  - [deepfm_standardised_listwise, lgb_lambdarank]      # same loss family: listwise

@@ -1587,4 +1587,8 @@ No tuning, no selection. **Limitation: T is fixed at 1; the learning rate, embed
 
 **Memory (no result changes).** The standardised path peaked at 11.66 GB; it is lowered before the runs (aim: under 10 GB), with a test on small data that shows identical outputs.
 
+How: the peak was the scoring of one chunk of 262,144 rows (the [rows, fields, dim] tensors of the field embeddings). The chunk size is **not** changed, because the last bits of a matrix product depend on the number of rows in the call (another chunk size moves standardised scores by about 1e-7); instead the field embeddings and the second-order term are built for `scoring.rows_per_block` = 32,768 rows at a time, and the MLP and the first-order term still run once per chunk. The training rows are standardised in place. Before the runs, `scripts/m9_deepfm_rescore.py` scores V1–V4 again with the saved seed-42 model of the ablation and must reproduce its saved Top-12 bit for bit.
+
+**Code added.** `src/hmrec/deepfm/extension.py` with `scripts/m9_deepfm_extension.py` (the runs); `scripts/m9_deepfm_compare.py --extension` (the eight-arm tables); `src/hmrec/deepfm/rescore.py` with `scripts/m9_deepfm_rescore.py` (the check above); `--n-bins` of `scripts/m9_deepfm_trial.py`.
+
 **T phase (replaces rule 10 of §16.8; implemented later).** One evaluation on T1–T4 of LightGBM binary and all six DeepFM arms, seeds 42, 43, 44, reported only and never used to select anything. LightGBM lambdarank with seed 42 on T is the M8 record and is not rerun.

@@ -21,35 +21,54 @@ RANK = "rank"
 
 @torch.no_grad()
 def score_device_rows(
-    model: DeepFM, rows: DeviceRows, n_rows: int, rows_per_chunk: int
+    model: DeepFM, rows: DeviceRows, n_rows: int, rows_per_chunk: int, rows_per_block: int
 ) -> torch.Tensor:
-    """The logit of the first `n_rows` rows that are already on the device: float32 [n_rows]."""
+    """The logit of the first `n_rows` rows that are already on the device: float32 [n_rows].
+
+    Args:
+        model: The model (put into eval mode here).
+        rows: The encoded rows on the device.
+        n_rows: Rows to score, from the first one.
+        rows_per_chunk: Rows per forward pass.
+        rows_per_block: Rows per block inside a forward pass, for building the
+            field embeddings (hmrec.deepfm.model: memory only, the scores do
+            not depend on it).
+    """
     if rows_per_chunk <= 0:
         raise ValueError(f"rows_per_chunk must be > 0, got {rows_per_chunk}")
+    if rows_per_block <= 0:
+        raise ValueError(f"rows_per_block must be > 0, got {rows_per_block}")
     model.eval()
     device = rows.codes.device
-    scores = [
-        model(*rows.batch(torch.arange(start, min(start + rows_per_chunk, n_rows), device=device)))
-        for start in range(0, n_rows, rows_per_chunk)
-    ]
+    scores = []
+    for start in range(0, n_rows, rows_per_chunk):
+        chunk = torch.arange(start, min(start + rows_per_chunk, n_rows), device=device)
+        scores.append(model(*rows.batch(chunk), block_rows=rows_per_block))
     if not scores:
         return torch.zeros(0, dtype=torch.float32, device=device)
     return torch.cat(scores).float()
 
 
 def score_rows(
-    model: DeepFM, rows: EncodedRows, rows_per_chunk: int, device: torch.device
+    model: DeepFM,
+    rows: EncodedRows,
+    rows_per_chunk: int,
+    rows_per_block: int,
+    device: torch.device,
 ) -> np.ndarray:
     """The logit of every row, computed in chunks of `rows_per_chunk` rows.
 
-    A row's score does not depend on the other rows of its chunk (the model has
-    no batch statistics), so the chunk size changes memory only.
+    The model has no batch statistics, so a row's score does not depend on the
+    other rows of its chunk as a formula. In floating point the chunk size can
+    still move a score by about 1e-7 (the first-order matrix-vector product of
+    value fields), so it is a fixed setting. `rows_per_block` changes memory
+    only: the scores are bit-identical for every block size.
 
     Returns:
         float32 [n_rows].
     """
     on_device = rows_to_device(rows, device)
-    scores = score_device_rows(model, on_device, rows.n_rows, rows_per_chunk)
+    scores = score_device_rows(model, on_device, rows.n_rows, rows_per_chunk, rows_per_block)
     return scores.cpu().numpy().astype(np.float32, copy=False)
 
 

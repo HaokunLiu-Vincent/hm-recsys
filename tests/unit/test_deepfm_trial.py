@@ -37,6 +37,7 @@ from hmrec.deepfm.process import (
     require_clean_tree,
     speed_test_spec,
     with_epochs,
+    with_n_bins,
     with_seed,
 )
 from hmrec.deepfm.records import (
@@ -182,6 +183,62 @@ def test_variants_run_through_a_whole_trial(tmp_path: Path, changes: dict, label
     assert result.metrics[-1].n_queries == N_QUERIES
     # A variant is another configuration: another id, another folder.
     assert result.config_id != deepfm_config_id(build_workspace(tmp_path / "default").config)
+
+
+@pytest.mark.parametrize("loss", ["pointwise_bce", "listwise_softmax"])
+def test_standardised_trial_is_identical_with_and_without_the_memory_changes(
+    tmp_path: Path, loss: str
+) -> None:
+    # Proposal §16.10: the standardised path was changed to use less memory (the training
+    # values are standardised in place; the embedding terms are scored in blocks). The
+    # outputs must be the same bits. "one pass": a block larger than every chunk, i.e. the
+    # scoring of before the change. "blocks": 7 rows at a time.
+    torch.set_num_threads(1)
+    outputs = {}
+    for name, rows_per_block in (("one pass", 1_000_000), ("blocks", 7)):
+        inputs = build_workspace(tmp_path / name.replace(" ", "_"), loss=loss)
+        model = dataclasses.replace(inputs.config.model, numeric_input="standardised")
+        config = dataclasses.replace(
+            inputs.config, model=model, scoring_rows_per_block=rows_per_block
+        )
+        inputs = dataclasses.replace(inputs, config=config)
+        result = run_trial(inputs, SPEC)
+        directory = _trial_dir(inputs)
+        outputs[name] = (
+            result.metrics[0].scores,
+            pl.read_parquet(directory / "predictions.parquet"),
+            pl.read_parquet(directory / "per_query.parquet"),
+            torch.load(directory / "epoch2.pt", weights_only=True),
+            (directory / "transform.json").read_text(),
+            result.input_cache,
+        )
+    one, two = outputs["one pass"], outputs["blocks"]
+    assert one[0] == two[0]
+    # The scores themselves, not only the order: every float is the same.
+    assert one[1].equals(two[1]) and one[1]["score"].to_list() == two[1]["score"].to_list()
+    assert one[2].equals(two[2])
+    assert all(torch.equal(one[3][key], two[3][key]) for key in one[3])
+    assert one[4] == two[4]
+    # The block size is not part of the configuration; the standardised input is not cached.
+    assert one[5] == two[5] == "off"
+
+
+def test_the_number_of_bins_is_part_of_the_configuration(tmp_path: Path) -> None:
+    inputs = build_workspace(tmp_path)
+    more_bins = with_n_bins(inputs.config, 6)
+    assert more_bins.n_bins == 6 and inputs.config.n_bins == 4
+    assert deepfm_config_id(more_bins) != deepfm_config_id(inputs.config)
+    result = run_trial(dataclasses.replace(inputs, config=more_bins), SPEC)
+    edges = json.loads(
+        (_trial_dir(dataclasses.replace(inputs, config=more_bins)) / "transform.json").read_text()
+    )["edges"]
+    # 6 quantile bins have at most 5 edges; the default of the tiny config has 4 bins.
+    assert max(len(feature) for feature in edges) == 5 and result.input_cache == "written"
+    # 255 bins plus the missing bin are the 256 codes a uint8 holds; more is refused.
+    assert with_n_bins(inputs.config, 255).n_bins == 255
+    for bad in (1, 256):
+        with pytest.raises(ValueError, match="n_bins must be in 2..255"):
+            with_n_bins(inputs.config, bad)
 
 
 # ---------------------------------------------------------------- what a trial refuses

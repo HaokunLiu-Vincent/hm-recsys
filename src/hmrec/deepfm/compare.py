@@ -1,9 +1,11 @@
-"""The four arms of the M9 comparison on the V folds, from saved values (report only; §16.8).
+"""The arms of the M9 comparison on the V folds, from saved values (report only; §16.8).
 
-Arms: lgb_lambdarank, lgb_binary, deepfm_listwise, deepfm_pointwise, each with
-several seeds. Every training saved the metric values of every query of its V
-fold when it was evaluated. This module only reads those saved values; no label
-is read and no model is loaded.
+Arms of the 2x2 study: lgb_lambdarank, lgb_binary, deepfm_listwise,
+deepfm_pointwise, each with several seeds. The input-representation extension
+(proposal §16.10) adds four DeepFM arms and its own contrasts: the caller gives
+the arms and the contrasts, the method is the same. Every training saved the
+metric values of every query of its V fold when it was evaluated. This module
+only reads those saved values; no label is read and no model is loaded.
 
     1. Arm table. For each arm and seed: the pooled metric = the mean over ALL
        queries of the folds (which is the query-weighted mean of the folds).
@@ -418,8 +420,18 @@ class CompareSettings:
         return (seed_basis(self.seed), SEED_MEAN)
 
 
-def contrast_rows(per_query: pl.DataFrame, settings: CompareSettings) -> list[dict[str, str]]:
+def contrast_rows(
+    per_query: pl.DataFrame,
+    settings: CompareSettings,
+    contrasts: Sequence[tuple[str, str]] = CONTRASTS,
+) -> list[dict[str, str]]:
     """The bootstrap intervals of every contrast on both bases.
+
+    Args:
+        per_query: The fold tables of all folds, concatenated.
+        settings: The bootstrap settings and the bases.
+        contrasts: (first arm, second arm) pairs, "first minus second"; by
+            default the four contrasts of the 2x2 study.
 
     Returns:
         One dict per (contrast, basis, quantity): first_arm, second_arm, basis,
@@ -428,7 +440,7 @@ def contrast_rows(per_query: pl.DataFrame, settings: CompareSettings) -> list[di
     """
     metric = settings.metrics[0]
     rows: list[dict[str, str]] = []
-    for first_arm, second_arm in CONTRASTS:
+    for first_arm, second_arm in contrasts:
         for basis in settings.bases:
             intervals, n_customers = paired_bootstrap(
                 per_query,
@@ -553,23 +565,38 @@ class Comparison:
 
 
 def compare_arms(
-    folds: Sequence[FoldFiles], arms: Sequence[ArmRuns], settings: CompareSettings
+    folds: Sequence[FoldFiles],
+    arms: Sequence[ArmRuns],
+    settings: CompareSettings,
+    contrasts: Sequence[tuple[str, str]] = CONTRASTS,
 ) -> Comparison:
     """Compare the arms on the given folds.
 
+    Args:
+        folds: The saved files of every fold.
+        arms: The arms, in the order of the tables' rows and columns.
+        settings: Metrics, bases and bootstrap settings.
+        contrasts: (first arm, second arm) pairs, "first minus second"; by
+            default the four contrasts of the 2x2 study.
+
     Raises:
-        ValueError: If the arms are not exactly ARMS, or an arm lacks the single seed.
+        ValueError: If an arm name repeats, a contrast names an arm that is not
+            given, or an arm lacks the single seed.
     """
-    if tuple(arm.arm for arm in arms) != ARMS:
-        raise ValueError(f"the arms must be {ARMS}, got {[arm.arm for arm in arms]}")
+    names = tuple(arm.arm for arm in arms)
+    if len(set(names)) != len(names):
+        raise ValueError(f"an arm name repeats: {names}")
+    unknown = [arm for pair in contrasts for arm in pair if arm not in names]
+    if unknown:
+        raise ValueError(f"contrasts name arms {unknown} that are not given; the arms are {names}")
     lacking = [arm.arm for arm in arms if settings.seed not in arm.seeds]
     if lacking:
         raise ValueError(f"arms {lacking} have no seed {settings.seed}")
     per_query = pl.concat([read_fold_table(files, arms, settings) for files in folds])
     return Comparison(
         arms=arm_rows(per_query, arms, settings.metrics),
-        contrasts=contrast_rows(per_query, settings),
-        groups=group_rows(per_query, ARMS, settings.bases, settings.metrics[0]),
+        contrasts=contrast_rows(per_query, settings, contrasts),
+        groups=group_rows(per_query, names, settings.bases, settings.metrics[0]),
         n_queries=per_query.height,
     )
 

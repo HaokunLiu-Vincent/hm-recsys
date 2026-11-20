@@ -295,7 +295,10 @@ def encode_window(inputs: TrialInputs, target_fold: str, folds: tuple[Fold, ...]
     columns = feature_columns(inputs.lock)
     rows = load_window_rows(inputs, target_fold, folds, columns)
     transform = fit_window_transform(inputs, rows, columns)
-    encoded = encode_rows(rows.raw, transform)
+    # reuse_numeric: with the standardised input the standardised values are written
+    # over the raw values, so the two float32 [n_rows, n_numeric] arrays (2.7 GB each
+    # for a window) never exist together. `rows.raw` is not read after this line.
+    encoded = encode_rows(rows.raw, transform, reuse_numeric=True)
     log_memory(LOGGER, f"{target_fold}: {rows.raw.n_rows} training rows encoded")
     return CachedTraining(transform, encoded, rows.labels, rows.query_ids)
 
@@ -471,7 +474,13 @@ def score_target_fold(
     tops: list[pl.DataFrame] = []
     n_rows = 0
     for part in parts:
-        scores = score_rows(model, part.rows, config.scoring_rows_per_chunk, device)
+        scores = score_rows(
+            model,
+            part.rows,
+            config.scoring_rows_per_chunk,
+            config.scoring_rows_per_block,
+            device,
+        )
         tops.append(top_k_per_query(part.query_ids, part.article_idx, scores, config.top_k))
         n_rows += part.rows.n_rows
         LOGGER.info("scored %s (%d rows)", part.name, part.rows.n_rows)

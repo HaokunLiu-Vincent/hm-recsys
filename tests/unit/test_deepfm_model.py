@@ -134,6 +134,68 @@ def test_value_fields_use_the_value_and_the_missing_indicator() -> None:
         model(codes)
 
 
+@pytest.mark.parametrize("components", ["first_order", "fm", "deep", "full"])
+@pytest.mark.parametrize("n_value_fields", [0, 5])
+def test_scoring_in_blocks_gives_bit_identical_logits(components: str, n_value_fields: int) -> None:
+    # Memory only (proposal §16.10): with the field embeddings built a few rows at a
+    # time the logits must be EXACTLY those of one pass, for code fields and value fields.
+    layout = FieldLayout((7, 4, 3), n_value_fields)
+    config = replace(SMALL, embedding_dim=8, hidden_units=(16, 8), components=components)
+    model = _model(config, layout)
+    generator = torch.Generator().manual_seed(3)
+    with torch.no_grad():
+        for parameter in model.parameters():
+            # First-order weights start at 0: give every parameter a real value.
+            parameter.add_(0.3 * torch.randn(parameter.shape, generator=generator))
+    model.eval()
+    n_rows = 103
+    codes = torch.stack(
+        [torch.randint(0, size, (n_rows,), generator=generator) for size in (7, 4, 3)], dim=1
+    )
+    values, missing = None, None
+    if n_value_fields:
+        values = 3 * torch.randn((n_rows, n_value_fields), generator=generator)
+        missing = (torch.rand((n_rows, n_value_fields), generator=generator) < 0.2).float()
+    with torch.no_grad():
+        one_pass = model(codes, values, missing)
+        for block_rows in (1, 7, 50, 103, 1000):
+            blocked = model(codes, values, missing, block_rows=block_rows)
+            assert torch.equal(blocked, one_pass), (components, block_rows)
+        with pytest.raises(ValueError, match="block_rows must be > 0"):
+            model.embedding_logits_in_blocks(codes, values, missing, 0)
+
+
+def test_blocks_never_split_a_matrix_product(monkeypatch: pytest.MonkeyPatch) -> None:
+    # The last bits of a matrix product depend on the number of rows in the call, so the
+    # first-order term and the MLP are computed ONCE for the whole batch; only the field
+    # embeddings (and the second-order term made from them) are built block by block.
+    model = _model(layout=FieldLayout((3,), 2)).eval()
+    codes = torch.zeros((10, 1), dtype=torch.int64)
+    values, missing = torch.ones((10, 2)), torch.zeros((10, 2))
+    seen: dict[str, list[int]] = {"first_order": [], "embeddings": [], "mlp": []}
+    first_order, embeddings = model.first_order_logit, model.field_embeddings
+
+    def count_mlp(
+        module: torch.nn.Module, inputs: tuple[torch.Tensor, ...], output: object
+    ) -> None:
+        seen["mlp"].append(inputs[0].shape[0])
+
+    def count_first_order(codes_: torch.Tensor, *rest: torch.Tensor) -> torch.Tensor:
+        seen["first_order"].append(codes_.shape[0])
+        return first_order(codes_, *rest)
+
+    def count_embeddings(codes_: torch.Tensor, *rest: torch.Tensor) -> torch.Tensor:
+        seen["embeddings"].append(codes_.shape[0])
+        return embeddings(codes_, *rest)
+
+    monkeypatch.setattr(model, "first_order_logit", count_first_order)
+    monkeypatch.setattr(model, "field_embeddings", count_embeddings)
+    model.mlp.register_forward_hook(count_mlp)
+    with torch.no_grad():
+        model(codes, values, missing, block_rows=4)
+    assert seen == {"first_order": [10], "embeddings": [4, 4, 2], "mlp": [10]}
+
+
 def test_dropout_is_only_active_in_training() -> None:
     model = _model(replace(SMALL, dropout=0.5, hidden_units=(64,)))
     codes = torch.tensor([[0, 1]] * 8)

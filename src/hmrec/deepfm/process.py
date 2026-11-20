@@ -85,6 +85,17 @@ def with_epochs(config: DeepFMConfig, epochs: int) -> DeepFMConfig:
     return replace(config, training=replace(config.training, epochs=epochs))
 
 
+def with_n_bins(config: DeepFMConfig, n_bins: int) -> DeepFMConfig:
+    """The configuration with another number of quantile bins (2 ... 255: a code is a uint8).
+
+    Raises:
+        ValueError: If n_bins is outside 2 ... 255.
+    """
+    if not 2 <= n_bins <= 255:
+        raise ValueError(f"n_bins must be in 2..255, got {n_bins}")
+    return replace(config, n_bins=n_bins)
+
+
 def speed_test_spec(inputs: TrialInputs) -> TrialSpec:
     """The one training of the speed test: the default configuration, its epochs and fold.
 

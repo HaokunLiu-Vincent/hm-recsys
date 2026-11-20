@@ -402,8 +402,11 @@ def test_comparison_from_saved_files(example: tuple[list[FoldFiles], list[ArmRun
     assert comparison.arms == arm_rows(per_query, arms, METRICS)
     assert comparison.contrasts == contrast_rows(per_query, SETTINGS)
     assert comparison.groups == group_rows(per_query, ARMS, SETTINGS.bases, MAP)
-    with pytest.raises(ValueError, match="the arms must be"):
+    # A contrast needs both of its arms; an arm may be given only once.
+    with pytest.raises(ValueError, match="that are not given"):
         compare_arms(folds, arms[:3], SETTINGS)
+    with pytest.raises(ValueError, match="an arm name repeats"):
+        compare_arms(folds, [*arms, arms[0]], SETTINGS)
     only_43 = [
         ArmRuns(arm.arm, arm.step_column, {43: arm.steps[43]}, {43: arm.files[43]}) for arm in arms
     ]
@@ -413,6 +416,32 @@ def test_comparison_from_saved_files(example: tuple[list[FoldFiles], list[ArmRun
         table_columns([{"a": "1"}, {"b": "2"}])
     with pytest.raises(ValueError, match="no rows"):
         table_columns([])
+
+
+def test_the_caller_can_give_other_arms_and_contrasts(
+    example: tuple[list[FoldFiles], list[ArmRuns]],
+) -> None:
+    # The extension (proposal §16.10) compares more arms with its own contrasts; the
+    # numbers of an arm or of a contrast do not depend on which other arms are compared.
+    folds, arms = example
+    whole = compare_arms(folds, arms, SETTINGS)
+    pair = ("deepfm_pointwise", "lgb_binary")
+    part = compare_arms(folds, [arms[1], arms[3]], SETTINGS, contrasts=[pair])
+    assert {row["arm"] for row in part.arms} == set(pair)
+    assert part.arms == [row for row in whole.arms if row["arm"] in pair]
+    assert {(row["first_arm"], row["second_arm"]) for row in part.contrasts} == {pair}
+    # 2 bases x 3 quantities, and the same method as for a contrast of the 2x2 study.
+    assert len(part.contrasts) == 6
+    reversed_pair = compare_arms(folds, arms, SETTINGS, contrasts=[(pair[1], pair[0])])
+    by_key = {(row["basis"], row["quantity"]): row for row in reversed_pair.contrasts}
+    for row in part.contrasts:
+        if row["quantity"] == "difference":
+            other = by_key[(row["basis"], "difference")]
+            assert float(row["estimate"]) == pytest.approx(-float(other["estimate"]), abs=1e-15)
+            assert float(row["ci_low"]) == pytest.approx(-float(other["ci_high"]), abs=1e-15)
+    # The group table has one column per given arm, in the given order.
+    arm_columns = [name for name in part.groups[0] if name in ARMS]
+    assert arm_columns == ["lgb_binary", "deepfm_pointwise"]
 
 
 def test_a_wide_table_that_is_not_the_recorded_one_is_refused(tmp_path: Path) -> None:

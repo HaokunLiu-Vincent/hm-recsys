@@ -146,7 +146,7 @@ def test_every_variant_trains_and_scores(components: str, numeric_input: str, lo
     model, results = _train(config, seed=42)
     assert all(np.isfinite(result.mean_loss) for result in results)
     _, encoded, _, _ = _data(config)
-    scores = score_rows(model, encoded, 100, CPU)
+    scores = score_rows(model, encoded, 100, 100, CPU)
     assert scores.shape == (360,) and scores.dtype == np.float32 and np.isfinite(scores).all()
     # The parts a variant does not use are never updated.
     untouched_mlp = components in ("first_order", "fm")
@@ -252,11 +252,27 @@ def test_training_set_needs_rows_sorted_by_query() -> None:
 def test_scores_do_not_depend_on_the_chunk_size() -> None:
     model, _ = _train(SMALL, seed=42)
     _, encoded, _, _ = _data(SMALL)
-    whole = score_rows(model, encoded, 1000, CPU)
+    whole = score_rows(model, encoded, 1000, 1000, CPU)
     for rows_per_chunk in (1, 7, 360):
-        assert np.allclose(score_rows(model, encoded, rows_per_chunk, CPU), whole, atol=1e-6)
+        chunked = score_rows(model, encoded, rows_per_chunk, 1000, CPU)
+        assert np.allclose(chunked, whole, atol=1e-6)
     with pytest.raises(ValueError, match="rows_per_chunk must be > 0"):
-        score_rows(model, encoded, 0, CPU)
+        score_rows(model, encoded, 0, 1000, CPU)
+
+
+@pytest.mark.parametrize("numeric_input", ["binned", "standardised"])
+def test_scores_are_bit_identical_for_every_block_size(numeric_input: str) -> None:
+    # The block size is memory only (proposal §16.10): not "close", but the same bits.
+    config = _variant(numeric_input=numeric_input)
+    model, _ = _train(config, seed=42)
+    _, encoded, _, _ = _data(config)
+    one_pass = score_rows(model, encoded, 100, 100, CPU)
+    assert one_pass.shape == (360,) and float(np.abs(one_pass).sum()) > 0
+    for rows_per_block in (1, 7, 64, 99):
+        blocked = score_rows(model, encoded, 100, rows_per_block, CPU)
+        assert blocked.tobytes() == one_pass.tobytes(), rows_per_block
+    with pytest.raises(ValueError, match="rows_per_block must be > 0"):
+        score_rows(model, encoded, 100, 0, CPU)
 
 
 def test_top_k_orders_by_score_then_article() -> None:

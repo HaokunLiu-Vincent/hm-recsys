@@ -151,16 +151,25 @@ class StudyContext:
         return self.study.metric
 
 
-def subprocess_launcher(trial_script: Path) -> Callable[[TrialRequest], None]:
+def subprocess_launcher(
+    trial_script: Path, extra_arguments: Sequence[str] = ()
+) -> Callable[[TrialRequest], None]:
     """A launcher that runs one training with scripts/m9_deepfm_trial.py in a new process.
 
     The training's process records its own rows. A non-zero exit (a failed check,
     a diverged training, a memory peak above the limit) raises
     subprocess.CalledProcessError and so stops the study.
+
+    Args:
+        trial_script: scripts/m9_deepfm_trial.py.
+        extra_arguments: Arguments added to every training, for a setting that
+            is not one of a Variant's seven (the extension's "--n-bins N"). The
+            caller's StudyContext must hold a config with the same setting, so
+            that the configuration id it looks up is the one the training records.
     """
 
     def launch(request: TrialRequest) -> None:
-        command = [sys.executable, str(trial_script), *trial_arguments(request)]
+        command = [sys.executable, str(trial_script), *trial_arguments(request), *extra_arguments]
         subprocess.run(command, check=True)
 
     return launch

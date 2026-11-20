@@ -14,10 +14,12 @@ import pytest
 
 from hmrec.config import (
     load_deepfm_config,
+    load_deepfm_extension_config,
     load_deepfm_study_config,
     load_selection_rule,
     load_yaml,
     parse_deepfm_config,
+    parse_deepfm_extension_config,
     parse_deepfm_study_config,
 )
 from hmrec.paths import get_paths
@@ -27,6 +29,8 @@ PACKAGE = REPO / "src" / "hmrec" / "deepfm"
 SCRIPTS = (
     "scripts/m9_deepfm_benchmark.py",
     "scripts/m9_deepfm_compare.py",
+    "scripts/m9_deepfm_extension.py",
+    "scripts/m9_deepfm_rescore.py",
     "scripts/m9_deepfm_study.py",
     "scripts/m9_deepfm_trial.py",
 )
@@ -36,11 +40,13 @@ MODULES = (
     "cache.py",
     "compare.py",
     "data.py",
+    "extension.py",
     "inputs.py",
     "loss.py",
     "model.py",
     "process.py",
     "records.py",
+    "rescore.py",
     "score.py",
     "study.py",
     "study_run.py",
@@ -158,12 +164,21 @@ def test_results_and_files_stay_in_their_own_places() -> None:
         "m9_contrasts.csv",
         "m9_groups.csv",
     ]
+    # The eight-arm tables of the extension are separate files: the 2x2 tables stay as they are.
+    extension = [paths.m9_ext_arms_file, paths.m9_ext_contrasts_file, paths.m9_ext_groups_file]
+    assert [table.name for table in extension] == [
+        "m9_ext_arms.csv",
+        "m9_ext_contrasts.csv",
+        "m9_ext_groups.csv",
+    ]
+    assert not set(extension) & set(comparison)
 
 
 # ---------------------------------------------------------------- the recorded configs
 
 CONFIG_FILE = REPO / "configs" / "deepfm.yaml"
 STUDY_FILE = REPO / "configs" / "hpo" / "deepfm.yaml"
+EXTENSION_FILE = REPO / "configs" / "hpo" / "deepfm_extension.yaml"
 
 
 def test_default_model_is_the_recorded_one() -> None:
@@ -181,6 +196,8 @@ def test_default_model_is_the_recorded_one() -> None:
     # From 2026-11-20 (proposal §16.8): a cosine schedule to 1% of the rate over the run.
     assert (training.lr_schedule, training.min_lr_ratio, training.epochs) == ("cosine", 0.01, 3)
     assert config.cached_numeric_inputs == ("binned",)
+    # The scoring chunk is a fixed setting; the block inside it is memory only (§16.10).
+    assert (config.scoring_rows_per_chunk, config.scoring_rows_per_block) == (262144, 32768)
     assert config.metrics == ("map@12", "recall@12", "ndcg@12") and config.top_k == 12
     assert config.min_mps_speedup == 1.5
     speed_test = config.speed_test
@@ -246,6 +263,7 @@ def test_rules_of_the_study_are_the_recorded_ones() -> None:
         ("training", "min_lr_ratio", 1.5, "min_lr_ratio"),
         ("input_cache", "numeric_inputs", ["raw"], "numeric_inputs"),
         ("binning", "n_bins", 300, "n_bins"),
+        ("scoring", "rows_per_block", 0, "scoring_rows_per_block"),
         ("standardise", "clip_low_percentile", 99.95, "low < high"),
         ("device_rule", "min_mps_speedup", 0.5, "min_mps_speedup"),
         ("speed_test", "benchmark_discard_steps", 300, "benchmark_discard_steps"),
@@ -293,12 +311,66 @@ def test_study_config_is_validated() -> None:
     assert dataclasses.is_dataclass(study)
 
 
+def test_runs_of_the_extension_are_the_recorded_ones() -> None:
+    extension = load_deepfm_extension_config(EXTENSION_FILE)
+    study = load_deepfm_study_config(STUDY_FILE)
+    assert (extension.phase, extension.target_folds) == ("V", study.target_folds)
+    assert extension.seeds == study.final_seeds == (42, 43, 44)
+    # Fixed for every run: what the 2x2 study kept for the 32-bin pointwise arm, and T = 1.
+    assert (extension.learning_rate, extension.embedding_dim, extension.dropout) == (0.001, 16, 0.0)
+    assert (extension.components, extension.epochs) == ("full", 1)
+    runs = [(run.name, run.arm, run.numeric_input, run.n_bins, run.loss) for run in extension.runs]
+    assert runs == [
+        ("E1", "deepfm_bins255_pointwise", "binned", 255, "pointwise_bce"),
+        ("E2", "deepfm_bins255_listwise", "binned", 255, "listwise_softmax"),
+        ("E3", "deepfm_standardised_pointwise", "standardised", 32, "pointwise_bce"),
+        ("E4", "deepfm_standardised_listwise", "standardised", 32, "listwise_softmax"),
+    ]
+    # 255 bins is LightGBM's locked max_bin; the standardised runs keep the config's n_bins.
+    assert load_deepfm_config(CONFIG_FILE).n_bins == 32
+    assert extension.contrasts == (
+        ("deepfm_standardised_pointwise", "deepfm_pointwise"),
+        ("deepfm_standardised_listwise", "deepfm_listwise"),
+        ("deepfm_bins255_pointwise", "deepfm_pointwise"),
+        ("deepfm_bins255_listwise", "deepfm_listwise"),
+        ("deepfm_standardised_pointwise", "lgb_binary"),
+        ("deepfm_standardised_listwise", "lgb_lambdarank"),
+    )
+
+
+def test_extension_config_is_validated() -> None:
+    raw = load_yaml(EXTENSION_FILE)
+    with pytest.raises(ValueError, match="phase must be 'V'"):
+        parse_deepfm_extension_config({**raw, "phase": "T"})
+    with pytest.raises(ValueError, match="unknown keys"):
+        parse_deepfm_extension_config({**raw, "test_folds": ["T1"]})
+    with pytest.raises(ValueError, match="non-empty list"):
+        parse_deepfm_extension_config({**raw, "runs": []})
+    first = raw["runs"][0]
+    with pytest.raises(ValueError, match="n_bins must be in 2..255"):
+        parse_deepfm_extension_config({**raw, "runs": [{**first, "n_bins": 256}]})
+    with pytest.raises(ValueError, match="numeric_input"):
+        parse_deepfm_extension_config({**raw, "runs": [{**first, "numeric_input": "raw"}]})
+    with pytest.raises(ValueError, match="loss"):
+        parse_deepfm_extension_config({**raw, "runs": [{**first, "loss": "pairwise"}]})
+    with pytest.raises(ValueError, match="a run name repeats"):
+        parse_deepfm_extension_config({**raw, "runs": [first, {**first, "arm": "other"}]})
+    with pytest.raises(ValueError, match="a run arm repeats"):
+        parse_deepfm_extension_config({**raw, "runs": [first, {**first, "name": "E9"}]})
+    with pytest.raises(ValueError, match="two different arm names"):
+        parse_deepfm_extension_config({**raw, "contrasts": [["a", "a"]]})
+    with pytest.raises(ValueError, match="dropout"):
+        parse_deepfm_extension_config({**raw, "dropout": 1.0})
+    with pytest.raises(ValueError, match="epochs"):
+        parse_deepfm_extension_config({**raw, "epochs": 0})
+
+
 def test_the_study_runs_on_cpu_and_the_torch_free_modules_stay_torch_free() -> None:
     # A decision by the user (docs/decisions.md 2026-11-19): CPU, so that a seed repeats exactly.
     assert load_deepfm_config(CONFIG_FILE).training.device == "cpu"
     # The rules, the driver and the comparison need no model: they must not load torch.
     torch_free = ("study.py", "study_run.py", "compare.py", "records.py", "data.py", "inputs.py")
-    for name in (*torch_free, "cache.py"):
+    for name in (*torch_free, "cache.py", "extension.py"):
         imports = _imports(PACKAGE / name)
         assert "torch" not in imports, name
         torch_modules = ("model", "train", "score", "trial", "benchmark", "process", "loss")
