@@ -1082,3 +1082,8 @@ Everything below was settled **before the features of any week were generated**.
 - **Nothing in the repository depended on a deleted file.** No code, test, check script or Makefile target read `docs/final_report.zh-CN.md`, `docs/proposal.zh-CN.md` or `AGENTS.zh-CN.md`; the comparison of the numbers of the two reports was a one-off script that is not in the repository. `tests/unit/test_locks.py` and a comment of `tests/unit/test_v_lock.py` refer to `docs/decisions.zh-CN.md`, which stays. One docstring (`src/hmrec/hpo/robustness.py`) named a heading of the proposal in Chinese; it now names the English heading ("Robustness").
 - **Documents updated**: `AGENTS.md` §11, `README.md` (the pointers to the report and the "Documents" section), the header of `docs/final_report.md`.
 - **Not changed**: code logic, configurations, lock files, results, tags. Nothing was run on the data.
+
+## 2026-11-21 Source of a statement in the README: the write-up of the first-place solution was consulted when the ranker features were designed (as stated by the user)
+
+- **Statement** (by the user, on 2026-11-21): when designing the ranker features, the user consulted the public write-up of the first-place solution of the H&M competition.
+- **Why it is recorded**: `README.md` says that the feature design drew on the first-place solution. This is one of the reasons why the score of the Kaggle late submission is not presented as an official rank.
