@@ -1,0 +1,5 @@
+outs:
+- md5: 238db47dc8d215418f82b2616fc00ee3
+  size: 3575
+  hash: md5
+  path: category_codes.json
