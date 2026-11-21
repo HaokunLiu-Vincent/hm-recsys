@@ -35,7 +35,7 @@ from pathlib import Path
 
 import psutil
 
-from hmrec.git_state import IMAGE_COMMIT_VARIABLE, image_commit
+from hmrec.git_state import IMAGE_COMMIT_VARIABLE, code_tree_of_run, image_commit
 from hmrec.memory import bytes_to_gb
 from hmrec.native_libraries import (
     blas_libraries,
@@ -43,6 +43,7 @@ from hmrec.native_libraries import (
     loaded_library_paths,
     openmp_libraries,
 )
+from hmrec.paths import PROJECT_ROOT
 
 REFERENCE_SYSTEM = "Darwin"
 REFERENCE_MACHINE = "arm64"
@@ -183,6 +184,15 @@ def image_lines(environment: Mapping[str, str]) -> list[str]:
     if commit is None:
         return [f"image commit: not in a container image ({IMAGE_COMMIT_VARIABLE} is not set)"]
     return [f"image commit: {commit}"]
+
+
+def code_tree_line() -> str:
+    """The report line about the code tree of THIS process (hmrec.git_state.code_tree_of_run).
+
+    Inside an image: the tree hash, after it was compared with the one stored at
+    build time (a mismatch raises). On the laptop: "not an image".
+    """
+    return f"image code tree: {code_tree_of_run(PROJECT_ROOT)}"
 
 
 def thread_setting_lines(environment: Mapping[str, str]) -> list[str]:
@@ -341,6 +351,7 @@ def report_lines(side: str, environment: Mapping[str, str]) -> list[str]:
         raise ValueError(f"side must be one of {SIDES}, got {side!r}")
     lines = [f"side: {side}"]
     lines.extend(image_lines(environment))
+    lines.append(code_tree_line())
     lines.extend(machine_lines(read_machine_info()))
     lines.extend(thread_setting_lines(environment))
     side_lines = torch_side_lines() if side == TORCH_SIDE else lightgbm_side_lines()

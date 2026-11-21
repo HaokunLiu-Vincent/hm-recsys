@@ -7,7 +7,9 @@ and the module (unlike hmrec.hpo.runner) does not pull in torch.
 
 Also here: the branch for a container image (docs/mlops.md §8.1), where there is no
 `.git` and the commit comes from HMREC_IMAGE_GIT_COMMIT. Those tests set the variable
-themselves, so they run on the laptop too.
+themselves, so they run on the laptop too. In an image the code tree is also compared
+with the hash stored at build time (hmrec.code_tree); the tests build a small tree
+and store its hash the way the Dockerfile does.
 """
 
 import os
@@ -19,7 +21,8 @@ import pytest
 
 import hmrec.git_state as git_state_module
 import hmrec.hpo.runner as runner
-from hmrec.git_state import IMAGE_COMMIT_VARIABLE
+from hmrec.code_tree import CODE_TREE_ENTRIES, code_tree_sha256
+from hmrec.git_state import IMAGE_COMMIT_VARIABLE, NOT_AN_IMAGE
 
 REPO = Path(__file__).resolve().parents[2]
 
@@ -49,6 +52,31 @@ def test_git_state_of_this_repository() -> None:
 # ---------------------------------------------------------------- inside a container image
 
 IMAGE_COMMIT = "0123456789abcdef0123456789abcdef01234567"
+# Entries of the code tree that are folders; the others are single files.
+TREE_FOLDERS = ("src", "scripts", "tests", "configs", "docs")
+
+
+@pytest.fixture
+def image_root(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Path:
+    """A folder that looks like the code of an image, with its tree hash stored "at build".
+
+    Every entry of the code tree exists (a folder holds one file). The stored
+    hash is written to a file outside the code, as the Dockerfile does, and
+    hmrec.git_state is pointed to that file.
+    """
+    root = tmp_path / "app"
+    for entry in CODE_TREE_ENTRIES:
+        if entry in TREE_FOLDERS:
+            (root / entry).mkdir(parents=True)
+            (root / entry / "file.txt").write_text(f"content of {entry}\n", encoding="utf-8")
+        else:
+            (root / entry).write_text(f"content of {entry}\n", encoding="utf-8")
+    (root / "results").mkdir()
+    recorded_file = tmp_path / "opt" / "code-tree.sha256"
+    recorded_file.parent.mkdir()
+    recorded_file.write_text(code_tree_sha256(root) + "\n", encoding="utf-8")
+    monkeypatch.setattr(git_state_module, "IMAGE_CODE_TREE_FILE", recorded_file)
+    return root
 
 
 def test_image_commit_is_none_on_the_laptop_and_the_hash_in_an_image() -> None:
@@ -74,28 +102,78 @@ def test_image_commit_must_be_a_full_hash(value: str) -> None:
 
 
 def test_git_state_in_an_image_is_the_image_commit_and_git_is_not_asked(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    image_root: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    # tmp_path is not a git repository: asking git would fail here.
-    (tmp_path / "results").mkdir()
+    # image_root is not a git repository: asking git would fail here.
     monkeypatch.setenv(IMAGE_COMMIT_VARIABLE, IMAGE_COMMIT)
 
     def no_git(*arguments: object, **options: object) -> None:
         raise AssertionError("git must not be called inside a container image")
 
     monkeypatch.setattr(git_state_module.subprocess, "run", no_git)
-    assert git_state_module.git_state(tmp_path, tmp_path / "results") == (IMAGE_COMMIT, False)
+    assert git_state_module.git_state(image_root, image_root / "results") == (IMAGE_COMMIT, False)
 
 
 def test_git_state_in_an_image_refuses_a_mounted_working_tree(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    image_root: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     # A .git next to the code means a working tree was mounted over the image's code:
     # the image's commit no longer says which code runs.
-    (tmp_path / ".git").mkdir()
+    (image_root / ".git").mkdir()
     monkeypatch.setenv(IMAGE_COMMIT_VARIABLE, IMAGE_COMMIT)
     with pytest.raises(RuntimeError, match="a working tree is mounted over the image's code"):
-        git_state_module.git_state(tmp_path, tmp_path / "results")
+        git_state_module.git_state(image_root, image_root / "results")
+
+
+@pytest.mark.parametrize("change", ["edited", "added", "removed"])
+def test_git_state_in_an_image_refuses_code_that_is_not_the_built_code(
+    image_root: Path, monkeypatch: pytest.MonkeyPatch, change: str
+) -> None:
+    # What a folder mounted over a part of the code does: no .git appears, but a file of
+    # the tree is different, new or gone. The stored hash no longer fits.
+    monkeypatch.setenv(IMAGE_COMMIT_VARIABLE, IMAGE_COMMIT)
+    if change == "edited":
+        (image_root / "src" / "file.txt").write_text("another content\n", encoding="utf-8")
+    elif change == "added":
+        (image_root / "configs" / "extra.yaml").write_text("x: 1\n", encoding="utf-8")
+    else:
+        (image_root / "scripts" / "file.txt").unlink()
+    with pytest.raises(RuntimeError, match="is not the code of the image's commit"):
+        git_state_module.git_state(image_root, image_root / "results")
+    with pytest.raises(RuntimeError, match="is not the code of the image's commit"):
+        git_state_module.code_tree_of_run(image_root)
+
+
+def test_results_and_bytecode_caches_do_not_count_as_code(
+    image_root: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    # results/ holds the output of runs (a calibration mounts its own folder there), and
+    # __pycache__ is written by the interpreter. Neither is part of the code tree.
+    monkeypatch.setenv(IMAGE_COMMIT_VARIABLE, IMAGE_COMMIT)
+    (image_root / "results" / "new_table.csv").write_text("a,b\n", encoding="utf-8")
+    (image_root / "src" / "__pycache__").mkdir()
+    (image_root / "src" / "__pycache__" / "file.cpython-312.pyc").write_bytes(b"\x00")
+    assert git_state_module.git_state(image_root, image_root / "results") == (IMAGE_COMMIT, False)
+
+
+def test_git_state_in_an_image_needs_the_stored_tree_hash(
+    image_root: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    # An image built without the hash (an older Dockerfile) cannot prove what code runs.
+    monkeypatch.setenv(IMAGE_COMMIT_VARIABLE, IMAGE_COMMIT)
+    git_state_module.IMAGE_CODE_TREE_FILE.unlink()
+    with pytest.raises(FileNotFoundError, match="recorded code-tree hash not found"):
+        git_state_module.git_state(image_root, image_root / "results")
+
+
+def test_code_tree_of_run_is_the_verified_hash_in_an_image_and_a_marker_on_the_laptop(
+    image_root: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setenv(IMAGE_COMMIT_VARIABLE, IMAGE_COMMIT)
+    assert git_state_module.code_tree_of_run(image_root) == code_tree_sha256(image_root)
+    # The laptop: git describes the code, no build stored a hash, nothing is computed.
+    monkeypatch.delenv(IMAGE_COMMIT_VARIABLE)
+    assert git_state_module.code_tree_of_run(image_root) == NOT_AN_IMAGE
 
 
 def test_git_state_in_an_image_refuses_a_bad_variable(

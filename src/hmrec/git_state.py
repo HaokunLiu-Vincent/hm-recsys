@@ -17,6 +17,12 @@ checkout is clean by construction), and the commit hash is stored in the
 environment variable HMREC_IMAGE_GIT_COMMIT (and as an image label). git_state
 returns that commit there. On the laptop the variable is not set and git is
 asked, exactly as before.
+
+The image also carries the hash of its code tree (hmrec.code_tree, decision of
+2026-11-22): the Dockerfile stores it in IMAGE_CODE_TREE_FILE at build time. In
+an image git_state computes the hash of the code again and refuses the run if
+the two differ, so "not dirty" is a comparison and no longer only a property of
+the build. code_tree_of_run gives the hash for the run records.
 """
 
 import os
@@ -25,6 +31,7 @@ import subprocess
 from collections.abc import Mapping, Sequence
 from pathlib import Path
 
+from hmrec.code_tree import code_tree_sha256, read_recorded_code_tree
 from hmrec.logging_utils import get_logger
 
 # The name the functions logged under before they moved here, kept so that run logs
@@ -36,6 +43,11 @@ UNCOMMITTED_BANNER = "!" * 78
 # Set by the Dockerfile from the build argument GIT_COMMIT; never set on the laptop.
 IMAGE_COMMIT_VARIABLE = "HMREC_IMAGE_GIT_COMMIT"
 FULL_COMMIT_HASH = re.compile(r"[0-9a-f]{40}")
+# Written by the Dockerfile at build time: the hash of the code tree of the image
+# (hmrec.code_tree). It lies outside the code folder and belongs to root.
+IMAGE_CODE_TREE_FILE = Path("/opt/hmrec/code-tree.sha256")
+# What the run records hold for the tree hash on the laptop, where git describes the code.
+NOT_AN_IMAGE = "not an image"
 
 
 def warn_uncommitted_changes(commit: str) -> None:
@@ -77,22 +89,55 @@ def image_commit(environment: Mapping[str, str]) -> str | None:
     return value
 
 
-def image_git_state(repo_root: Path, commit: str) -> tuple[str, bool]:
+def verified_image_code_tree(repo_root: Path, recorded_file: Path) -> str:
+    """The hash of the code tree of an image, after comparing it with the one stored at build.
+
+    Args:
+        repo_root: Root of the code inside the image.
+        recorded_file: The file the Dockerfile wrote at build time (IMAGE_CODE_TREE_FILE).
+
+    Returns:
+        The hash (64 hexadecimal characters); it equals the stored one.
+
+    Raises:
+        FileNotFoundError: If the stored hash or an entry of the code tree is missing.
+        ValueError: If the stored value is not a sha256.
+        RuntimeError: If the code under repo_root does not give the stored hash:
+            a file was changed, added, removed or mounted over since the build.
+    """
+    recorded = read_recorded_code_tree(recorded_file)
+    actual = code_tree_sha256(repo_root)
+    if actual != recorded:
+        raise RuntimeError(
+            f"the code under {repo_root} has tree hash {actual}, but the image was built "
+            f"with {recorded} ({recorded_file}). The code that runs is not the code of the "
+            "image's commit (a folder mounted over the code, or a changed file). Run the "
+            "image as it was built."
+        )
+    return actual
+
+
+def image_git_state(repo_root: Path, commit: str, code_tree_file: Path) -> tuple[str, bool]:
     """The code state inside a container image: the image's commit, never dirty.
 
-    "Not dirty" rests on how the image is made, not on a comparison done here:
-    the image is built only from a clean, committed tree, and the code inside
-    it belongs to root while the process runs as another user, so it cannot be
-    edited in place. What this function CAN see is a working tree mounted over
-    the image's code: then a `.git` directory is present, the commit of the
-    image no longer describes the code, and the run is refused.
+    Two things are checked before "not dirty" is returned:
+
+      1. No `.git` directory lies next to the code. A working tree mounted over
+         the image's code brings one, and then the commit of the image no longer
+         describes the code.
+      2. The code tree gives the hash that was stored when the image was built
+         (verified_image_code_tree). This also sees a mount over a part of the
+         code, which brings no `.git`.
 
     Args:
         repo_root: Root of the code inside the image.
         commit: The commit the image was built from (image_commit).
+        code_tree_file: The file with the tree hash stored at build time.
 
     Raises:
-        RuntimeError: If repo_root contains `.git`.
+        RuntimeError: If repo_root contains `.git`, or the code tree differs from
+            the one the image was built with.
+        FileNotFoundError: If the stored tree hash is missing.
     """
     if (repo_root / ".git").exists():
         raise RuntimeError(
@@ -102,7 +147,28 @@ def image_git_state(repo_root: Path, commit: str) -> tuple[str, bool]:
             "describe the code that runs. Run the image without mounting the repository "
             "over it, or run natively without the variable."
         )
+    verified_image_code_tree(repo_root, code_tree_file)
     return commit, False
+
+
+def code_tree_of_run(repo_root: Path) -> str:
+    """The code-tree hash a run records next to its commit.
+
+    Args:
+        repo_root: Root of the code.
+
+    Returns:
+        Inside a container image: the verified tree hash of the image. On the
+        laptop: NOT_AN_IMAGE, because there git_commit and git_dirty describe
+        the code and no tree hash was stored by a build.
+
+    Raises:
+        RuntimeError / FileNotFoundError / ValueError: Inside an image, as
+            verified_image_code_tree.
+    """
+    if image_commit(os.environ) is None:
+        return NOT_AN_IMAGE
+    return verified_image_code_tree(repo_root, IMAGE_CODE_TREE_FILE)
 
 
 def git_state(repo_root: Path, results_root: Path) -> tuple[str, bool]:
@@ -110,7 +176,8 @@ def git_state(repo_root: Path, results_root: Path) -> tuple[str, bool]:
 
     Inside a container image (HMREC_IMAGE_GIT_COMMIT is set, see the module
     docstring) the answer is the commit the image was built from and False
-    (image_git_state); git is not called. Everything below describes the
+    (image_git_state), after the code tree was compared with the hash stored at
+    build time; git is not called. Everything below describes the
     laptop, where the variable is not set.
 
     "Dirty" means any tracked change or untracked file in the working tree,
@@ -130,11 +197,12 @@ def git_state(repo_root: Path, results_root: Path) -> tuple[str, bool]:
 
     Raises:
         ValueError: Inside an image, if HMREC_IMAGE_GIT_COMMIT is not a full hash.
-        RuntimeError: Inside an image, if a working tree is mounted over the code.
+        RuntimeError: Inside an image, if a working tree is mounted over the code
+            or the code tree is not the one the image was built with.
     """
     commit_of_image = image_commit(os.environ)
     if commit_of_image is not None:
-        return image_git_state(repo_root, commit_of_image)
+        return image_git_state(repo_root, commit_of_image, IMAGE_CODE_TREE_FILE)
     commit = subprocess.run(
         ["git", "rev-parse", "HEAD"], cwd=repo_root, capture_output=True, text=True, check=True
     ).stdout.strip()

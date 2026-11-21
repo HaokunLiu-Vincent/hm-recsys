@@ -21,6 +21,9 @@ FROM python:3.12.16-slim-trixie@sha256:5e2bdb1b0d542d5039cffb8181c65930093949194
 #           one. Its version is pinned here because another version can change the order of
 #           floating-point sums; if Debian replaces this version the build FAILS, which is
 #           wanted: the change must be made here, on purpose, and calibrated again.
+#           What to do then (docs/decisions.md 2026-11-22): change LIBGOMP_VERSION in a
+#           commit of its own, run calibration item D again with the new image, and record
+#           both in docs/decisions.md. Never remove the pin to make a build pass.
 # git:      the tests of hmrec.git_state build throw-away repositories. The image itself
 #           has no .git; its commit comes from the build argument below.
 # make:     `make lint` and `make test` run inside the image.
@@ -71,6 +74,17 @@ ENV PYRIGHT_PYTHON_IGNORE_WARNINGS=1
 # data/, artifacts/, .git or .venv.
 COPY . .
 RUN uv sync --frozen
+
+# The hash of the code tree that was just copied (hmrec.code_tree: src/, scripts/, tests/,
+# configs/, docs/ and the top-level project files; not results/). It is stored OUTSIDE
+# /app, in a file that belongs to root. At the start of a run hmrec.git_state computes the
+# hash again and refuses if it differs: then a folder is mounted over the code, or a file
+# was changed, and the image's commit would not describe the code that runs. Run records
+# hold the hash next to the commit.
+RUN mkdir -p /opt/hmrec \
+    && /app/.venv/bin/python scripts/code_tree_hash.py --root /app > /opt/hmrec/code-tree.sha256 \
+    && grep --quiet --extended-regexp '^[0-9a-f]{64}$' /opt/hmrec/code-tree.sha256 \
+    && chmod 0444 /opt/hmrec/code-tree.sha256
 
 # The commit this image was built from (docs/mlops.md §8.1). Required: without it the build
 # stops here. hmrec.git_state reads the variable instead of asking git.

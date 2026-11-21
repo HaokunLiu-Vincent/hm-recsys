@@ -152,6 +152,13 @@ def test_the_torch_side_report_of_this_process() -> None:
 
     lines = report_lines("torch", os.environ)
     assert lines[0] == "side: torch"
+    (code_tree,) = [line for line in lines if line.startswith("image code tree: ")]
+    if sys.platform == "darwin":
+        # The laptop: git describes the code; no build stored a tree hash.
+        assert code_tree == "image code tree: not an image"
+    else:
+        # A container image: the tree hash, verified against the one stored at build time.
+        assert len(code_tree.removeprefix("image code tree: ")) == 64
     assert f"package torch: {torch.__version__}" in lines
     assert any(line.startswith("package implicit: ") for line in lines)
     assert any(line.startswith("torch intra-op threads: ") for line in lines)
