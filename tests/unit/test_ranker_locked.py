@@ -196,6 +196,29 @@ def test_another_runtime_or_thread_count_is_refused(tmp_path: Path) -> None:
         load_locked_ranker(paths, base, unknown)
     with pytest.raises(ValueError, match="num_threads: 8 here, 6 in the lock"):
         check_runtime_matches_lock(lock, RECORDED_RUNTIME, 8)
+
+
+def test_a_linux_container_is_not_the_locked_runtime(tmp_path: Path) -> None:
+    # In a Linux container LightGBM runs on GNU libgomp, not on the Homebrew libomp the
+    # V phase ran on (hmrec.ranker.runtime records it as "<package> <version>"). The lock
+    # is not changed and the check is not relaxed for it: the entry refuses, so a Linux
+    # result is never taken for a bit-identical repeat of the laptop (docs/mlops.md §8.3).
+    paths, base = _workspace(tmp_path)
+    container = LightGBMRuntime(
+        "4.7.0", "/usr/lib/aarch64-linux-gnu/libgomp.so.1.0.0", "libgomp1 14.2.0-19"
+    )
+    with pytest.raises(ValueError, match="libomp version: 'libgomp1 14.2.0-19' here") as error:
+        load_locked_ranker(paths, base, container)
+    assert "'22.1.4' in the lock" in str(error.value)
+    assert "/usr/lib/aarch64-linux-gnu/libgomp.so.1.0.0" in str(error.value)
+    # The same LightGBM version and thread count do not make it pass.
+    assert "LightGBM version" not in str(error.value)
+    assert "num_threads" not in str(error.value)
+
+
+def test_several_differences_are_all_named(tmp_path: Path) -> None:
+    paths, _ = _workspace(tmp_path)
+    lock = load_ranker_lock(paths.ranker_lock_file)
     # All three at once: the message names each one.
     with pytest.raises(ValueError) as error:
         check_runtime_matches_lock(lock, LightGBMRuntime("5.0.0", "/x", "1.0"), 4)

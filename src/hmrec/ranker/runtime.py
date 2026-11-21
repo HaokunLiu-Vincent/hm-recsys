@@ -12,58 +12,50 @@ How the loaded library is found: the operating system is asked for the files
 this process has loaded (macOS: the dyld image list; Linux: /proc/self/maps),
 so the answer is the library in use, not a guess from an install location.
 
-The version is read from the path: Homebrew installs into
+On macOS (the laptop, the reference of every bit-identical check) the version
+is read from the path: Homebrew installs into
 .../Cellar/libomp/<version>/lib/libomp.dylib. Any other location gives
 "unknown" (the path is still recorded).
 
+On Linux (a container, docs/mlops.md §8) LightGBM loads the GNU OpenMP runtime
+(libgomp) of the image, not LLVM's libomp. Its path does not tell a version, so
+the version is asked from the package database of the system the process runs
+on, and recorded with the package name: "libgomp1 14.2.0-19". The two columns
+keep their names (libomp_path, libomp_version) because the result tables have a
+fixed header; on Linux they describe libgomp. A Linux value can never equal a
+Homebrew version such as "22.1.4" (it starts with a package name), so the check
+of the Ranker lock (hmrec.ranker.locked.check_runtime_matches_lock) never takes
+a Linux process for the runtime the V phase ran on: a Linux result is not
+bit-identical to the laptop and is accepted by the tolerance of docs/mlops.md
+§8.3 instead.
+
 A process with TWO OpenMP runtimes (for example torch's own libomp next to
 Homebrew's) aborts, hangs or crashes, so read_lightgbm_runtime refuses it.
+
+The functions that list loaded libraries live in hmrec.native_libraries (bottom
+layer, no lightgbm), because the torch side reports its libraries too; they are
+re-exported here under the names they always had.
 """
 
-import ctypes
-import os
 import sys
 from collections.abc import Sequence
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from pathlib import Path
 
 import lightgbm as lgb
 
-# File names of OpenMP runtimes: LLVM (libomp), GNU (libgomp), Intel (libiomp5).
-OPENMP_LIBRARY_PREFIXES = ("libomp", "libgomp", "libiomp")
+from hmrec.native_libraries import (  # noqa: F401  (re-exported, see the module docstring)
+    OPENMP_LIBRARY_PREFIXES,
+    UNKNOWN,
+    debian_package_version,
+    loaded_library_paths,
+    openmp_libraries,
+)
+
 HOMEBREW_CELLAR = "Cellar"
 HOMEBREW_FORMULA = "libomp"
-UNKNOWN = "unknown"
 NOT_LOADED = "not loaded"
-
-
-def loaded_library_paths() -> list[str]:
-    """Paths of the shared libraries loaded into this process, as the OS reports them."""
-    if sys.platform == "darwin":
-        process = ctypes.CDLL(None)
-        process._dyld_image_count.restype = ctypes.c_uint32
-        process._dyld_get_image_name.restype = ctypes.c_char_p
-        process._dyld_get_image_name.argtypes = [ctypes.c_uint32]
-        names = [
-            process._dyld_get_image_name(index) for index in range(process._dyld_image_count())
-        ]
-        return [name.decode() for name in names if name]
-    maps_file = Path("/proc/self/maps")
-    if not maps_file.is_file():
-        return []
-    # A line looks like "7f.. r-xp 0000 08:01 123  /usr/lib/libgomp.so.1": keep the path.
-    paths = [line.split()[-1] for line in maps_file.read_text().splitlines() if "/" in line]
-    return sorted(set(paths))
-
-
-def openmp_libraries(paths: Sequence[str]) -> list[str]:
-    """The OpenMP runtimes among `paths`, with symbolic links resolved; distinct and sorted."""
-    found = {
-        os.path.realpath(path)
-        for path in paths
-        if Path(path).name.startswith(OPENMP_LIBRARY_PREFIXES)
-    }
-    return sorted(found)
+LINUX = "linux"
 
 
 def libomp_version_from_path(path: str) -> str:
@@ -86,8 +78,9 @@ class LightGBMRuntime:
         lightgbm_version: lightgbm.__version__, e.g. "4.7.0".
         libomp_path: Resolved path of the loaded OpenMP runtime ("not loaded" if
             the OS lists none).
-        libomp_version: Its version, read from the path ("unknown" if the path
-            does not tell).
+        libomp_version: Its version: read from the Homebrew path on macOS, from
+            the package database on Linux, where it carries the package name
+            ("libgomp1 14.2.0-19"); "unknown" if neither tells.
     """
 
     lightgbm_version: str
@@ -128,13 +121,35 @@ def runtime_from_libraries(lightgbm_version: str, openmp_paths: Sequence[str]) -
     return LightGBMRuntime(lightgbm_version, path, libomp_version_from_path(path))
 
 
+def with_platform_version(runtime: LightGBMRuntime, platform: str) -> LightGBMRuntime:
+    """Fill in the OpenMP version on Linux, where the path does not tell it.
+
+    On macOS the record is returned as it is: the version comes from the
+    Homebrew path, exactly as in every recorded run of stages 1 and 2.
+
+    Args:
+        runtime: The record built from the loaded libraries (runtime_from_libraries).
+        platform: sys.platform of this process ("darwin" = macOS, "linux").
+
+    Returns:
+        On Linux with a loaded runtime: the same record with libomp_version set
+        to "<package> <version>" from the package database, e.g.
+        "libgomp1 14.2.0-19" ("unknown" if no package owns the file). Otherwise
+        `runtime` unchanged.
+    """
+    if platform != LINUX or runtime.libomp_path == NOT_LOADED:
+        return runtime
+    return replace(runtime, libomp_version=debian_package_version(runtime.libomp_path))
+
+
 def read_lightgbm_runtime() -> LightGBMRuntime:
     """The LightGBM version and the OpenMP runtime loaded in THIS process.
 
-    Importing lightgbm (at the top of this module) loads its libomp, so the
-    library is already in the process when this function looks for it.
+    Importing lightgbm (at the top of this module) loads its OpenMP runtime, so
+    the library is already in the process when this function looks for it.
 
     Raises:
         RuntimeError: If more than one OpenMP runtime is loaded.
     """
-    return runtime_from_libraries(lgb.__version__, openmp_libraries(loaded_library_paths()))
+    runtime = runtime_from_libraries(lgb.__version__, openmp_libraries(loaded_library_paths()))
+    return with_platform_version(runtime, sys.platform)
