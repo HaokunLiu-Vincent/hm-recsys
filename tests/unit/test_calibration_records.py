@@ -121,7 +121,8 @@ def test_a_table_with_another_header_is_not_appended_to(tmp_path: Path) -> None:
 
 def test_the_committed_calibration_tables_have_the_fixed_headers_and_say_what_they_ran_on() -> None:
     # results/m10_calibration/ holds the calibration of week V4 in the arm64 container
-    # (2026-11-22). read_rows fails on another header. Every row must name its run, a full
+    # (2026-11-22: run1 and run2 of part 2, run3 and run4 of part 3). read_rows fails on
+    # another header. Every row must name its run, a full
     # commit, a verified code tree and the OpenMP runtime: a container result is only
     # meaningful together with what it was computed on.
     paths = get_paths()
@@ -134,14 +135,19 @@ def test_the_committed_calibration_tables_have_the_fixed_headers_and_say_what_th
         rows = read_rows(path, columns)
         assert rows, f"{path} is empty or missing"
         for row in rows:
-            assert row["run"] in ("run1", "run2")
+            assert row["run"] in ("run1", "run2", "run3", "run4")
             assert len(row["git_commit"]) == 40 and row["git_dirty"] == "False"
             assert row["image_commit"] == row["git_commit"]
             assert len(row["code_tree_sha256"]) == 64
             assert (row["os"], row["architecture"]) == ("linux", "aarch64")
-            # A process that computed something loaded an OpenMP runtime and names it. The
-            # comparison of two Ranker runs only reads files, so it may have loaded none.
-            if path != paths.calibration_repeatability_file:
+            # A recall or Ranker process loaded an OpenMP runtime and names it. Two kinds of
+            # process load none: the comparison of two runs (it only reads files) and the
+            # feature build of item E (polars and numpy only; numpy's BLAS is named instead).
+            is_feature_build = (row.get("item"), row.get("scope")) == ("E", "features")
+            if is_feature_build:
+                assert row["openmp_library"] == "not loaded"
+                assert "numpy.libs" in row["blas_libraries"]
+            elif path != paths.calibration_repeatability_file:
                 assert row["openmp_library"] != "not loaded"
     # The Ranker rows ran on the system OpenMP runtime the Dockerfile pins.
     ranker_rows = [
