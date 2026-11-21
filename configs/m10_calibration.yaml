@@ -12,13 +12,23 @@ fold: V4
 # The week of the R6 fine-tuning step (item C2): the recorded model after V2 is
 # fine-tuned on this week, and the result predicts `fold`.
 fine_tune_fold: V3
-# Names of the container runs. The second run repeats items B, C2 and D in fresh
-# containers to see whether two container runs give the same bits.
-runs: [run1, run2]
+# Names of the container runs. A later run repeats items in fresh containers, to see
+# whether two container runs give the same bits.
+runs: [run1, run2, run3, run4]
+# run1 and run2 are the two runs of part 2 (2026-11-22). run3 and run4 repeat item C2
+# with the Linux-only runtime of the R6 fine-tune (part 3; deterministic algorithms),
+# and run3 holds the end-to-end item E.
 # The stage-1 Ranker record the container model is compared with: the M8 rehearsal
 # trained the locked configuration on V4 to exactly 500 trees and was bit-identical
 # to the M7 record (results/m8_rehearsal_check.csv).
 ranker_reference_area: m8_rehearsal
+# Item E (end to end): the features of `fold` are built from the container's own
+# candidates. R6 and its vectors come from the run item E is started for (--run);
+# R1-R5, R1's bucket scores and R5's vectors come from `statistical_run`; the Ranker
+# model is the one item D trained in `ranker_model_run`.
+end_to_end:
+  statistical_run: run1
+  ranker_model_run: run1
 # The Ranker metrics that are compared, in the column order of the stage-1 metric
 # tables (results/m8_rehearsal_metrics.csv). The first one is the main metric.
 metrics: [map@12, recall@12, ndcg@12]
@@ -36,6 +46,13 @@ inputs:
     articles.parquet: 515d85638a2ae0f6d430ef9be540f934ba579abb2c0f67362e7c699c546c77df
     customers.parquet: 8995d79e2a2c86499acd934d0af0ccb79db5ae7fe85e430ae1b8db5414aefa39
     metadata.json: da0a6023af36d02014a4df2feb7ee369bcb50745311bb9550b854cf3e4ec017c
+  # The article embeddings the feature code reads (item E), relative to data/processed/
+  # (computed on the laptop on 2026-11-22).
+  embeddings:
+    embeddings/image_by_article_idx.npy: 07a7b0a3abc292a69191779418735275f8a98574babea8d1f9247091b2d14ac0
+    embeddings/image_mask.npy: 738a0078d98241a398329b7cb5f3e58cda6193b59286b8e4677f3833c9ba81bd
+    embeddings/text_by_article_idx.npy: 3b7e4d6159a234d00cac71887f421157b333cb971e1f3018249722f82618d7e4
+    embeddings/text_mask.npy: 6cdddfd1d2db2a4b5aa72968bb1f5aba87cca41e8b4e5433f62a41a2af5a69fa
   artifacts:
     queries/V3.parquet: 4d5428f05b41e3b6eb73f90f2a50014c9f90884eac5b9dd1d4271c0ca3b940e0
     queries/V4.parquet: 8dc76f9100391f887dba2964cd302f9b90752a9d001f7aab3e87d70a3b2fd104

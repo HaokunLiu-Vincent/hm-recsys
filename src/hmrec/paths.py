@@ -22,6 +22,10 @@ from hmrec.config import BaseConfig, load_base_config
 PROJECT_ROOT = Path(__file__).resolve().parents[2]
 CONFIGS_DIR = PROJECT_ROOT / "configs"
 BASE_CONFIG_FILE = CONFIGS_DIR / "base.yaml"
+# The channel whose candidates calibration item E reads from another tree than R1-R5, and
+# the tree of a calibration run that holds its channels (see EndToEndInputPaths).
+R6_CHANNEL_NAME = "r6_twotower"
+CALIBRATION_MAIN_TREE = "main"
 
 
 def resolve_root(root: str, project_root: Path) -> Path:
@@ -889,6 +893,72 @@ def calibration_output_paths(
         data_root=paths.data_root,
         artifacts_root=paths.calibration_tree_dir(platform, run, tree),
         results_root=paths.calibration_results_dir,
+    )
+
+
+@dataclass(frozen=True)
+class EndToEndInputPaths(ProjectPaths):
+    """Where calibration item E reads the six channels of a week from (docs/mlops.md §8.3).
+
+    Item E builds the features of a week from the container's OWN candidates. They
+    come from two runs: R1-R5 (with R1's bucket score table and R5's vectors) from
+    the run that generated them, and R6 (with its vectors) from the run whose R6
+    chain is used. This class is a ProjectPaths that answers each of those paths
+    from the right tree, so that the locked feature code
+    (hmrec.features.build.load_candidates, load_dense_sources) reads them as it
+    reads a stage-1 tree. Processed tables and embeddings come from data_root as always.
+
+    Attributes:
+        artifacts_root: The tree that holds R6 (its candidates and vectors).
+        statistical_artifacts_root: The tree that holds R1-R5.
+    """
+
+    statistical_artifacts_root: Path
+
+    @property
+    def statistical_paths(self) -> ProjectPaths:
+        """A ProjectPaths whose artifacts root is the tree of R1-R5."""
+        return ProjectPaths(
+            project_root=self.project_root,
+            data_root=self.data_root,
+            artifacts_root=self.statistical_artifacts_root,
+            results_root=self.results_root,
+        )
+
+    def candidates_file(self, fold: str, channel: str) -> Path:
+        """R6 from artifacts_root; every other channel from the tree of R1-R5."""
+        if channel == R6_CHANNEL_NAME:
+            return super().candidates_file(fold, channel)
+        return self.statistical_paths.candidates_file(fold, channel)
+
+    def r1_bucket_scores_file(self, fold: str) -> Path:
+        """R1's bucket score table, from the tree of R1-R5."""
+        return self.statistical_paths.r1_bucket_scores_file(fold)
+
+    def wals_vectors_dir(self, fold: str) -> Path:
+        """R5's vectors, from the tree of R1-R5."""
+        return self.statistical_paths.wals_vectors_dir(fold)
+
+
+def end_to_end_input_paths(
+    paths: ProjectPaths, platform: str, r6_run: str, statistical_run: str
+) -> EndToEndInputPaths:
+    """The input paths of calibration item E.
+
+    Args:
+        paths: The project paths (the stage-1 locations; data_root is kept).
+        platform: e.g. "linux-arm64".
+        r6_run: The calibration run whose R6 candidates and vectors are used.
+        statistical_run: The calibration run whose R1-R5 outputs are used.
+    """
+    return EndToEndInputPaths(
+        project_root=paths.project_root,
+        data_root=paths.data_root,
+        artifacts_root=paths.calibration_tree_dir(platform, r6_run, CALIBRATION_MAIN_TREE),
+        results_root=paths.calibration_results_dir,
+        statistical_artifacts_root=paths.calibration_tree_dir(
+            platform, statistical_run, CALIBRATION_MAIN_TREE
+        ),
     )
 
 

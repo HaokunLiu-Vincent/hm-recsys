@@ -17,10 +17,12 @@ import pytest
 
 from hmrec.calibration.context import CalibrationContext
 from hmrec.calibration.ranker_items import (
+    END_TO_END_AREA,
     load_ranker_setup,
     metric_measurements,
     model_measurements,
     require_new_outputs,
+    run_end_to_end_ranker,
     top_k_measurements,
 )
 from hmrec.calibration.records import Measurement
@@ -109,7 +111,7 @@ def test_metric_rows_and_the_tolerance_on_map_at_the_locked_trees(tmp_path: Path
         100: {"map@12": 0.020, "recall@12": 0.070, "ndcg@12": 0.050},
         500: {"map@12": 0.0402, "recall@12": 0.076, "ndcg@12": 0.060},
     }
-    rows = _by_key(metric_measurements(context, _outcome(measured), recorded))
+    rows = _by_key(metric_measurements(context, _outcome(measured).metric_rows, recorded))
     assert len(rows) == 6
     judged = rows[("500 trees", "map@12")]
     assert (judged.measured, judged.stage1) == (0.0402, 0.040)
@@ -119,10 +121,10 @@ def test_metric_rows_and_the_tolerance_on_map_at_the_locked_trees(tmp_path: Path
     assert rows[("500 trees", "recall@12")].within_tolerance is None
     # 2% above the record at the locked trees: outside.
     outside = {500: {"map@12": 0.0408, "recall@12": 0.080, "ndcg@12": 0.060}}
-    rows = _by_key(metric_measurements(context, _outcome(outside), recorded))
+    rows = _by_key(metric_measurements(context, _outcome(outside).metric_rows, recorded))
     assert rows[("500 trees", "map@12")].within_tolerance is False
     with pytest.raises(ValueError, match="stage 1 recorded no metrics at 300 trees"):
-        metric_measurements(context, _outcome({300: measured[100]}), recorded)
+        metric_measurements(context, _outcome({300: measured[100]}).metric_rows, recorded)
 
 
 def _model_text(leaf_values: list[str]) -> str:
@@ -191,3 +193,42 @@ def test_require_new_outputs(tmp_path: Path) -> None:
     (tmp_path / "model.txt").write_text("x", encoding="utf-8")
     with pytest.raises(FileExistsError, match="Nothing is reused"):
         require_new_outputs((tmp_path / "a.parquet", tmp_path / "model.txt"))
+
+
+# ---------------------------------------------------------------- item E
+
+
+def test_item_e_rows_carry_their_own_item_and_the_same_tolerance_on_map(tmp_path: Path) -> None:
+    context = _context(tmp_path)
+    recorded = {500: {"map@12": 0.040, "recall@12": 0.080, "ndcg@12": 0.060}}
+    # End to end, MAP@12 is 0.25% below the record: inside the provisional 1%.
+    measured = {500: {"map@12": 0.0399, "recall@12": 0.0799, "ndcg@12": 0.0599}}
+    rows = _by_key(metric_measurements(context, _outcome(measured).metric_rows, recorded, "E"))
+    assert {row.item for row in rows.values()} == {"E"}
+    assert rows[("500 trees", "map@12")].within_tolerance is True
+    assert rows[("500 trees", "recall@12")].within_tolerance is None
+    _predictions(tmp_path / "recorded.parquet", {500: {1: [1, 2], 2: [3, 4]}})
+    _predictions(tmp_path / "measured.parquet", {500: {1: [2, 1], 2: [3, 4]}})
+    top = top_k_measurements(
+        tmp_path / "measured.parquet", tmp_path / "recorded.parquet", 500, "x", "E"
+    )
+    assert {row.item for row in top} == {"E"}
+    by_quantity = {row.quantity: row.measured for row in top}
+    # Query 1 has the same two articles in another order; query 2 the same list.
+    assert by_quantity["identical_top12_list_query_share"] == 0.5
+    assert by_quantity["identical_top12_set_query_share"] == 1.0
+    assert by_quantity["mean_top12_overlap"] == 1.0
+
+
+def test_item_e_writes_into_its_own_area_and_starts_like_item_d(tmp_path: Path) -> None:
+    # Its Top-12 must not collide with item D's files of the same run.
+    assert END_TO_END_AREA == "m10_end_to_end"
+    context = _context(tmp_path)
+    if sys.platform == "darwin":
+        # The laptop: the tolerance-accepted entry refuses, as for item D.
+        with pytest.raises(RuntimeError, match="runs on Linux only"):
+            run_end_to_end_ranker(context)
+    else:
+        # A container: the platform is accepted; the temporary project has no sample files.
+        with pytest.raises(FileNotFoundError):
+            run_end_to_end_ranker(context)

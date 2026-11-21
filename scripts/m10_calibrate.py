@@ -9,7 +9,9 @@ Usage, inside the image (docs/m10_calibration_plan.md §2; `make image-calibrate
     python scripts/m10_calibrate.py --run run1 --item union
     python scripts/m10_calibrate.py --run run1 --item ranker-dataset
     python scripts/m10_calibrate.py --run run1 --item ranker
-    python scripts/m10_calibrate.py --run run2 --item repeat-ranker
+    python scripts/m10_calibrate.py --run run3 --item e2e-features
+    python scripts/m10_calibrate.py --run run3 --item e2e-ranker
+    python scripts/m10_calibrate.py --run run2 --item repeat-ranker --against run1
 
 One item per process. Each item runs the stage-1 functions with the locked
 configuration, writes ONLY under artifacts/m10_calibration/ and
@@ -42,13 +44,14 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument(
         "--start", default=None, help="for --item r6-predict: recorded or calibration"
     )
+    parser.add_argument("--against", default=None, help="for a repeat item: the earlier run")
     return parser.parse_args()
 
 
 def main() -> None:
     """Run the item."""
     args = parse_args()
-    run_calibration_item(args.item, args.run, args.channel, args.start)
+    run_calibration_item(args.item, args.run, args.channel, args.start, args.against)
 
 
 if __name__ == "__main__":

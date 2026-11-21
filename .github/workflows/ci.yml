@@ -99,3 +99,18 @@ jobs:
           make image-test-lightgbm-side 2>&1 | tee lightgbm-side.txt || status=$?
           echo "::notice title=tests (LightGBM side)::$(grep -E ' (passed|failed|error)' lightgbm-side.txt | tail -n 1)"
           exit "$status"
+
+      # Is an R6 fine-tune repeatable on x86-64? Two fine-tunes of synthetic data in fresh
+      # processes, compared bit by bit (scripts/m10_r6_repeatability.py): once with no
+      # runtime setting (as stage 1 ran) and once with the setting a real fine-tune uses
+      # on Linux. REPORT ONLY: the step publishes what it measured as notices and does not
+      # fail on "not repeatable"; it fails only if the reproducer itself cannot run.
+      - name: R6 fine-tune repeatability on synthetic data (report only)
+        if: ${{ !cancelled() }}
+        run: |
+          for setting in none implemented; do
+            make image-r6-repeatability ARGS="--setting $setting --rows 8192" 2>&1 | tee -a r6-repeatability.txt
+          done
+          grep '^r6 fine-tune repeatability' r6-repeatability.txt > r6-lines.txt
+          test "$(wc -l < r6-lines.txt)" -eq 2
+          while read -r line; do echo "::notice title=r6 repeatability::$line"; done < r6-lines.txt

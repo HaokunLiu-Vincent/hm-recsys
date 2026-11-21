@@ -23,10 +23,17 @@ Two processes, as in stage 1: "ranker-dataset" builds the binary Dataset,
 The fold is checked with the M7 window (hmrec.ranker.window) and the labels
 come through the M7 evaluator (hmrec.eval.ranker_eval): a T fold is refused.
 
+Item E (end to end; run_end_to_end_ranker) is the second half of
+hmrec.calibration.feature_items: the model item D trained scores the wide table
+built from the container's OWN candidates, and the result is evaluated. Nothing
+is trained there.
+
 This module is on the LightGBM side; it must not import torch.
 """
 
 import sys
+import time
+from collections.abc import Sequence
 from dataclasses import dataclass
 from pathlib import Path
 
@@ -49,20 +56,26 @@ from hmrec.calibration.references import (
 )
 from hmrec.data.folds import load_fold_manifest
 from hmrec.eval.ranker_eval import load_m7_evaluator
+from hmrec.hpo.v_records import MetricRow
 from hmrec.hpo.v_trial import (
     DatasetPlan,
+    FoldEvaluation,
     TrialInputs,
     TrialOutcome,
     TrialSpec,
     build_and_save_dataset,
     check_trial_settings,
+    evaluate_checkpoints,
     plan_dataset_for_folds,
     score_and_save,
+    score_fold,
     train_planned_model,
 )
-from hmrec.locks import check_file_sha256, load_features_lock
+from hmrec.locks import check_file_sha256, file_sha256, load_features_lock
 from hmrec.logging_utils import get_logger
 from hmrec.memory import read_process_peak_memory
+from hmrec.paths import calibration_output_paths
+from hmrec.ranker.ablation import build_experiment
 from hmrec.ranker.dataset import read_dataset_record
 from hmrec.ranker.identity import model_config, ranker_config_id
 from hmrec.ranker.platform_entry import (
@@ -71,12 +84,18 @@ from hmrec.ranker.platform_entry import (
     load_locked_ranker_for_platform,
 )
 from hmrec.ranker.runtime import read_lightgbm_runtime
+from hmrec.ranker.train import load_model
 from hmrec.ranker.window import m7_training_window
 
 LOGGER = get_logger("calibration.ranker_items")
 
 ITEM_D = "D"
+ITEM_E = "E"
 AREA = "m10_calibration"
+# The results area of item E's Top-12 (its own folder next to item D's).
+END_TO_END_AREA = "m10_end_to_end"
+RANKING_SCOPE = "ranking"
+MAIN_TREE = "main"
 STEP = "calibration"
 DATASET_SCOPE = "dataset"
 MODEL_SCOPE = "model"
@@ -230,7 +249,10 @@ def run_ranker_dataset(context: CalibrationContext) -> ItemOutcome:
 
 
 def metric_measurements(
-    context: CalibrationContext, outcome: TrialOutcome, recorded: dict[int, dict[str, float]]
+    context: CalibrationContext,
+    metric_rows: Sequence[MetricRow],
+    recorded: dict[int, dict[str, float]],
+    item: str = ITEM_D,
 ) -> list[Measurement]:
     """One row per metric and checkpoint, next to the stage-1 record.
 
@@ -239,9 +261,9 @@ def metric_measurements(
     """
     main_metric = context.config.metrics[0]
     limit = context.config.tolerance.max_map_relative_difference
-    final_trees = max(row.num_trees for row in outcome.metric_rows)
+    final_trees = max(row.num_trees for row in metric_rows)
     rows = []
-    for metric_row in outcome.metric_rows:
+    for metric_row in metric_rows:
         if metric_row.num_trees not in recorded:
             raise ValueError(f"stage 1 recorded no metrics at {metric_row.num_trees} trees")
         for metric in context.config.metrics:
@@ -249,7 +271,7 @@ def metric_measurements(
             judged = metric == main_metric and metric_row.num_trees == final_trees
             rows.append(
                 Measurement(
-                    ITEM_D,
+                    item,
                     f"{metric_row.num_trees} trees",
                     metric,
                     value,
@@ -291,7 +313,7 @@ def model_measurements(
 
 
 def top_k_measurements(
-    predictions_file: Path, reference_file: Path, num_trees: int, source: str
+    predictions_file: Path, reference_file: Path, num_trees: int, source: str, item: str = ITEM_D
 ) -> list[Measurement]:
     """The Top-K of every query at the locked number of trees, against the stage-1 Top-K."""
     measured = pl.read_parquet(predictions_file).filter(pl.col(NUM_TREES) == num_trees)
@@ -301,7 +323,7 @@ def top_k_measurements(
 
     def row(quantity: str, value: float | int) -> Measurement:
         stage1 = comparison.n_queries if quantity == "queries" else 1.0
-        return Measurement(ITEM_D, scope, quantity, value, stage1, source=source)
+        return Measurement(item, scope, quantity, value, stage1, source=source)
 
     return [
         row("queries", comparison.n_queries),
@@ -358,7 +380,8 @@ def run_ranker(context: CalibrationContext) -> ItemOutcome:
     reference_key = (config.ranker_reference_area, FULL_EXPERIMENT, config_id, config.fold)
     reference_model = paths.ranker_model_file(*reference_key)
     check_file_sha256(reference_model, stage1["model_sha256"])
-    rows = metric_measurements(context, outcome, stage1_ranker_metrics(paths, config, config_id))
+    recorded_metrics = stage1_ranker_metrics(paths, config, config_id)
+    rows = metric_measurements(context, outcome.metric_rows, recorded_metrics)
     rows.extend(
         model_measurements(files[2], reference_model, outcome.model_sha256, stage1["model_sha256"])
     )
@@ -395,5 +418,98 @@ def run_ranker(context: CalibrationContext) -> ItemOutcome:
             f"config {config_id}, {spec.num_trees} trees, model sha256 {outcome.model_sha256}; "
             f"LightGBM {runtime.lightgbm_version} on {runtime.libomp_version} "
             f"(entry mode {setup.platform_locked.mode})"
+        ),
+    )
+
+
+# ---------------------------------------------------------------- item E: the run's own features
+
+
+def run_end_to_end_ranker(context: CalibrationContext) -> ItemOutcome:
+    """Item E, second process: score this run's own wide table with the model of item D.
+
+    The model is the one item D trained (configs/m10_calibration.yaml:
+    end_to_end.ranker_model_run); nothing is trained here. The wide table is the
+    one hmrec.calibration.feature_items wrote for this run; every part's sha256
+    is checked against the record written with it. Scoring and evaluation are the
+    functions of hmrec.hpo.v_trial that M7 used (score_fold, evaluate_checkpoints).
+
+    Raises:
+        ValueError: If a lock check fails, the fold is not a V fold, or a feature
+            part has another sha256 than its record.
+        FileNotFoundError: If the model of item D or the features are missing.
+        FileExistsError: If the run already has an end-to-end Top-12.
+    """
+    paths, config, output = context.paths, context.config, context.main_paths
+    setup = load_ranker_setup(context)
+    locked, inputs = setup.platform_locked.locked, setup.inputs
+    config_id, fold = locked.config_id, config.fold
+    labels_name = paths.labels_file(fold).relative_to(paths.artifacts_root).as_posix()
+    verify_files(paths.artifacts_root, config.artifact_sha256, [labels_name])
+    key = (END_TO_END_AREA, FULL_EXPERIMENT, config_id, fold)
+    files = (output.ranker_predictions_file(*key), output.ranker_per_query_file(*key))
+    require_new_outputs(files)
+    model_paths = calibration_output_paths(
+        paths, context.platform_name, config.ranker_model_run, MAIN_TREE
+    )
+    model_file = model_paths.ranker_model_file(AREA, FULL_EXPERIMENT, config_id, fold)
+    stage1 = stage1_ranker_trial(paths, config, config_id)
+    same_model = file_sha256(model_file) == stage1["model_sha256"]
+    experiment = build_experiment(FULL_EXPERIMENT, inputs.lock)
+
+    def score_and_evaluate() -> tuple[FoldEvaluation, int, float]:
+        started = time.perf_counter()
+        booster = load_model(model_file)
+        # score_fold verifies the feature files against features.json before reading them.
+        tops, n_scored = score_fold(
+            booster, output.features_dir(fold), experiment, inputs, locked.num_trees
+        )
+        score_seconds = time.perf_counter() - started
+        # The M7 evaluator checks the phase before the label file is opened (V folds only).
+        evaluator = load_m7_evaluator(inputs.manifest.get(fold), paths.labels_file(fold))
+        evaluation = evaluate_checkpoints(
+            evaluator, tops, inputs.metrics, FULL_EXPERIMENT, config_id, {}
+        )
+        return evaluation, n_scored, score_seconds
+
+    (evaluation, n_scored, score_seconds), seconds, sampled_peak = timed(
+        context, f"{fold} end-to-end ranking", score_and_evaluate
+    )
+    item_peak = read_process_peak_memory()
+    files[0].parent.mkdir(parents=True, exist_ok=True)
+    evaluation.predictions.write_parquet(files[0])
+    evaluation.per_query.write_parquet(files[1])
+    rows = metric_measurements(
+        context, evaluation.metric_rows, stage1_ranker_metrics(paths, config, config_id), ITEM_E
+    )
+    reference_key = (config.ranker_reference_area, FULL_EXPERIMENT, config_id, fold)
+    reference_predictions = paths.ranker_predictions_file(*reference_key)
+    where = reference_predictions.relative_to(paths.artifacts_root.parent).as_posix()
+    rows.extend(
+        top_k_measurements(files[0], reference_predictions, locked.num_trees, where, ITEM_E)
+    )
+
+    def row(quantity: str, value: float | int | str, reference: float | int | str) -> Measurement:
+        return Measurement(ITEM_E, RANKING_SCOPE, quantity, value, reference, source=M8_REHEARSAL)
+
+    rows.extend(
+        [
+            row("ranker_model_sha256_equal_to_stage1", same_model, True),
+            row("scored_rows", n_scored, int(stage1["n_scored_rows"])),
+            row("score_seconds", score_seconds, float(stage1["score_seconds"])),
+            row("seconds", seconds, float(stage1["score_seconds"])),
+            row("max_rss_gb", item_peak.process_max_rss_gb, float(stage1["process_max_rss_gb"])),
+        ]
+    )
+    return ItemOutcome(
+        item=ITEM_E,
+        scope=RANKING_SCOPE,
+        item_seconds=seconds,
+        sampled_peak_rss_gb=sampled_peak,
+        item_peak=item_peak,
+        measurements=rows,
+        detail=(
+            f"model of item D from {config.ranker_model_run} (sha256 equal to stage 1: "
+            f"{same_model}); {n_scored} rows of this run's own features scored"
         ),
     )

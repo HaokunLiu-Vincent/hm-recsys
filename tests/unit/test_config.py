@@ -800,7 +800,11 @@ def _calibration_raw() -> dict[str, Any]:
 
 def test_repo_calibration_config() -> None:
     config = load_calibration_config(REPO_CONFIGS / "m10_calibration.yaml")
-    assert (config.fold, config.fine_tune_fold, config.runs) == ("V4", "V3", ("run1", "run2"))
+    assert (config.fold, config.fine_tune_fold) == ("V4", "V3")
+    assert config.runs == ("run1", "run2", "run3", "run4")
+    # Item E: R1-R5 and the Ranker model come from the first run of part 2.
+    assert (config.statistical_run, config.ranker_model_run) == ("run1", "run1")
+    assert len(config.embedding_sha256) == 4
     assert config.ranker_reference_area == "m8_rehearsal"
     assert config.metrics == ("map@12", "recall@12", "ndcg@12")
     # The provisional tolerance of docs/mlops.md 8.3.
@@ -833,6 +837,10 @@ def test_calibration_config_errors() -> None:
     raw = _calibration_raw()
     raw["runs"] = ["run1", "run1"]
     with pytest.raises(ValueError, match="must be distinct names"):
+        parse_calibration_config(raw)
+    raw = _calibration_raw()
+    raw["end_to_end"]["statistical_run"] = "run9"
+    with pytest.raises(ValueError, match="must be one of the runs"):
         parse_calibration_config(raw)
     raw = _calibration_raw()
     raw["references"] = {}

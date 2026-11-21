@@ -7,7 +7,7 @@ export OMP_NUM_THREADS := 6
 
 .PHONY: setup format lint test-fast test test-torch-side test-lightgbm-side
 .PHONY: image-require-clean image-build image-info image-lint image-test-fast image-test
-.PHONY: image-test-torch-side image-test-lightgbm-side image-calibrate
+.PHONY: image-test-torch-side image-test-lightgbm-side image-calibrate image-r6-repeatability
 
 ## setup: create / update .venv from uv.lock (includes the dev group)
 setup:
@@ -145,3 +145,10 @@ image-calibrate:
 		--mount "type=bind,src=$(CALIBRATION_ARTIFACTS),dst=/app/artifacts/m10_calibration" \
 		--mount "type=bind,src=$(CALIBRATION_RESULTS),dst=/app/results/m10_calibration" \
 		$(IMAGE) python scripts/m10_calibrate.py $(ARGS)
+
+## image-r6-repeatability: the R6 fine-tuning reproducer in the image (synthetic data; ARGS = its arguments)
+# Two fine-tunes in fresh processes, compared bit by bit (scripts/m10_r6_repeatability.py).
+# No data is mounted: the reproducer draws its data from a seed.
+#   make image-r6-repeatability ARGS="--setting implemented --rows 8192"
+image-r6-repeatability:
+	$(IMAGE_RUN) python scripts/m10_r6_repeatability.py $(ARGS)

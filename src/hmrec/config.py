@@ -3136,6 +3136,10 @@ class CalibrationConfig:
         ranker_reference_area: The results area of the stage-1 Ranker record
             ("m8_rehearsal").
         metrics: The Ranker metrics that are compared, the main metric first.
+        statistical_run: Item E: the run whose R1-R5 outputs are used.
+        ranker_model_run: Item E: the run whose item-D model scores the features.
+        embedding_sha256: File under data/processed/ -> its sha256 (the
+            article embeddings the feature code reads).
         processed_sha256: File name under data/processed/ -> its sha256.
         artifact_sha256: Path under artifacts/ -> its sha256 (inputs).
         reference_sha256: Path under artifacts/ -> its sha256 (stage-1 outputs
@@ -3148,6 +3152,9 @@ class CalibrationConfig:
     runs: tuple[str, ...]
     ranker_reference_area: str
     metrics: tuple[str, ...]
+    statistical_run: str
+    ranker_model_run: str
+    embedding_sha256: dict[str, str]
     processed_sha256: dict[str, str]
     artifact_sha256: dict[str, str]
     reference_sha256: dict[str, str]
@@ -3183,13 +3190,16 @@ def parse_calibration_config(raw: Mapping[str, Any]) -> CalibrationConfig:
         "runs",
         "ranker_reference_area",
         "metrics",
+        "end_to_end",
         "inputs",
         "references",
         "provisional_tolerance",
     }
     check_keys(raw, top_keys, where)
     inputs = get_mapping(raw, "inputs", where)
-    check_keys(inputs, {"processed", "artifacts"}, f"{where}.inputs")
+    check_keys(inputs, {"processed", "embeddings", "artifacts"}, f"{where}.inputs")
+    end_to_end = get_mapping(raw, "end_to_end", where)
+    check_keys(end_to_end, {"statistical_run", "ranker_model_run"}, f"{where}.end_to_end")
     tolerance_where = f"{where}.provisional_tolerance"
     tolerance_raw = get_mapping(raw, "provisional_tolerance", where)
     tolerance_keys = {
@@ -3209,12 +3219,18 @@ def parse_calibration_config(raw: Mapping[str, Any]) -> CalibrationConfig:
     runs = get_str_list(raw, "runs", where)
     if not runs or len(set(runs)) != len(runs):
         raise ValueError(f"{where}.runs must be distinct names and not empty, got {runs}")
+    for name in ("statistical_run", "ranker_model_run"):
+        if get_str(end_to_end, name, f"{where}.end_to_end") not in runs:
+            raise ValueError(f"{where}.end_to_end.{name} must be one of the runs {list(runs)}")
     return CalibrationConfig(
         fold=get_str(raw, "fold", where),
         fine_tune_fold=get_str(raw, "fine_tune_fold", where),
         runs=runs,
         ranker_reference_area=get_str(raw, "ranker_reference_area", where),
         metrics=get_str_list(raw, "metrics", where),
+        statistical_run=get_str(end_to_end, "statistical_run", f"{where}.end_to_end"),
+        ranker_model_run=get_str(end_to_end, "ranker_model_run", f"{where}.end_to_end"),
+        embedding_sha256=_get_sha256_mapping(inputs, "embeddings", f"{where}.inputs"),
         processed_sha256=_get_sha256_mapping(inputs, "processed", f"{where}.inputs"),
         artifact_sha256=_get_sha256_mapping(inputs, "artifacts", f"{where}.inputs"),
         reference_sha256=_get_sha256_mapping(raw, "references", where),

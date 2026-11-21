@@ -25,7 +25,16 @@ CALIBRATION_SCRIPTS = (
     REPO / "scripts" / "m10_r6_repeatability.py",
 )
 
-SHARED_MODULES = ("records.py", "compare.py", "references.py", "context.py", "run.py", "repeat.py")
+SHARED_MODULES = (
+    "records.py",
+    "compare.py",
+    "references.py",
+    "context.py",
+    "run.py",
+    "repeat.py",
+    # Item E's feature build: the locked feature code loads neither torch nor LightGBM.
+    "feature_items.py",
+)
 TORCH_SIDE_MODULES = ("recall_items.py", "r6_repeatability.py")
 LIGHTGBM_SIDE_MODULES = ("ranker_items.py",)
 

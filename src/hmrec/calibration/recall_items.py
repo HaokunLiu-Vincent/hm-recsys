@@ -659,6 +659,19 @@ def run_r6_fine_tune(context: CalibrationContext) -> ItemOutcome:
     rows = fine_tune_measurements(
         record, recorded, parameter_difference(recorded_model, model_file)
     )
+    # Which runtime setting the fine-tune ran under on this platform (see
+    # hmrec.recall.twotower.fine_tune_runtime): "deterministic" on Linux, "none" on macOS.
+    runtime_setting = chain.fine_tune_runtime_settings[fold_name]
+    rows.append(
+        Measurement(
+            ITEM_C2,
+            FINE_TUNE_SCOPE,
+            "fine_tune_runtime_setting",
+            runtime_setting,
+            "none",
+            source="the laptop's fine-tune runs under no setting",
+        )
+    )
     stage1 = stage1_run_row(paths, fold_name, R6_CHANNEL)
     note = f"the stage-1 process of {fold_name}: prediction seconds; peak of prediction + fine-tune"
     rows.extend(
@@ -673,7 +686,8 @@ def run_r6_fine_tune(context: CalibrationContext) -> ItemOutcome:
         measurements=rows,
         detail=(
             f"start {start.path.name} sha256 {start.sha256}; model {model_file.name} "
-            f"sha256 {record.sha256}; train loss {record.mean_train_loss!r}"
+            f"sha256 {record.sha256}; train loss {record.mean_train_loss!r}; "
+            f"fine-tune runtime setting {runtime_setting}"
         ),
     )
 

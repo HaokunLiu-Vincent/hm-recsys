@@ -15,20 +15,26 @@ def test_process_label() -> None:
 
 
 def test_arguments_must_fit_the_item() -> None:
-    check_arguments("recall", "r1_popularity", None)
-    check_arguments("r6-predict", None, "calibration")
-    for item in ("r6-fine-tune", "union", "ranker-dataset", "ranker", "repeat-r5"):
-        check_arguments(item, None, None)
+    check_arguments("recall", "r1_popularity", None, None)
+    check_arguments("r6-predict", None, "calibration", None)
+    check_arguments("repeat-r6", None, None, "run3")
+    for item in ("r6-fine-tune", "union", "ranker-dataset", "ranker", "e2e-features", "e2e-ranker"):
+        check_arguments(item, None, None, None)
     with pytest.raises(ValueError, match="--item must be one of"):
-        check_arguments("features", None, None)
+        check_arguments("features", None, None, None)
     with pytest.raises(ValueError, match="--channel is required for --item recall"):
-        check_arguments("recall", None, None)
+        check_arguments("recall", None, None, None)
     with pytest.raises(ValueError, match="--channel is required for --item recall"):
-        check_arguments("union", "r1_popularity", None)
+        check_arguments("union", "r1_popularity", None, None)
     with pytest.raises(ValueError, match="--start is required for --item r6-predict"):
-        check_arguments("r6-predict", None, None)
+        check_arguments("r6-predict", None, None, None)
     with pytest.raises(ValueError, match="--start is required for --item r6-predict"):
-        check_arguments("ranker", None, "recorded")
+        check_arguments("ranker", None, "recorded", None)
+    # A repeat item compares two runs and must be told the earlier one; no other item may.
+    with pytest.raises(ValueError, match="--against is required for a repeat item"):
+        check_arguments("repeat-ranker", None, None, None)
+    with pytest.raises(ValueError, match="--against is required for a repeat item"):
+        check_arguments("e2e-features", None, None, "run1")
 
 
 def test_every_item_of_the_plan_has_a_name() -> None:
@@ -39,6 +45,8 @@ def test_every_item_of_the_plan_has_a_name() -> None:
         "union",
         "ranker-dataset",
         "ranker",
+        "e2e-features",
+        "e2e-ranker",
         "repeat-r5",
         "repeat-r6",
         "repeat-ranker",
@@ -49,7 +57,8 @@ def test_importing_the_entry_loads_neither_torch_nor_lightgbm() -> None:
     # The entry imports an item's module only when that item runs, so a recall process
     # never loads LightGBM and a Ranker process never loads torch.
     code = (
-        "import sys, hmrec.calibration.run, hmrec.calibration.repeat; "
+        "import sys, hmrec.calibration.run, hmrec.calibration.repeat, "
+        "hmrec.calibration.feature_items; "
         "print('torch' in sys.modules, 'lightgbm' in sys.modules)"
     )
     output = subprocess.run(

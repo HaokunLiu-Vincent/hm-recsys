@@ -74,9 +74,9 @@ def test_platform_name() -> None:
 
 def test_only_the_configured_runs_are_allowed() -> None:
     require_known_run("run1", CONFIG)
-    require_known_run("run2", CONFIG)
+    require_known_run("run4", CONFIG)
     with pytest.raises(ValueError, match="--run must be one of"):
-        require_known_run("run3", CONFIG)
+        require_known_run("run5", CONFIG)
 
 
 def test_a_calibration_refuses_uncommitted_code() -> None:
