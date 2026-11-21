@@ -1,0 +1,6 @@
+outs:
+- md5: 0e588206a92db3e210bf1c341386b600.dir
+  size: 1068334999
+  nfiles: 15
+  hash: md5
+  path: bootstrap
