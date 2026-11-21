@@ -69,7 +69,17 @@ submission, seed 42). "Cannot be told apart" does not mean that the two are equa
 **Stage 3 (in progress): MLOps on GCP.** The same system as a weekly pipeline that runs without a
 person: in a container, on a schedule, with versioned inputs, recorded runs, a serving endpoint and
 alerts. It changes how the system runs, not what it computes. Design:
-[`docs/mlops.md`](docs/mlops.md); the first milestone (M10) is the container image and CI.
+[`docs/mlops.md`](docs/mlops.md).
+
+- **M10, container and CI: done (2026-11-22).** One image builds from the repository alone and
+  carries its commit and the hash of its code tree; CI builds the x86-64 image on every push and
+  runs lint and both test suites inside it. Week V4 was run in the arm64 container and compared
+  with the stage-1 records: the largest relative difference on recall or MAP@12 was 0.048%, and
+  end to end (the container's own candidates, features and ranking) MAP@12 differed by +0.0054%.
+  A container result is accepted when recall and MAP@12 are within 1.0% of the stage-1 record
+  (`docs/mlops.md` §8.3, `configs/platforms/linux-arm64.yaml`); the environments differ, so
+  bit-level reproduction is not the goal. One week and one platform were measured.
+- **M11–M15** (versioning, the weekly pipeline, cloud, serving and monitoring, close): not started.
 
 **Three things to know when reading these numbers:**
 

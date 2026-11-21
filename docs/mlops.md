@@ -1,6 +1,7 @@
 # Stage 3: MLOps on GCP
 
 > **Status.** Approved by the user on 2026-11-21. Stage 3 starts with M10; progress and every later change are recorded in `docs/decisions.md`.
+> **M10 (container and CI) was closed on 2026-11-22.** The acceptance of container and cloud results was simplified by the user on that day (§8.3); the calibration it rests on is described there as it was carried out, and the sections that referred to the earlier, tiered tolerance were aligned with it.
 > Cloud limits and prices quoted below were read from the Cloud Run quota and pricing pages on 2026-11-21. Everything marked "estimate" has to be measured before it is relied on.
 
 ---
@@ -17,10 +18,10 @@ The data end on 2020-09-22, so there is no live traffic. "Every week" is therefo
 
 | # | Goal | Accepted when |
 |---|---|---|
-| S1 | A reproducible runtime environment | One container image builds from the repository alone; `make lint` and `make test` pass inside it; the calibration week of §8.3 inside the container is within tolerance |
+| S1 | A reproducible runtime environment | One container image builds from the repository alone; `make lint` and `make test` pass inside it; the calibration week of §8.3 inside the container meets the acceptance of §8.3. **Met on 2026-11-22 for the arm64 container** (§8.3) |
 | S2 | Versioned data and recorded runs | On a clean clone, `dvc pull` restores every pipeline input and the sha256 values match the records; every pipeline run is visible in MLflow with the same metrics as the result tables |
-| S3 | A weekly pipeline that is one command | `weekly --anchor DATE` runs a whole week, stops at the first failed check with the reason, and can be resumed; the eight replayed weeks are within tolerance |
-| S4 | The pipeline runs on GCP on a schedule | A run triggered by Cloud Scheduler completes on Cloud Run Jobs, reads and writes only Cloud Storage, and is within tolerance; its run time and cost are recorded |
+| S3 | A weekly pipeline that is one command | `weekly --anchor DATE` runs a whole week, stops at the first failed check with the reason, and can be resumed; each of the eight replayed weeks, and their pooled MAP@12, meets the acceptance of §8.3 (relative difference at most 1.0% on the four quantities; the two structural checks pass) |
+| S4 | The pipeline runs on GCP on a schedule | A run triggered by Cloud Scheduler completes on Cloud Run Jobs, reads and writes only Cloud Storage, and meets the acceptance of §8.3; its run time and cost are recorded |
 | S5 | A serving endpoint | The endpoint returns the Top-12 of a customer from the latest published prediction set, falls back for unknown customers, and has measured cold-start and p95 latency |
 | S6 | Monitoring and alerts | A failed step, a failed data check, a quality flag and a budget threshold each produce an alert; this is shown by provoking each one once |
 | S7 | CI and CD | Every push runs lint, tests and an image build; a version tag builds, pushes and deploys without stored keys |
@@ -44,7 +45,7 @@ These hold for all of stage 3 and are checked in code or in review:
 1. Every prediction for an anchor uses only data from before the anchor. The simulated clock makes this the normal case, not a special rule.
 2. Lock files, existing result tables and `docs/decisions.md` history are not modified. New records go to new tables.
 3. **T1–T4 labels are read only by the replay** (the closing steps C1 and C2, the `eval`-mode query set, and the comparison with the M8 records), **never to select or tune anything.** The user approved this on 2026-11-21 (decision D1). Alert thresholds and flag rules are fixed and recorded before the first replay tick and are not changed after any T result is seen. T numbers produced by the replay are reported as a verification of the pipeline, not as a new evaluation.
-4. The laptop remains the reference for bit-identical checks. Container and cloud runs are accepted by the tolerance of §8.3.
+4. The stage-1 records made on the laptop remain the reference. Container and cloud runs are accepted against them by §8.3: a relative difference of at most 1.0% on four quantities, and two structural checks. Bit-identity with the laptop is not the goal, and bit-identical repetition on one platform is not required (the environments differ; decision of 2026-11-22).
 5. Code does not name a cloud project, bucket or region. They come from configuration.
 6. No token, key or credential file is written to the repository, an image, a log or a document.
 7. Full-data runs start from committed code; every run records its commit and image digest.
@@ -148,7 +149,7 @@ Every check in the right-hand column already exists in the code as a stop condit
 - **Bootstrap state** is the state at the end of F4: the R6 chain model after F4, the ranker samples of F1–F4, and the monitoring history. It is stored once (§7.1).
 - **Replay: eight ticks in `eval` mode, V1, V2, V3, V4, T1, T2, T3, T4** (decision D1), followed by **one `serve` tick at anchor 2020-09-23**, the week after the data end and the same week as the Kaggle submission. The `serve` tick closes T4 (so T4 is scored too) and produces the prediction set for the endpoint. Its labels do not exist.
 - Eight weeks give the monitoring rules of §10 enough history to act on, and the V-to-T shift recorded in `docs/final_report.md` (T about 20% above V, with more concentrated purchases and more new articles) is a real distribution change for the monitoring to see.
-- **Replay acceptance**: for each week, the `eval`-mode results are within the tolerance of §8.3 of the stage-1 records — `results/m6_candidates.csv` and `results/v_phase_metrics.csv` for V1–V4, the M8 result tables for T1–T4.
+- **Replay acceptance** (§8.3): for each week, the recall of every channel, the union recall and MAP@12 of the `eval`-mode run differ from the stage-1 record by at most 1.0% relative; so does the pooled MAP@12 over the replayed weeks, compared with the same pooling of the stage-1 records; and in every tick the feature rows equal the deduplicated candidates of the same run with no duplicate key. The records are `results/m6_candidates.csv` and `results/v_phase_metrics.csv` for V1–V4 and the M8 result tables for T1–T4. Pair overlap of the candidates, the deduplicated candidate count and bit-equality of scores are reported for every week and are not acceptance criteria.
 - **`serve` tick diagnostic** (reported, not an acceptance criterion): the Top-12 overlap with the saved Kaggle prediction set, which used the same locked configuration, the same R6 chain and a ranker trained on T1–T4. Nothing is submitted.
 
 ### 6.4 State and resuming
@@ -192,10 +193,21 @@ gs://<bucket>/
 
 ### 8.1 The image
 
-- Base: a slim Python 3.12 image, pinned by digest. Dependencies installed with `uv sync --frozen` from `uv.lock`. The OpenMP runtime comes from the image, so its version is pinned by the image digest. This removes the limitation that libomp sits outside `uv.lock` (`docs/final_report.md` §7.2 item 17).
+- Base: a slim Python 3.12 image, pinned by digest. Dependencies installed with `uv sync --frozen` from `uv.lock`. The OpenMP runtime LightGBM runs on comes from the image and is pinned there (the Debian package `libgomp1`, by exact version in the `Dockerfile`). This removes the limitation that libomp sits outside `uv.lock` (`docs/final_report.md` §7.2 item 17).
 - **torch on Linux comes from the PyTorch CPU-only index.** The default PyPI wheel for Linux x86-64 pulls several GB of CUDA libraries that this project never uses. The index is set in `pyproject.toml` for Linux only and `uv.lock` is regenerated; macOS resolution must stay unchanged, which is checked by comparing the macOS entries of the lock before and after. This is a dependency change (D6).
 - **The image carries its commit.** There is no `.git` inside a container, so an image is built only from a clean, committed tree, and the commit hash is stored in the image (label and environment variable). Run records take the commit from there and add the image digest (invariant 7).
 - **The image carries the hash of its code tree** (decision of 2026-11-22). It is computed at build time over the files that may enter the image (without `results/`), stored in the image, computed again at the start of a run and compared; a mismatch refuses the run, and run records hold the hash next to the commit. **It guards against accidental mounts and edits, not against deliberate replacement**: the stored hash and the commit are both read from inside the container, so someone who replaces both is not detected.
+- **Which OpenMP runtime each process uses** (measured in the arm64 image, recorded in every row of `results/m10_calibration/runs.csv`):
+
+  | Process | OpenMP runtime | Pinned by |
+  |---|---|---|
+  | LightGBM (Dataset, training, scoring) | the system GNU runtime, `libgomp1 14.2.0-19` | the package version in the `Dockerfile` |
+  | Recall, R1–R6 (`implicit` for R5, torch for R6) | the copy of libgomp inside the torch wheel. These processes import torch first, and the loader keeps that copy for the whole process | the torch version in `uv.lock` (`2.15.0+cpu`); the platform record identifies it by that version |
+  | Feature build | none (polars and numpy only; numpy uses the OpenBLAS inside its wheel) | `uv.lock` |
+
+- **Two runtime settings apply on Linux only; the laptop runs exactly as in stage 1.**
+  - **R6 fine-tuning uses `torch.use_deterministic_algorithms(True)`**, for the duration of the fine-tune only. Without it two fine-tunes of the same week give different weights; with it they are bit-identical (measured on arm64 with real data and on x86-64 with the synthetic reproducer, 2026-11-22). The setting costs no measurable time on a real week (199 s and 200 s with it, 198 s and 200 s without). It stays because it is implemented and free; bit-identical repetition is not an acceptance criterion (§8.3).
+  - **During an R5 fit the BLAS of scipy runs on one thread**; `implicit` keeps its 6 OpenMP threads. Only scipy's BLAS is limited: limiting every BLAS also changes torch's thread count on arm64. `implicit` still prints its warning once, because it looks at every BLAS of the process.
 - No data, model or credential is copied into the image. Data are mounted (laptop) or read from Cloud Storage (cloud).
 - torch and LightGBM stay in separate processes, as today.
 - `num_threads` stays 6. A Cloud Run job with 6 vCPU can have 4 to 24 GiB of memory; 6 vCPU and 24 GiB is the starting shape.
@@ -204,40 +216,77 @@ gs://<bucket>/
 
 | Environment | CPU and OS | Role |
 |---|---|---|
-| Laptop, native | Apple silicon, macOS, libomp | The reference; bit-identical checks stay here |
+| Laptop, native | Apple silicon, macOS, libomp | Where the stage-1 records were made; they are the reference of §8.3 |
 | Container on the laptop | arm64 Linux | Development and the acceptance of S1 and S3 |
 | Cloud Run | x86-64 Linux | The acceptance of S4 |
 
 The cloud image is built for x86-64 by CI, not on the laptop (emulation is too slow to be useful). CI also runs lint and both test suites inside that image, so x86-64 problems show up from M10 on, long before M13.
 
-### 8.3 Tolerance
+### 8.3 Acceptance across environments
 
-Different operating systems, CPU architectures, OpenMP runtimes and BLAS libraries change floating-point summation order, so container and cloud results will not be bit-identical to the laptop. R1–R4 are counting and sorting and should not change. R5 (WALS) and R6 (the Two-Tower fine-tuning chain) produce vectors that differ slightly, which can swap articles at the Top-K boundary and change the deduplicated candidate count. Acceptance is therefore tiered:
+Different operating systems, CPU architectures, OpenMP runtimes and BLAS libraries change the order of floating-point sums, so a container or cloud result is not bit-identical to the laptop. **The environments differ, so bit-level reproduction is not the goal; a difference within 1% is acceptable** (the user's decision of 2026-11-22, `docs/decisions.md`). This section replaces the tiered, provisional tolerance of the first version of this document.
 
-| Quantity | Provisional tolerance against the stage-1 record |
+**Acceptance criteria.** A container or cloud result is accepted against the stage-1 record when the relative difference, |result − record| / record, is at most **1.0%** for each of:
+
+| # | Quantity |
 |---|---|
-| R1–R4 candidates of a week | identical |
-| R5 and R6 candidates of a week | at least 99% of the recorded (customer, article) pairs present |
-| Deduplicated candidates of a week | count within 1% |
-| Feature rows | equal to the deduplicated candidates of the same run, no duplicate key (internal consistency, not equality with stage 1) |
-| Recall of a channel in a week; union recall | relative difference ≤ 1.0% |
-| MAP@12 of a single week | relative difference ≤ 1.0% |
-| Pooled MAP@12 over the replayed weeks | relative difference ≤ 0.5% |
+| 1 | Recall of a channel in a week (each of R1–R6) |
+| 2 | Union recall of a week |
+| 3 | MAP@12 of a single week |
+| 4 | Pooled MAP@12 over the replayed weeks |
+
+**Two structural checks stay**, because they detect bugs and not numeric differences:
+
+| # | Check |
+|---|---|
+| 5 | The feature rows of a run equal the deduplicated candidates of the same run |
+| 6 | No (query, article) key repeats in the features |
+
+**Reported, not an acceptance criterion**: the pair overlap of the candidates of every channel with the record, the deduplicated candidate count, and bit-equality of scores. **Bit-identical repetition on the same platform is not required**, and no extra run is made to verify it.
 
 - These are engineering thresholds, not statistical tests. For scale: LambdaMART varies by 0.07% across seeds on V, and one week differs from another by up to 41%.
-- **Calibration items**, all on week V4: the R1–R4 candidates; one R5 fit with its candidates; one R6 fine-tuning step from the recorded previous model, with its candidates; LightGBM training and evaluation from the frozen features. Each is compared with the stage-1 record of V4.
-- **Procedure**:
-  1. M10 measures the calibration items in the arm64 container on the laptop. The thresholds are confirmed or changed and recorded in `docs/decisions.md`.
-  2. M13 starts with the same calibration items on Cloud Run (x86-64), declared in advance as calibration. The thresholds may be confirmed or changed once, recorded, and only then does the first cloud replay tick run.
-  3. Thresholds are not changed after any replay result is seen.
-- Calibration outputs go to new locations and new tables. They never overwrite a stage-1 artifact or result.
-- A difference above tolerance stops the milestone and is investigated step by step, starting from the first step that differs; it is not explained away.
+- **The thresholds are fixed for the arm64 container** (platform record `configs/platforms/linux-arm64.yaml`) **and are not changed after a replay result is seen.**
+- A difference above 1.0% on an acceptance quantity, or a failed structural check, stops the milestone and is investigated step by step, starting from the first step that differs; it is not explained away.
+- Calibration and replay outputs go to new locations and new tables. They never overwrite a stage-1 artifact or result.
+
+**The calibration these thresholds rest on** (M10, 2026-11-22; week V4; arm64 container on the laptop, `--cpus 6 --memory 12g`, inputs mounted read-only; one item per container; tables in `results/m10_calibration/`, records in `docs/decisions.md`). No label of a T week was read; nothing was tuned or selected.
+
+| Item | What was run | Acceptance quantity | Measured against the stage-1 record |
+|---|---|---|---|
+| A | R1, R2, R3, R4 candidates of V4 | recall of each channel | 0% (the files have the same sha256 as the stage-1 files) |
+| B | One R5 fit as of V4, with its candidates | Recall@100 | −0.0036% |
+| C1 | R6 candidates of V4 from the **recorded** model of V3, no training | Recall@100 | 0% |
+| C2 | The stage-1 R6 process of V3 replayed (the recorded model of V2 predicts V3 and is fine-tuned on it), then R6 candidates of V4 from the resulting model; run four times | Recall@100 | −0.017% and −0.048% (without the deterministic setting); −0.019% twice (with it) |
+| Union | The run's own six channels of V4, fused | union recall | −0.022% |
+| D | LightGBM trained on the four recorded sample files, scoring the **frozen** stage-1 features of V4 | MAP@12 | 0% (the model has the same sha256 as the stage-1 model) |
+| E | End to end: features built from the container's own candidates, scored with the model of item D | MAP@12 | +0.0054% |
+| E | | feature rows = deduplicated candidates of the run; duplicate keys | 22,293,932 = 22,293,932; 0 |
+
+The largest relative difference on any acceptance quantity was 0.048%. The pooled MAP@12 (quantity 4) needs several weeks and is first measured by the replay of M12.
+
+Reported in the same calibration, for information:
+
+| Quantity | Measured |
+|---|---|
+| Recorded (customer, article) pairs present | R1–R4 100%; R5 99.98%; R6 from the recorded model 99.99997%; R6 after one fine-tune 99.75% |
+| Deduplicated candidates of V4 | 22,294,520 and 22,293,932 in two runs against 22,293,247 (+0.0057%, +0.0031%) |
+| Bit-equality of scores | R1–R4 yes; R5 and R6 no |
+| End to end (item E) | Recall@12 +0.100%, NDCG@12 +0.038%; 72.5% of the queries have an identical Top-12 list, 93.4% the same 12 articles; mean Top-12 overlap 99.45% |
+| Two container runs of the same item | R5 and LightGBM bit-identical; the R6 fine-tune only with the deterministic setting of §8.1 |
+
+**Procedure.**
+
+1. M10 measured the items above in the arm64 container; the user fixed the criteria on 2026-11-22 and the platform record was written. Done.
+2. M13 starts with a calibration on Cloud Run (x86-64), declared in advance as calibration, and a platform record for that platform. Until then x86-64 is covered only by CI (lint, tests, and the synthetic R6 reproducer).
+3. Thresholds are not changed after any replay result is seen.
+
+**What the calibration does not show**: one week and one R6 update, not the eight chained updates of the replay; one platform for the full-data items; and nothing about whether the results are good (§16).
 
 ### 8.4 A constraint to design around: local files on Cloud Run use memory
 
-On Cloud Run the writable filesystem is in memory, so every file a step writes locally counts against the instance's memory limit. One week's features are about 1.5 GB; a `serve` run produces about 26 GB of features in total.
+On Cloud Run the writable filesystem is in memory, so every file a step writes locally counts against the instance's memory limit. One week's features are about 1.5 GB (measured in the container for V4: 1.4 GB); a `serve` run produces about 26 GB of features in total.
 
-- `eval` mode: files of one week plus the process peak fit in 24 GiB by estimate. To be measured in M13.
+- `eval` mode: files of one week plus the process peak fit in 24 GiB by estimate. Measured in the arm64 container for V4: the highest true peak of any process was 6.02 GB (the feature build; 5.67 GB when the fused table of the six channels is built in one piece), with files on a mounted disk. With in-memory files on Cloud Run it is to be measured in M13.
 - `serve` mode: features are produced and scored shard by shard and each shard's features are deleted after scoring, so local files stay near one shard (about 1.5 GB). This needs a change to the sharded driver, but no change to any computation.
 - If this is still not enough: mount the bucket as a volume, or run that step on a Spot VM with a disk. The choice is made on measurements in M13, not now.
 
@@ -312,7 +361,7 @@ Monitoring has two layers. Same-week signals need no labels and can alert as soo
 
 | Item | Assumption | Estimate |
 |---|---|---|
-| One `eval` tick | 30 minutes at 6 vCPU and 24 GiB | about 0.3 USD |
+| One `eval` tick | 30 minutes at 6 vCPU and 24 GiB. Measured in the arm64 container on the laptop for V4: about 13 minutes for the steps that were measured (R1–R4 31 s, R5 116 s, R6 prediction 31 s, R6 fine-tune 199 s after a prediction of 29 s, features 126 s, ranker Dataset 11 s, ranker training and scoring 278 s); sampling and the evaluation of the previous week were not measured. Cloud Run is another CPU, so 30 minutes stays the assumption until M13 | about 0.3 USD |
 | x86 calibration (§8.3) | about one tick | about 0.3 USD |
 | Replay of 8 weeks, run twice | 16 ticks | about 4.6 USD |
 | One `serve` tick | 2 hours at 6 vCPU and 24 GiB | about 1.1 USD |
@@ -328,7 +377,7 @@ Local work first; nothing billable before M13 except a few cents of storage in M
 
 | Milestone | Deliverables | Accepted when | Needs the user |
 |---|---|---|---|
-| **M10 Container and CI** | Dockerfile with CPU-only torch on Linux; `make` targets to build and run; GitHub Actions for image build, lint and tests; container measurement of the calibration items of §8.3 | S1; tolerance confirmed and recorded | Approval of the dependency change (D6); enough memory for the container runtime on the laptop |
+| **M10 Container and CI** | Dockerfile with CPU-only torch on Linux; `make` targets to build and run; GitHub Actions for image build, lint and tests; container measurement of the calibration items of §8.3 | S1; acceptance criteria fixed and recorded. **Closed on 2026-11-22** | Approval of the dependency change (D6); enough memory for the container runtime on the laptop |
 | **M11 Versioning** | DVC set-up with a Cloud Storage remote; bootstrap state created and tracked; run manifests; local MLflow sync command | S2 | A GCP project, the budget alert, one bucket |
 | **M12 Weekly pipeline, local** | The `weekly` driver with both modes, the simulated clock, resume and checks; the sharded `serve` path brought into main; monitoring signals and thresholds of §10 fixed and recorded; replay of V1–T4 in `eval` mode and the `serve` tick inside the container | S3 | Nothing |
 | **M13 Cloud** | Image in Artifact Registry; Cloud Run job; Cloud Scheduler entry; x86 calibration first; then replay of V1–T4 in `eval` mode and the `serve` tick in the cloud; measured run time, memory and cost | S4 | Enabling APIs; approving the spend |
@@ -351,7 +400,7 @@ All approved by the user on 2026-11-21.
 |---|---|---|
 | D1 | Which weeks the replay uses | V1–V4 and T1–T4 in `eval` mode, then one `serve` tick at 2020-09-23. T labels are read for monitoring and verification only (invariant 3) |
 | D2 | Form of the serving endpoint | Precomputed weekly Top-12 with a lookup API (§9) |
-| D3 | Tolerance for container and cloud results | The tiered values of §8.3, confirmed after the M10 measurement and the M13 x86 calibration, before any cloud replay |
+| D3 | Acceptance of container and cloud results | **Simplified on 2026-11-22 (§8.3)**: relative difference at most 1.0% on the recall of a channel, the union recall, MAP@12 of a week and the pooled MAP@12; two structural checks; everything else is reported. Fixed for the arm64 container after the M10 calibration and not changed after a replay result is seen. The first version of this decision (2026-11-21) was a tiered tolerance, to be confirmed after the M10 measurement |
 | D4 | Region | `us-central1` |
 | D5 | How many `serve` runs in the cloud | One, the tick at 2020-09-23. Serving every replay week would multiply cost and time for no new information |
 | D6 | New dependencies | `dvc` with its Cloud Storage extra, `mlflow`, `fastapi`, `uvicorn`, the Cloud Storage client library, and the PyTorch CPU-only index for Linux. Each is listed in the M10–M14 prompts for explicit approval under `AGENTS.md` §3.4 |
@@ -366,11 +415,11 @@ All approved by the user on 2026-11-21.
 
 | Risk | What happens then |
 |---|---|
-| Results in the container or the cloud differ by more than the tolerance | The milestone stops. Likely causes are the Two-Tower fine-tuning chain (eight chained updates in the replay) and floating-point order; the investigation compares step by step, starting from the first step that differs |
-| The chained R6 differences grow over eight weeks | Each tick's R6 candidates are compared with the record of that week, so growth is visible week by week; the cause is investigated rather than the tolerance widened |
+| An acceptance quantity of §8.3 differs by more than 1.0% in the container or the cloud, or a structural check fails | The milestone stops. The most likely cause is the Two-Tower fine-tuning chain (eight chained updates in the replay; one update was measured in M10: Recall@100 within 0.05%); the investigation compares step by step, starting from the first step that differs |
+| The chained R6 differences grow over eight weeks | Each tick's R6 recall is compared with the record of that week and the pair overlap is reported, so growth is visible week by week; if the recall leaves the 1.0% band the cause is investigated rather than the threshold widened |
 | A test or a run-time check assumes macOS (for example the Homebrew libomp) or a bit-exact number | It is made platform-aware explicitly, or reported for a decision. No assertion is loosened silently, and no lock file is changed |
 | A step does not fit Cloud Run Jobs because of in-memory files | The measures of §8.4, in that order |
-| The container on the laptop is much slower than native | Acceptance runs become longer; they are not skipped |
+| The container on the laptop is much slower than native | Acceptance runs become longer; they are not skipped. Measured for V4 (arm64 container against the laptop's records): the R6 fine-tune takes 3.5 times as long (199 s against 56 s), the feature build 2.4 times (120 s against 50 s), R6 prediction 1.7 times, R4 1.3 times; LightGBM about the same (278 s against 268 s); R5 is faster (116 s against 179 s, because the Linux build of `implicit` is multi-threaded) |
 | The CPU-only torch index changes macOS resolution in `uv.lock` | Detected by the lock comparison of §8.1; the change is reworked before it is committed |
 | GitHub Actions runner disk is too small for the image | Cache the dependency layer; if needed, build the image with Cloud Build instead |
 | Cost grows unexpectedly | The budget alerts; every cloud milestone ends by listing what is deployed |

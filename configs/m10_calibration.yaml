@@ -79,6 +79,12 @@ references:
 # decision: the user confirms or changes each of them after the calibration, and
 # the decision is recorded in docs/decisions.md. A row outside of them stops
 # nothing and tunes nothing; it is reported.
+#
+# 2026-11-22: the user decided the acceptance (docs/mlops.md §8.3). The thresholds IN
+# FORCE are in the platform record, configs/platforms/linux-arm64.yaml: at most 1.0%
+# relative difference on the recall of a channel, the union recall, MAP@12 of a week and
+# the pooled MAP@12, plus two structural checks. The numbers below stay as they are,
+# because the committed calibration rows were labelled "inside / outside" with them.
 provisional_tolerance:
   # R5 and R6: share of the recorded (customer, article) pairs that must be present.
   min_recorded_pair_share: 0.99
