@@ -3,6 +3,15 @@
 > **Status.** Written on 2026-11-21 as step 7 of M10 part 1. **Nothing in this plan has been run.** It is the plan for M10 part 2, which measures the calibration items of `docs/mlops.md` §8.3 in the arm64 container on the laptop. Part 2 starts only after the user has read this plan and decided the open points of §9.
 > Run times and memory peaks marked "expected" are estimates from the stage-1 records of the laptop; the container has not been timed.
 
+> **Changes decided on 2026-11-22, before the run** (the user's decisions on §9 and what followed while the driver was written; `docs/decisions.md`, entry of 2026-11-22). The rest of this plan is as it was written on 2026-11-21.
+>
+> 1. §9 decision 1: adopted. The entry is `hmrec.ranker.platform_entry.load_locked_ranker_for_platform`, mode `calibration`. No platform record exists.
+> 2. §9 decision 3: **the R5 fit is not measured "as it is"**. During the fit the BLAS of scipy is limited to one thread (`hmrec.blas_threads`); `implicit` keeps its 6 OpenMP threads.
+> 3. Item C2 replays the stage-1 process of V3 exactly: the recorded `V2.pt` first predicts V3, then is fine-tuned on V3's week.
+> 4. The stage-1 Ranker record of item D is the M8 rehearsal of V4 (500 trees exactly; bit-identical metrics to the M7 record), and item D runs in two processes (`ranker-dataset`, `ranker`).
+> 5. Every command takes `--run run1` or `--run run2` and is started with `make image-calibrate ARGS="…"`, which fixes the mounts of §2. Outputs lie under `artifacts/m10_calibration/linux-arm64/{run}/main/` (item C1: `…/recorded_model/`). A second run repeats items B, C2 and D for a bit-by-bit comparison of two container runs (`results/m10_calibration/repeatability.csv`).
+> 6. The image also carries the hash of its code tree; a run refuses if the code is not the code the image was built with.
+
 ## 1. What is measured and why
 
 `docs/mlops.md` §8.3 accepts container and cloud results by a tolerance instead of bit-identity, because Linux uses another OpenMP runtime and another BLAS than the laptop. Before the tolerance is relied on, it is measured once on week V4, item by item, so that a difference can be traced to the first step that produces it.
