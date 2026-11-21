@@ -5,8 +5,9 @@
 # Keep numeric libraries inside the 6-thread budget (AGENTS.md §4).
 export OMP_NUM_THREADS := 6
 
-.PHONY: setup format lint test-fast test
+.PHONY: setup format lint test-fast test test-torch-side test-lightgbm-side
 .PHONY: image-require-clean image-build image-info image-lint image-test-fast image-test
+.PHONY: image-test-torch-side image-test-lightgbm-side
 
 ## setup: create / update .venv from uv.lock (includes the dev group)
 setup:
@@ -34,6 +35,17 @@ test-fast:
 ## test: unit tests + integration tests
 test:
 	uv run pytest tests -q
+	uv run pytest tests -q --lightgbm-side
+
+# The two halves of `make test`, one process each. CI runs them as two steps, so that a
+# failure on one side does not hide the result of the other.
+
+## test-torch-side: unit + integration tests of the torch side only
+test-torch-side:
+	uv run pytest tests -q
+
+## test-lightgbm-side: unit + integration tests of the LightGBM side only
+test-lightgbm-side:
 	uv run pytest tests -q --lightgbm-side
 
 # ---------------------------------------------------------------- container image
@@ -99,3 +111,11 @@ image-test-fast:
 ## image-test: `make test` inside the image (unit + integration, torch side then LightGBM side)
 image-test:
 	$(IMAGE_RUN) make test
+
+## image-test-torch-side: the torch-side half of `make test` inside the image
+image-test-torch-side:
+	$(IMAGE_RUN) make test-torch-side
+
+## image-test-lightgbm-side: the LightGBM-side half of `make test` inside the image
+image-test-lightgbm-side:
+	$(IMAGE_RUN) make test-lightgbm-side
