@@ -57,15 +57,15 @@ ENV UV_PYTHON_DOWNLOADS=never \
 COPY pyproject.toml uv.lock ./
 RUN uv sync --frozen --no-install-project
 
-# pyright is a Node.js program. The Python package brings pyright itself but not Node.js;
-# it downloads Node.js on first use. Do that once here, as the user that will run it, so
-# that `make lint` needs no network. The version is the one the laptop uses.
-ENV PYRIGHT_PYTHON_NODE_VERSION=26.10.0 \
-    PYRIGHT_PYTHON_GLOBAL_NODE=0 \
-    PYRIGHT_PYTHON_IGNORE_WARNINGS=1
-USER hmrec
-RUN /app/.venv/bin/pyright --version
-USER root
+# pyright is a Node.js program. The Python package brings pyright itself but not Node.js,
+# and downloads it on first use when it finds none. Install Node.js once here instead
+# (with nodeenv, which uv.lock pins as a dependency of pyright), so that `make lint` needs
+# no network and uses a fixed version: the one the laptop has. pyright then finds `node`
+# on PATH, as it does on the laptop.
+ARG NODE_VERSION=26.10.0
+RUN /app/.venv/bin/python -m nodeenv --node="${NODE_VERSION}" --prebuilt /opt/node \
+    && /opt/node/bin/node --version
+ENV PYRIGHT_PYTHON_IGNORE_WARNINGS=1
 
 # Layer 2: the code. .dockerignore decides what "." is: only tracked source folders, never
 # data/, artifacts/, .git or .venv.
@@ -93,7 +93,10 @@ ENV HMREC_IMAGE_GIT_COMMIT="${GIT_COMMIT}" \
     PYTHONDONTWRITEBYTECODE=1 \
     RUFF_CACHE_DIR=/tmp/ruff-cache \
     PYTEST_ADDOPTS="-p no:cacheprovider" \
-    PATH="/app/.venv/bin:${PATH}"
+    PATH="/app/.venv/bin:/opt/node/bin:${PATH}"
 
+# Fail the build if pyright cannot start with the Node.js installed above.
 USER hmrec
+RUN pyright --version
+
 CMD ["python", "scripts/image_info.py", "--side", "lightgbm"]
