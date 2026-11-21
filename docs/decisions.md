@@ -1087,3 +1087,10 @@ Everything below was settled **before the features of any week were generated**.
 
 - **Statement** (by the user, on 2026-11-21): when designing the ranker features, the user consulted the public write-up of the first-place solution of the H&M competition.
 - **Why it is recorded**: `README.md` says that the feature design drew on the first-place solution. This is one of the reasons why the score of the Kaggle late submission is not presented as an official rank.
+
+## 2026-11-21 On branch `kaggle-late-submission`: two entries of 2026-11-21 were carried over from main; what they refer to is on main, not on this branch
+
+- **What was carried over**: the two entries above, "Before publication: the table of other models' autonomous runs is removed from the final report" and "Source of a statement in the README: the write-up of the first-place solution was consulted when the ranker features were designed", were brought to this branch from main by cherry-pick.
+- **Why**: to keep the published branches consistent.
+- **On this branch**: the final report never contained that table, and the README never contained that statement.
+- **Where to read it**: the Kaggle result and the qualification of its rank are reported on main (`README.md` and §4.6 of `docs/final_report.md`).
