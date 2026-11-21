@@ -11,6 +11,7 @@ row (3,1,44) is kept apart.
 """
 
 import dataclasses
+import sys
 from pathlib import Path
 from typing import Any
 
@@ -25,6 +26,7 @@ from conftest import FIXTURE_DAY_ZERO, make_queries, make_recall_inputs
 from hmrec.config import TwoTowerChainConfig, TwoTowerConfig, load_base_config
 from hmrec.data.day_index import day_index_to_date
 from hmrec.recall.base import RecallInputs
+from hmrec.recall.twotower import chain as chain_module
 from hmrec.recall.twotower import train as train_module
 from hmrec.recall.twotower.chain import (
     TwoTowerChainChannel,
@@ -181,6 +183,41 @@ def test_every_week_gets_a_new_adam(tmp_path: Path, monkeypatch: pytest.MonkeyPa
     assert all(
         group["lr"] == CONFIG.training.fine_tune_learning_rate for group in created[1].param_groups
     )
+
+
+def test_only_the_fine_tune_runs_inside_the_runtime_of_this_platform(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    # hmrec.recall.twotower.fine_tune_runtime: on Linux the fine-tune runs with torch's
+    # deterministic algorithms; on macOS nothing is switched on. The prediction of the
+    # week is outside the block on both platforms.
+    during_fine_tune: list[bool] = []
+    during_prediction: list[bool] = []
+    fine_tune, predict = chain_module.fine_tune, chain_module.twotower_candidates
+
+    def recording_fine_tune(*args: Any, **kwargs: Any) -> Any:
+        during_fine_tune.append(torch.are_deterministic_algorithms_enabled())
+        return fine_tune(*args, **kwargs)
+
+    def recording_predict(*args: Any, **kwargs: Any) -> Any:
+        during_prediction.append(torch.are_deterministic_algorithms_enabled())
+        return predict(*args, **kwargs)
+
+    monkeypatch.setattr(chain_module, "fine_tune", recording_fine_tune)
+    monkeypatch.setattr(chain_module, "twotower_candidates", recording_predict)
+    chain = _chain(tmp_path)
+    chain.generate(*_fold("D1", 40))
+    assert during_prediction == [False]
+    if sys.platform == "darwin":
+        # The laptop: exactly as in stage 1.
+        assert during_fine_tune == [False]
+        assert chain.fine_tune_runtime_settings == {"D1": "none"}
+    else:
+        # A Linux container.
+        assert during_fine_tune == [True]
+        assert chain.fine_tune_runtime_settings == {"D1": "deterministic"}
+    # Nothing stays switched on after the fine-tune.
+    assert not torch.are_deterministic_algorithms_enabled()
 
 
 def test_checkpoints_are_never_overwritten(tmp_path: Path) -> None:

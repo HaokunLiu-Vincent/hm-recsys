@@ -14,12 +14,28 @@ what it changed is set back.
     deterministic+torch_blas_1   both of the above
     one_thread                   torch runs on one intra-op thread
 
+    implemented                  what a real fine-tune runs under on this platform
+                                 (r6_fine_tune_runtime, below)
+
 The settings change HOW torch computes (threads, choice of algorithm), never
 what is computed: no hyperparameter, seed or data is touched.
+
+What a real fine-tune uses (r6_fine_tune_runtime; decision of 2026-11-22):
+
+    Linux    torch.use_deterministic_algorithms(True) for the duration of the
+             fine-tune. It was the first candidate that made two fine-tunes in
+             fresh processes bit-identical in the arm64 container
+             (results/m10_calibration/r6_repeatability.csv).
+    macOS    NOTHING. The laptop is the reference of stage 1 and its behaviour
+             must not change, so the block runs exactly as it always did.
+
+The scope is the fine-tune only (hmrec.recall.twotower.chain.fine_tune_on_week).
+Prediction, base training and every other use of torch are not inside the block.
 
 This module is on the torch side.
 """
 
+import sys
 from collections.abc import Iterator
 from contextlib import contextmanager
 from pathlib import Path
@@ -32,13 +48,16 @@ SETTING_TORCH_BLAS = "torch_blas_1"
 SETTING_DETERMINISTIC = "deterministic"
 SETTING_DETERMINISTIC_AND_BLAS = "deterministic+torch_blas_1"
 SETTING_ONE_THREAD = "one_thread"
+SETTING_IMPLEMENTED = "implemented"
 SETTINGS = (
     SETTING_NONE,
     SETTING_TORCH_BLAS,
     SETTING_DETERMINISTIC,
     SETTING_DETERMINISTIC_AND_BLAS,
     SETTING_ONE_THREAD,
+    SETTING_IMPLEMENTED,
 )
+LINUX = "linux"
 BLAS_API = "blas"
 TORCH_PACKAGE_FOLDER = "torch"
 
@@ -121,6 +140,25 @@ def one_intra_op_thread() -> Iterator[None]:
 
 
 @contextmanager
+def r6_fine_tune_runtime(platform: str) -> Iterator[str]:
+    """The runtime a real R6 fine-tune runs under: deterministic algorithms on Linux only.
+
+    Args:
+        platform: sys.platform of this process ("linux", or "darwin" = macOS).
+
+    Yields:
+        The name of the setting in force inside the block: "deterministic" on
+        Linux, "none" everywhere else (nothing is changed there).
+    """
+    if platform != LINUX:
+        # The laptop: nothing is touched (module docstring).
+        yield SETTING_NONE
+        return
+    with deterministic_algorithms():
+        yield SETTING_DETERMINISTIC
+
+
+@contextmanager
 def fine_tune_setting(name: str) -> Iterator[None]:
     """Run a block under one of the SETTINGS (see the module docstring).
 
@@ -140,6 +178,9 @@ def fine_tune_setting(name: str) -> Iterator[None]:
             yield
     elif name == SETTING_DETERMINISTIC_AND_BLAS:
         with deterministic_algorithms(), torch_blas_one_thread():
+            yield
+    elif name == SETTING_IMPLEMENTED:
+        with r6_fine_tune_runtime(sys.platform):
             yield
     else:
         with one_intra_op_thread():

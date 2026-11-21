@@ -28,6 +28,7 @@ Dates are filtered only through hmrec.data.asof (load_window_lines /
 load_customer_lines_before); histories use purchases before each sample's day.
 """
 
+import sys
 from collections.abc import Callable
 from dataclasses import asdict
 from datetime import date, timedelta
@@ -45,6 +46,7 @@ from hmrec.data.id_maps import ARTICLE_IDX, CUSTOMER_IDX
 from hmrec.logging_utils import get_logger
 from hmrec.recall.base import OutputSpec, RecallInputs
 from hmrec.recall.twotower.data import arrays_from_samples, build_samples, load_window_lines
+from hmrec.recall.twotower.fine_tune_runtime import r6_fine_tune_runtime
 from hmrec.recall.twotower.infer import (
     TWOTOWER_SPEC,
     TwoTowerChunks,
@@ -205,6 +207,8 @@ class TwoTowerChainChannel:
         self.fine_tune_results: dict[str, FineTuneResult] = {}
         # Fold -> (new-week rows, replay rows) of its fine-tune set (alarm users excluded).
         self.fine_tune_row_counts: dict[str, tuple[int, int]] = {}
+        # Fold -> the runtime setting its fine-tune ran under ("none" on macOS).
+        self.fine_tune_runtime_settings: dict[str, str] = {}
 
     @property
     def output_spec(self) -> OutputSpec:
@@ -242,9 +246,14 @@ class TwoTowerChainChannel:
         )
         schedule = FineTuneSchedule(self.config.e_update, self.config.chain_seed, inputs.anchor_day)
         tables = DeviceTables(self.resources.profiles, self.resources.features)
-        result = fine_tune(
-            self.resources.model, arrays, tables, self.config.training, schedule, self.memory
-        )
+        # Linux only: torch uses deterministic algorithms inside this block, so that two
+        # fine-tunes of the same week give the same weights. On macOS the block changes
+        # nothing (hmrec.recall.twotower.fine_tune_runtime).
+        with r6_fine_tune_runtime(sys.platform) as runtime_setting:
+            result = fine_tune(
+                self.resources.model, arrays, tables, self.config.training, schedule, self.memory
+            )
+        self.fine_tune_runtime_settings[fold] = runtime_setting
         metadata = {
             **self.checkpoint_metadata,
             "fold": fold,

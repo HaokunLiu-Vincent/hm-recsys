@@ -5,18 +5,21 @@ own BLAS exists only where torch brings a BLAS file (Linux arm64); the test has
 one branch for a process with such a file and one for a process without.
 """
 
+import sys
 from pathlib import Path
 
 import pytest
 import torch
 from threadpoolctl import threadpool_info
 
+import hmrec.recall.twotower.fine_tune_runtime as fine_tune_runtime
 from hmrec.recall.twotower.fine_tune_runtime import (
     SETTINGS,
     SettingNotApplicable,
     deterministic_algorithms,
     fine_tune_setting,
     one_intra_op_thread,
+    r6_fine_tune_runtime,
     thread_report,
     torch_blas_one_thread,
     torch_blas_paths,
@@ -50,6 +53,7 @@ def test_the_settings_that_were_tried() -> None:
         "deterministic",
         "deterministic+torch_blas_1",
         "one_thread",
+        "implemented",
     )
     with pytest.raises(ValueError, match="setting must be one of"), fine_tune_setting("fast"):
         pass
@@ -125,3 +129,48 @@ def test_the_blas_of_torch_on_this_platform() -> None:
         # A setting that could not be applied leaves nothing behind.
         assert not torch.are_deterministic_algorithms_enabled()
         assert _pools() == before
+
+
+# ---------------------------------------------------------------- what a real fine-tune uses
+
+
+def test_on_linux_a_fine_tune_runs_with_deterministic_algorithms_and_nothing_else() -> None:
+    threads = torch.get_num_threads()
+    pools = _pools()
+    with r6_fine_tune_runtime("linux") as setting:
+        assert setting == "deterministic"
+        assert torch.are_deterministic_algorithms_enabled()
+        # No thread count is changed: the fine-tune keeps its 6 threads.
+        assert torch.get_num_threads() == threads and _pools() == pools
+    assert not torch.are_deterministic_algorithms_enabled()
+    with pytest.raises(ValueError, match="stop"), r6_fine_tune_runtime("linux"):
+        raise ValueError("stop")
+    assert not torch.are_deterministic_algorithms_enabled()
+
+
+def test_on_macos_a_fine_tune_touches_nothing(monkeypatch: pytest.MonkeyPatch) -> None:
+    # The laptop is the reference: its fine-tune must run exactly as in stage 1. torch's
+    # switch must not even be called there.
+    def not_on_the_laptop(*arguments: object) -> None:
+        raise AssertionError("torch's deterministic switch must not be used on macOS")
+
+    monkeypatch.setattr(fine_tune_runtime.torch, "use_deterministic_algorithms", not_on_the_laptop)
+    monkeypatch.setattr(fine_tune_runtime.torch, "set_num_threads", not_on_the_laptop)
+    before = thread_report()
+    with r6_fine_tune_runtime("darwin") as setting:
+        assert setting == "none"
+        assert not torch.are_deterministic_algorithms_enabled()
+        assert thread_report() == before
+    assert thread_report() == before
+
+
+def test_the_implemented_setting_is_the_one_of_this_platform() -> None:
+    with fine_tune_setting("implemented"):
+        inside = torch.are_deterministic_algorithms_enabled()
+    if sys.platform == "linux":
+        # A container: deterministic algorithms during the fine-tune.
+        assert inside is True
+    else:
+        # The laptop: nothing is switched on.
+        assert inside is False
+    assert not torch.are_deterministic_algorithms_enabled()
