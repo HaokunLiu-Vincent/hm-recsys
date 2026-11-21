@@ -30,6 +30,23 @@ dev = [
 [tool.hatch.build.targets.wheel]
 packages = ["src/hmrec"]
 
+# ---------------------------------------------------------------- uv
+# torch on Linux comes from the PyTorch CPU-only index (docs/mlops.md §8.1, decision D6).
+# Why: the default PyPI wheel for Linux pulls several GB of CUDA libraries that this
+# project never uses (AGENTS.md §4: no CUDA). macOS keeps the PyPI wheel, so the laptop
+# environment is unchanged.
+# `explicit = true`: this index is used ONLY for the packages named in [tool.uv.sources];
+# every other package still comes from PyPI.
+[tool.uv.sources]
+torch = [
+    { index = "pytorch-cpu", marker = "sys_platform == 'linux'" },
+]
+
+[[tool.uv.index]]
+name = "pytorch-cpu"
+url = "https://download.pytorch.org/whl/cpu"
+explicit = true
+
 # ---------------------------------------------------------------- ruff
 [tool.ruff]
 line-length = 100
