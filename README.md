@@ -160,6 +160,8 @@ make image-build  # build hmrec:dev from HEAD (refuses uncommitted changes)
 make image-info   # commit, Python, libraries, OpenMP, BLAS, CPUs and memory of the image
 make image-lint   # `make lint` inside the image
 make image-test   # `make test` inside the image (two processes)
+make image-r6-repeatability ARGS="--setting implemented --rows 8192"
+                  # two R6 fine-tunes of synthetic data in fresh processes, compared bit by bit
 make image-calibrate ARGS="--run run1 --item recall --channel r1_popularity"
                   # one item of the M10 calibration of week V4 (docs/m10_calibration_plan.md);
                   # inputs are mounted read-only, outputs go to artifacts/m10_calibration/

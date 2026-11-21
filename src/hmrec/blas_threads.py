@@ -23,8 +23,14 @@ always did. The macOS wheel of `implicit` has no OpenMP and scipy uses Apple's
 Accelerate there, so there is nothing to limit, and the laptop's results must
 stay exactly as they were.
 
-threadpoolctl is used for the limit. It is installed as a dependency of
-`implicit` (pinned in uv.lock), which uses it for its own warning.
+`implicit` still prints its warning once ("OpenBLAS is configured to use 6
+threads ..."): it looks at EVERY BLAS of the process, and numpy's and torch's
+are not limited, for the reasons above. The warning does not mean the limit is
+missing; the log line "BLAS limited to 1 thread during the fit" names the
+library that is limited.
+
+threadpoolctl is used for the limit. It is a direct dependency of the project
+(pyproject.toml, since 2026-11-22), at the version `implicit` already pinned.
 
 This module is at the bottom layer. It imports no torch, lightgbm or polars.
 """
