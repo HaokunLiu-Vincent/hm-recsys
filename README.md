@@ -79,7 +79,16 @@ alerts. It changes how the system runs, not what it computes. Design:
   A container result is accepted when recall and MAP@12 are within 1.0% of the stage-1 record
   (`docs/mlops.md` §8.3, `configs/platforms/linux-arm64.yaml`); the environments differ, so
   bit-level reproduction is not the goal. One week and one platform were measured.
-- **M11–M15** (versioning, the weekly pipeline, cloud, serving and monitoring, close): not started.
+- **M11, versioning: done (2026-11-22).** The pipeline inputs (raw CSV files, processed tables and
+  embeddings, the category code table) and the state the replay starts from (the R6 chain model
+  after F4, the ranker samples of F1–F4, four weeks of monitoring history) are tracked with DVC
+  in a private Cloud Storage bucket: 38 files, 6.16 GB. git holds four pointer files and
+  `configs/data_manifest.json` with the sha256 of every file. A clean clone pulled the processed
+  data and their sha256 equal the manifest. Every tick of the weekly pipeline will write a run
+  manifest (`hmrec.run_manifest`); a local MLflow store shows the recorded runs, and a check
+  proves that every metric in it equals its source table. Today the store holds imported records
+  only (the stage-1 weekly records of V1–T4 and the M10 calibration): the pipeline itself is M12.
+- **M12–M15** (the weekly pipeline, cloud, serving and monitoring, close): not started.
 
 **Three things to know when reading these numbers:**
 
@@ -181,19 +190,64 @@ make image-calibrate ARGS="--run run1 --item recall --channel r1_popularity"
 GitHub Actions (`.github/workflows/ci.yml`) builds the linux/amd64 image on every push and pull
 request and runs lint and both test suites inside it.
 
+**Versioning and run tracking (stage 3, `docs/mlops.md` §7).** DVC and MLflow are not runtime
+dependencies. They are in dependency groups of their own and in a second environment,
+`.venv-tools`, so that `.venv` stays exactly the set of packages every result was computed with.
+
+```bash
+make setup-tools        # create / update .venv-tools (DVC with Cloud Storage support, MLflow)
+make dvc ARGS="status"  # any DVC command; see "Data" below for pull
+make data-manifest      # write configs/data_manifest.json from the DVC-tracked files
+make data-verify        # sha256 of the tracked files on disk against the manifest
+make mlflow-sync        # copy result tables and run manifests into the local MLflow store
+make mlflow-check       # every metric in the store against its source table (exit code 1 on a difference)
+make mlflow-ui          # open http://127.0.0.1:5001 (stop with Ctrl-C)
+make test-tools         # the tracking tests with MLflow installed (a real SQLite store)
+```
+
+The MLflow store (`artifacts/mlflow/`, not in git) is a view: the result tables and the run
+manifests are the record. Runs marked "(imported)" were made before the weekly pipeline existed.
+
 Do not `pip install` into `.venv`. New dependencies are added with `uv add <package>`
 (dev tools: `uv add --group dev <package>`), only after agreement (see AGENTS.md §3.4, §8).
 
 ## Data
 
-The H&M competition data are **not included** in this repository. Download them from the Kaggle
-competition [H&M Personalized Fashion Recommendations](https://www.kaggle.com/competitions/h-and-m-personalized-fashion-recommendations)
-under the competition rules. The files under `tests/fixtures/` are made up and hold no row of the
+The H&M competition data are **not included** in this repository and are **not public**: they
+may not be redistributed. The files under `tests/fixtures/` are made up and hold no row of the
 competition data.
+
+**Without access to the project's storage:** download the data from the Kaggle competition
+[H&M Personalized Fashion Recommendations](https://www.kaggle.com/competitions/h-and-m-personalized-fashion-recommendations)
+under the competition rules, put the files where "Data layout" below says, and run the
+milestones from M0 on. The bootstrap state of stage 3 (`data/bootstrap/`) is made of stage-1
+outputs; without access it exists only after stage 1 was run
+(`scripts/m11_bootstrap_state.py` then builds it).
+
+**With access (stage 3, `docs/mlops.md` §7):** the pipeline inputs are versioned with
+[DVC](https://dvc.org) in a private Cloud Storage bucket. git holds the small pointer files
+(`data/raw.dvc`, `data/processed.dvc`, `data/bootstrap.dvc`,
+`artifacts/features/category_codes.json.dvc`) and `configs/data_manifest.json`, which lists
+path, size and sha256 of every tracked file. The bucket's name is not in this repository;
+whoever gives you access gives you the name.
+
+```bash
+make setup-tools            # DVC and MLflow in an environment of their own, .venv-tools
+gcloud auth application-default login          # or impersonate the service account you were given
+make dvc ARGS="remote add --local storage gs://<bucket>/dvc"
+                            # written to .dvc/config.local, which git ignores
+make dvc ARGS="pull"        # everything (about 6 GB); or only a part, for example:
+make dvc ARGS="pull data/processed artifacts/features/category_codes.json"
+make data-verify            # sha256 of every tracked file against configs/data_manifest.json
+make data-verify ARGS="--only data/processed artifacts/features/category_codes.json"
+make dvc ARGS="status --cloud"                 # is everything of this commit in the remote?
+```
+
+Downloading from Cloud Storage is charged to the bucket's project; pull only what you need.
 
 ## Data layout
 
-`data/` is not tracked by git. Put the files here:
+The files under `data/` are not tracked by git (only the DVC pointer files are). Put the files here:
 
 ```
 data/
@@ -201,7 +255,8 @@ data/
 │   ├── articles.csv
 │   ├── customers.csv
 │   ├── transactions_train.csv
-│   └── sample_submission.csv
+│   └── sample_submission.csv    # not tracked with DVC: no step of the pipeline reads it
+├── bootstrap/                   # stage 3: the state at the end of F4 (docs/mlops.md §6.3)
 └── processed/
     ├── image_features/          # precomputed CLIP ViT-B/32 image vectors (read-only)
     │   ├── image_embeddings.npy           float32 [105100, 512], L2-normalized

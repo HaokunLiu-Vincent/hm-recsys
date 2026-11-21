@@ -2,6 +2,7 @@
 
 > **Status.** Approved by the user on 2026-11-21. Stage 3 starts with M10; progress and every later change are recorded in `docs/decisions.md`.
 > **M10 (container and CI) was closed on 2026-11-22.** The acceptance of container and cloud results was simplified by the user on that day (§8.3); the calibration it rests on is described there as it was carried out, and the sections that referred to the earlier, tiered tolerance were aligned with it.
+> **M11 (versioning) was closed on 2026-11-22**: §7 describes DVC, the bootstrap state, the run manifest and the MLflow view as they were built, and S2 states the verification that was used.
 > Cloud limits and prices quoted below were read from the Cloud Run quota and pricing pages on 2026-11-21. Everything marked "estimate" has to be measured before it is relied on.
 
 ---
@@ -19,7 +20,7 @@ The data end on 2020-09-22, so there is no live traffic. "Every week" is therefo
 | # | Goal | Accepted when |
 |---|---|---|
 | S1 | A reproducible runtime environment | One container image builds from the repository alone; `make lint` and `make test` pass inside it; the calibration week of §8.3 inside the container meets the acceptance of §8.3. **Met on 2026-11-22 for the arm64 container** (§8.3) |
-| S2 | Versioned data and recorded runs | On a clean clone, `dvc pull` restores every pipeline input and the sha256 values match the records; every pipeline run is visible in MLflow with the same metrics as the result tables |
+| S2 | Versioned data and recorded runs | On a clean clone, `dvc pull` restores every pipeline input and the sha256 values match the records; every pipeline run is visible in MLflow with the same metrics as the result tables. **Met on 2026-11-22 for what exists before the pipeline** (§7.4): the remote holds every tracked file; a clean clone pulled `data/processed` and the category code table and their sha256 equal the data manifest; every metric of the MLflow view equals its source table. The view holds imported records only: the first pipeline run is made in M12 |
 | S3 | A weekly pipeline that is one command | `weekly --anchor DATE` runs a whole week, stops at the first failed check with the reason, and can be resumed; each of the eight replayed weeks, and their pooled MAP@12, meets the acceptance of §8.3 (relative difference at most 1.0% on the four quantities; the two structural checks pass) |
 | S4 | The pipeline runs on GCP on a schedule | A run triggered by Cloud Scheduler completes on Cloud Run Jobs, reads and writes only Cloud Storage, and meets the acceptance of §8.3; its run time and cost are recorded |
 | S5 | A serving endpoint | The endpoint returns the Top-12 of a customer from the latest published prediction set, falls back for unknown customers, and has measured cold-start and p95 latency |
@@ -146,7 +147,7 @@ Every check in the right-hand column already exists in the code as a stop condit
 ### 6.3 Simulated clock and replay
 
 - The anchor date is the only clock. The pipeline never asks for the real date.
-- **Bootstrap state** is the state at the end of F4: the R6 chain model after F4, the ranker samples of F1–F4, and the monitoring history. It is stored once (§7.1).
+- **Bootstrap state** is the state at the end of F4: the R6 chain model after F4, the ranker samples of F1–F4, and the monitoring history. It is stored once, in `data/bootstrap/` (§7.1 lists its files). F4 is closed in that state, so the V1 tick only opens a week: its closing half has nothing to do.
 - **Replay: eight ticks in `eval` mode, V1, V2, V3, V4, T1, T2, T3, T4** (decision D1), followed by **one `serve` tick at anchor 2020-09-23**, the week after the data end and the same week as the Kaggle submission. The `serve` tick closes T4 (so T4 is scored too) and produces the prediction set for the endpoint. Its labels do not exist.
 - Eight weeks give the monitoring rules of §10 enough history to act on, and the V-to-T shift recorded in `docs/final_report.md` (T about 20% above V, with more concentrated purchases and more new articles) is a real distribution change for the monitoring to see.
 - **Replay acceptance** (§8.3): for each week, the recall of every channel, the union recall and MAP@12 of the `eval`-mode run differ from the stage-1 record by at most 1.0% relative; so does the pooled MAP@12 over the replayed weeks, compared with the same pooling of the stage-1 records; and in every tick the feature rows equal the deduplicated candidates of the same run with no duplicate key. The records are `results/m6_candidates.csv` and `results/v_phase_metrics.csv` for V1–V4 and the M8 result tables for T1–T4. Pair overlap of the candidates, the deduplicated candidate count and bit-equality of scores are reported for every week and are not acceptance criteria.
@@ -162,14 +163,36 @@ Every check in the right-hand column already exists in the code as a stop condit
 
 ### 7.1 What is versioned with DVC
 
-| Tracked with DVC (remote: Cloud Storage) | Not tracked |
-|---|---|
-| `data/raw/`: the three CSV files and the two embedding files | Candidates and features of stage 1 (17.8 GB): they are regenerated by the pipeline |
-| `data/processed/` with its metadata | `artifacts/kaggle/` (about 30 GB) |
-| The bootstrap state of §6.3 | Models and samples the pipeline creates: they are pipeline state, recorded by manifest and sha256 |
-| `artifacts/features/category_codes.json` | |
+| Tracked with DVC (remote: Cloud Storage) | Files | Size | Not tracked |
+|---|---|---|---|
+| `data/raw/`: `articles.csv`, `customers.csv`, `transactions_train.csv` | 3 | 3.73 GB | `data/raw/sample_submission.csv`: no step of the pipeline reads it (`.dvcignore`) |
+| `data/processed/`, the whole folder: the five tables and id maps with `metadata.json`, the article embeddings by index, and the two folders of precomputed embeddings (`image_features/`, `text_features/`) | 19 | 1.37 GB | Candidates and features of stage 1 (17.8 GB): they are regenerated by the pipeline |
+| `data/bootstrap/`: the bootstrap state of §6.3 | 15 | 1.07 GB | `artifacts/kaggle/` (about 30 GB) |
+| `artifacts/features/category_codes.json` | 1 | 3.6 kB | Models and samples the pipeline creates: they are pipeline state, recorded by manifest and sha256 |
 
-Git holds the small `.dvc` pointer files; the data stay out of git as today. The bucket is private; the competition data are not redistributed. The one-time upload is estimated at 4–6 GB (about 40–50 minutes at the measured 19 Mbps upload); later pushes send only changed files.
+**Correction of the first version of this table** (2026-11-22): it placed "the two embedding files" in `data/raw/`. They are `data/processed/image_features/image_embeddings.npy` and `data/processed/text_features/text_embeddings.npy` and are tracked with the folder `data/processed/`. That folder is tracked whole, so it also holds two FAISS index files (377 MB) that no step reads; leaving them out would have meant a tracked folder that is not the folder on disk.
+
+- **git holds four pointer files** (`data/raw.dvc`, `data/processed.dvc`, `data/bootstrap.dvc`, `artifacts/features/category_codes.json.dvc`) **and the data manifest `configs/data_manifest.json`**: path, size, sha256 and md5 of each of the 38 tracked files. DVC names a file by md5; the project records files by sha256, and the raw CSV files, the id maps and the embedding files had no sha256 record in stage 1. The manifest is written from the files on disk (`make data-manifest`); a file whose md5 is not the one DVC tracks stops it. After a pull, `make data-verify` compares the files with the manifest.
+- **The remote is the prefix `dvc/` of a private bucket.** The repository is public, so the bucket's name is not in it: the tracked `.dvc/config` holds the remote's name (`storage`), and its URL is in `.dvc/config.local`, which git does not track. The competition data are not redistributed.
+- **`.gitignore` ignores `/data/?*` and `/artifacts/?*`** and lets the pointer files back in. `?*` and not `*`: DVC reads `.gitignore` with its own matcher, which takes the folder `data/` itself as ignored by `/data/*` and then finds no pointer file (`dvc status` and `dvc pull` saw no tracked data until this was changed).
+- **DVC and MLflow are not in the pipeline image and not in the development environment.** They are in two dependency groups of `pyproject.toml` (`versioning`, `tracking`) and are installed into a second environment, `.venv-tools` (`make setup-tools`). Adding them changed no version of an existing package (`uv export` of the runtime and dev dependencies is byte-identical before and after). They stay out of `.venv` because, with pandas installed, the type checker reads LightGBM's optional types differently and reports an error in unchanged M7 code.
+
+**The bootstrap state** (`data/bootstrap/`, built by `scripts/m11_bootstrap_state.py`; `hmrec.bootstrap_state` holds the reasoning). Its files are what the V1 tick reads, traced through the stage-1 code:
+
+| File in `data/bootstrap/` | Stage-1 source | Why the first tick needs it | sha256 checked against |
+|---|---|---|---|
+| `models/twotower/base/epoch_4.pt` | `artifacts/models/twotower/base/epoch_4.pt` | Loading any R6 model first reads the base checkpoint | the R6 lock |
+| `models/twotower/chain_locked/F4.pt` | `artifacts/models/twotower/chain_locked/F4.pt` | The chain model after the F4 fine-tune predicts V1 and is the start of the next fine-tune | `results/m6_twotower_chain.csv`, row F4 |
+| `twotower/data/base/customer_idx.npy` | `artifacts/twotower/data/base/customer_idx.npy` | The alarm users of every fine-tune are drawn from this array | the R6 lock |
+| `ranker/samples/full/{F1,F2,F3,F4}/r40.parquet` and `r40.json` | `artifacts/ranker/samples/full/…` | The ranker that predicts V1 is trained on these four weeks (window and ratio from the ranker lock) | the record `r40.json` of each sample |
+| `monitoring/m6_twotower_chain.csv` | `results/m6_twotower_chain.csv`, rows F1–F4 | The history of the R6 chain | — |
+| `monitoring/m6_candidates.csv` | `results/m6_candidates.csv`, rows F1–F4 | Recall of each channel, union recall and candidates per query of the four weeks before V1: what the rules of §10 compare V1 with | — |
+| `monitoring/m6_features.csv` | `results/m6_features.csv`, rows F1–F4 | Missing rate and mean of every feature in those weeks | — |
+| `manifest.json` | — | For every file above: source path, size, sha256, the sha256 of the source and where stage 1 recorded it | — |
+
+- Stage-1 files are copied, never moved or changed: each source is compared with its stage-1 sha256 record before the copy, and the copy with the source after it. The three tables are not copied whole; only the header and the rows of F1–F4 are kept, byte for byte, so the state holds nothing of a later week.
+- R1–R5, the features and the query sets need no state: they are computed from `data/processed/`.
+- **The output signals of §10 that need a ranking** (share of recommended items among the 100 most popular, number of distinct articles, share served by the fallback) **have no history before V1**: stage 1 ranked no F week. Their bands start with the first ticks; how the rule treats the first four weeks is fixed in M12 with the other thresholds, before the first replay tick.
 
 ### 7.2 Storage layout
 
@@ -182,12 +205,54 @@ gs://<bucket>/
   runs/<run-id>/manifest.json  one record per tick
 ```
 
+On the laptop the same layout lies under `artifacts/pipeline/` (`artifacts/pipeline/runs/<run-id>/manifest.json`); the DVC remote is the only prefix that exists in the bucket before M13.
+
 ### 7.3 Run tracking
 
 - Every tick writes a manifest and appends to the result tables, exactly as stage 1 does. These files are the source of truth.
-- MLflow is the **view**: a local command reads the manifests from Cloud Storage and logs each run (parameters, metrics, tags for commit and image digest, links to artifacts) into a local MLflow store. No tracking server runs in the cloud.
-- Reason: a hosted tracking server needs an always-on service and a database, which breaks goal S8. If a team used this system, the server would be the first thing to add.
-- The MLflow model registry records each weekly ranker and each R6 chain model by storage path and sha256, with one alias for "the model behind the current prediction set". **The registry is a mirror.** The pipeline and the endpoint never read MLflow; what is deployed is decided by `state/current.json`. Reports and interviews describe it that way.
+- **The run manifest** (`hmrec.run_manifest`, schema version 1; one JSON file per tick, written once under a temporary name and renamed, never replaced):
+
+  | Field | Content |
+  |---|---|
+  | `run_id`, `anchor`, `mode` | Which tick; `eval` or `serve` |
+  | `status`, `failure` | `succeeded`, or `failed` with the reason |
+  | `git_commit`, `git_dirty`, `code_tree_sha256` | The code: inside an image the image's commit and its verified code-tree hash |
+  | `image_digest` | The registry digest, when the runner passed it (`HMREC_IMAGE_DIGEST`); `null` otherwise. An image cannot know its own digest when it is built |
+  | `platform` | The platform fields of the driver process (`hmrec.platform_fields`) |
+  | `inputs`, `outputs` | Files with role, path, size and sha256 |
+  | `metrics` | Name, **week** and value. A metric names the week it describes, because a week's predictions are scored by the next tick |
+  | `steps` | Per step: status, seconds, the true peak memory of the step's process, and the platform fields of that process (the OpenMP runtime differs between steps, §8.1) |
+  | `started_at_utc`, `finished_at_utc`, `total_seconds` | Timings of the tick |
+  | `driver_max_rss_gb`, `max_process_rss_gb` | True peak memory of the driver, and the largest of any process of the tick |
+
+  The reader refuses another schema version, a missing or unknown key, and a `max_process_rss_gb` that is not the largest recorded peak. The peak and the platform fields come from the existing run-record code (`hmrec.memory`, `hmrec.platform_fields`, `hmrec.git_state`).
+- MLflow is the **view**: a local command (`make mlflow-sync`) reads the manifests and the result tables and logs each run (parameters, metrics, tags for commit and image digest) into a local MLflow store. No tracking server runs in the cloud. In M11 the manifests are read from the local folder; from M13 on they are first copied from Cloud Storage.
+- **The store is one SQLite file** (`artifacts/mlflow/mlflow.db`, not in git): the pinned MLflow version (3.18) refuses a plain folder of files as a store. It can be deleted and rebuilt at any time; a sync never changes a run that is already there. `make mlflow-ui` serves the UI on this machine only.
+- **First content, imported records**: the stage-1 weekly records of V1–V4 and T1–T4 (recall of each channel, union recall, MAP@12 of the ranker and of the RRF baseline; 8 runs) and the M10 calibration (one run per calibration run, item and scope; 37 runs). They are logged with the tag `hmrec.record_kind = imported_record` in experiments named "(imported)", because they were made before the pipeline existed. Reading the stage-1 result tables of the T weeks reads recorded numbers; no label is read.
+- **`make mlflow-check` compares every metric in the store with its source.** Every metric carries a tag that names the file, the row and the column it came from; the check reads that row again with its own reader and requires equal float64 values, not close ones. It also reports a missing run, a run that is not expected, and a differing set of metric keys.
+- Reason for a local view: a hosted tracking server needs an always-on service and a database, which breaks goal S8. If a team used this system, the server would be the first thing to add.
+- The MLflow model registry records each weekly ranker and each R6 chain model by storage path and sha256, with one alias for "the model behind the current prediction set". **The registry is a mirror.** The pipeline and the endpoint never read MLflow; what is deployed is decided by `state/current.json`. Reports and interviews describe it that way. **The registry is set up in M12**, when the pipeline produces models; M11 registers nothing.
+- Neither tool reports usage from this repository: DVC's analytics and MLflow's telemetry are switched off.
+
+### 7.4 What M11 verified
+
+Measured on 2026-11-22 on the laptop. No label was read and no model was trained.
+
+| Check | Result |
+|---|---|
+| Tracked with DVC | 38 files, 6,164,751,861 bytes: `data/raw` 3 files, 3.731 GB; `data/processed` 19 files, 1.365 GB; `data/bootstrap` 15 files, 1.068 GB; the category code table, 3,575 bytes |
+| Upload | Two `dvc push` runs: 38 min 07 s (raw, processed, category codes) and 8 min 24 s (the bootstrap state); 46 min 31 s in all, about 2.2 MB per second |
+| In the bucket | 40 objects, 6,002,642,515 bytes, all under `dvc/`: 37 file contents and 3 folder records. Two tracked files are byte-identical (`data/processed/embeddings/text_by_article_idx.npy` and `data/processed/text_features/text_embeddings.npy`) and are stored once |
+| `dvc status --cloud` | "Cache and remote 'storage' are in sync." |
+| Clean clone | A fresh clone of the branch in a temporary folder, with the remote set in its own `.dvc/config.local`; `dvc pull data/processed artifacts/features/category_codes.json` fetched 20 files in 1 min 49 s. `scripts/m11_data_manifest.py verify --only …`, run with the clone's code: 20 files, 1,365,150,885 bytes, 0 problems |
+| Manifest against the stage-1 records | The 10 files that `configs/m10_calibration.yaml` records by sha256 have the same sha256 in the manifest; the base checkpoint, the F4 chain model and the alarm-user array of the bootstrap state equal the R6 lock and `results/m6_twotower_chain.csv`; each sample equals its record. The 3 raw CSV files and 11 of the 19 processed files had no sha256 record before |
+| MLflow view | `make mlflow-sync` wrote 45 records (8 weekly records, 37 calibration records); a second sync wrote none. `make mlflow-check`: 45 runs, 905 metric values, 0 differences |
+
+**What this does not show.**
+
+- `data/raw` and `data/bootstrap` were uploaded and DVC reports them in sync, which compares the names of the objects (the md5 of each file); they were not downloaded and hashed again, because download from Cloud Storage is charged (§12).
+- No pipeline run exists yet. That a run manifest becomes an MLflow run whose metrics equal the manifest is shown by the tests with a synthetic manifest; the first real one is the V1 tick of M12.
+- The view was checked against the tables it was built from. It says nothing about whether those tables are right.
 
 ## 8. Environment and reproducibility
 
@@ -378,8 +443,8 @@ Local work first; nothing billable before M13 except a few cents of storage in M
 | Milestone | Deliverables | Accepted when | Needs the user |
 |---|---|---|---|
 | **M10 Container and CI** | Dockerfile with CPU-only torch on Linux; `make` targets to build and run; GitHub Actions for image build, lint and tests; container measurement of the calibration items of §8.3 | S1; acceptance criteria fixed and recorded. **Closed on 2026-11-22** | Approval of the dependency change (D6); enough memory for the container runtime on the laptop |
-| **M11 Versioning** | DVC set-up with a Cloud Storage remote; bootstrap state created and tracked; run manifests; local MLflow sync command | S2 | A GCP project, the budget alert, one bucket |
-| **M12 Weekly pipeline, local** | The `weekly` driver with both modes, the simulated clock, resume and checks; the sharded `serve` path brought into main; monitoring signals and thresholds of §10 fixed and recorded; replay of V1–T4 in `eval` mode and the `serve` tick inside the container | S3 | Nothing |
+| **M11 Versioning** | DVC set-up with a Cloud Storage remote; bootstrap state created and tracked; data manifest; run manifests (schema, writer, reader); local MLflow sync and check commands | S2 for what exists before the pipeline (§7.4). **Closed on 2026-11-22** | A GCP project, the budget alert, one bucket |
+| **M12 Weekly pipeline, local** | The `weekly` driver with both modes, the simulated clock, resume and checks; the sharded `serve` path brought into main; monitoring signals and thresholds of §10 fixed and recorded; replay of V1–T4 in `eval` mode and the `serve` tick inside the container; every tick writes a run manifest and is visible in MLflow (the rest of S2); the model registry mirror of §7.3 | S3 | Nothing |
 | **M13 Cloud** | Image in Artifact Registry; Cloud Run job; Cloud Scheduler entry; x86 calibration first; then replay of V1–T4 in `eval` mode and the `serve` tick in the cloud; measured run time, memory and cost | S4 | Enabling APIs; approving the spend |
 | **M14 Serving, monitoring, deployment** | The API service; rollback command; alert policies; deployment on tag with Workload Identity Federation; the four provoked alerts; latency measured with synthetic requests | S5, S6, S7 | An email address for alerts |
 | **M15 Close** | Report section on stage 3 (architecture, runbook, measured cost, limits); the online-experiment design and the re-selection rule (below); teardown; tag `v0.3` | S8 | Confirming the teardown |
@@ -423,7 +488,7 @@ All approved by the user on 2026-11-21.
 | The CPU-only torch index changes macOS resolution in `uv.lock` | Detected by the lock comparison of §8.1; the change is reworked before it is committed |
 | GitHub Actions runner disk is too small for the image | Cache the dependency layer; if needed, build the image with Cloud Build instead |
 | Cost grows unexpectedly | The budget alerts; every cloud milestone ends by listing what is deployed |
-| The file-based use of MLflow does not fit the pinned MLflow version | Keep the manifests as the record and adapt the sync command; the acceptance of S2 does not depend on a particular MLflow backend |
+| The file-based use of MLflow does not fit the pinned MLflow version | Keep the manifests as the record and adapt the sync command; the acceptance of S2 does not depend on a particular MLflow backend. **Happened in M11**: MLflow 3.18 refuses a folder of files as a store, so the local store is a SQLite file (§7.3) |
 
 Open question that does not block M10: which email address receives alerts.
 

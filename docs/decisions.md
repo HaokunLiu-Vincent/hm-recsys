@@ -1664,3 +1664,46 @@ The evaluation recorded in the entry above was run once. Code, rehearsal, formal
   - **One correction note** next to the statements that CPU training is bit-reproducible (`docs/proposal.md` §1.2 and §5 R6; `docs/final_report.md` §10.2 and §10.10): the original sentences are kept and a dated note states what the synthetic reproducer showed on 2026-11-22, that it was not verified with real data on the laptop, and that no result changes because the chain models are recorded files. `README.md` holds no such statement. The two sentences of `docs/final_report.md` are about DeepFM; the note there says which code the reproducer ran and claims nothing about DeepFM.
 - **Not changed**: no lock file, no stage-1 result table, no earlier entry of this file, no dependency. `configs/m10_calibration.yaml` keeps its provisional numbers, which the committed calibration rows were labelled with; a comment there points to the platform record for the thresholds in force.
 - **State of M10**: closed. Branch `m10-container-ci` is ready to be fast-forwarded into main by the user.
+
+## 2026-11-22 M11: data versioning with DVC on Cloud Storage, the bootstrap state of the replay, run manifests and a local MLflow view
+
+- **Context**: M11 of stage 3 (`docs/mlops.md` §7, §13, goal S2). The user created a private bucket and credentials on the laptop that can only read and write objects in it, and approved two new dependencies for this milestone: `dvc` with its Cloud Storage extra, and `mlflow`. No label was read, no model was trained, and no cloud resource, IAM setting or billing setting was created or changed by this work.
+- **Dependencies** (`AGENTS.md` §3.4; `docs/mlops.md` D6):
+  - `dvc[gs]` is in the dependency group `versioning`, `mlflow` in the group `tracking`. Neither is a runtime or dev dependency; the container image installs neither (`uv sync --frozen` installs the default group only).
+  - **No existing package changed its version.** `uv export --frozen` of the runtime and dev dependencies (all platforms, with hashes, 228 lines) is byte-identical before and after. In `uv.lock`, 156 packages were added; of the 33 existing entries only two changed, and not in version or files: the non-Linux entry of torch got finer resolution markers, and `fsspec` lists two extras.
+  - **The two groups are installed into a second environment, `.venv-tools`, never into `.venv`** (`make setup-tools`). Found while working: with MLflow's pandas installed, pyright reads LightGBM's optional types differently and reports an error at `src/hmrec/ranker/dataset.py:221` (a `list[ParquetSequence]` passed where the annotation asks for a list of the base class). The code did not change and is not changed here: it is stage-1 code. `uv sync` restored `.venv` to the runtime and dev set of `uv.lock`.
+- **What DVC tracks** (38 files, 6,164,751,861 bytes; `configs/data_manifest.json`):
+  - `data/raw/`: the three CSV files preprocessing reads. **`sample_submission.csv` is left out** (`.dvcignore`): no step of the pipeline reads it.
+  - `data/processed/`, the whole folder (19 files). **Correction**: `docs/mlops.md` §7.1 placed "the two embedding files" in `data/raw/`; they are in `data/processed/image_features/` and `data/processed/text_features/` and are tracked with that folder. The folder also holds two FAISS index files (377 MB) that no code reads; they are tracked because the folder is tracked as it is on disk.
+  - `artifacts/features/category_codes.json`.
+  - `data/bootstrap/`, the bootstrap state (below).
+- **The bootstrap state** (`data/bootstrap/`, 15 files, 1,068,334,999 bytes; built once by `scripts/m11_bootstrap_state.py` at commit `0a05504`). The files are what the V1 tick reads, traced through the stage-1 code (`hmrec.bootstrap_state` holds the reasoning):
+  - R6: `models/twotower/base/epoch_4.pt` (read before any chain model is loaded), `models/twotower/chain_locked/F4.pt` (predicts V1; the start of the next fine-tune), `twotower/data/base/customer_idx.npy` (the alarm users are drawn from it);
+  - Ranker: `ranker/samples/full/{F1,F2,F3,F4}/r40.parquet` with their records `r40.json` (the window of 4 weeks and the ratio 1 : 40 come from the ranker lock);
+  - history: `monitoring/m6_twotower_chain.csv`, `monitoring/m6_candidates.csv`, `monitoring/m6_features.csv`, each the header and the rows of F1–F4 of the table of the same name in `results/`, byte for byte;
+  - `manifest.json`: source path, size and sha256 of every file.
+  - **Stage-1 files were copied, never moved or changed.** Each source was compared with its stage-1 sha256 record before the copy (the R6 lock, `results/m6_twotower_chain.csv`, the sample records) and the copy with the source after it.
+  - **Choice made here**: the state lies under `data/`, not `artifacts/`, because it is an input of the replay and not a regenerable output; the three tables are row subsets and not whole copies, so that the state holds nothing of a week after F4.
+  - **A gap that M12 has to close**: the output signals of `docs/mlops.md` §10 that need a ranking (share among the 100 most popular articles, distinct articles, share served by the fallback) have no history before V1, because stage 1 ranked no F week. The rule for the first four ticks is to be fixed with the other thresholds, before the first replay tick.
+- **The remote**: the prefix `dvc/` of the bucket. **The repository is public, so the bucket's name is in no tracked file**: `.dvc/config` names the remote (`storage`), its URL is in `.dvc/config.local`, which git ignores. A test scans the code tree for a bucket URL.
+- **`.gitignore`**: `/data/` and `/artifacts/` became `/data/?*` and `/artifacts/?*`, with the pointer files let back in. `?*` and not `*`: DVC reads `.gitignore` with its own matcher (dulwich), which takes the folder `data/` itself as ignored by `/data/*`; `dvc status` and `dvc pull` then saw no tracked data. After every change of `.gitignore` in this milestone (three commits) the two checks of `AGENTS.md` §3.4 were run: `git check-ignore` printed nothing for `src/` and `tests/`, and ruff checked 348 files before the new files and 368 with them.
+- **The run manifest** (`hmrec.run_manifest`, schema version 1; `docs/mlops.md` §7.3 lists the fields). Choices made here:
+  - a metric carries the **week it describes**, because a tick reports labelled metrics of the week it closes and same-week signals of the week it opens;
+  - **platform fields per step**, not only per tick, because every step is a process of its own and the OpenMP runtime differs between them;
+  - a failed tick writes a manifest too (`status`, `failure`);
+  - the image digest is read from `HMREC_IMAGE_DIGEST` when the runner sets it; an image cannot know its own digest when it is built;
+  - a manifest is written once and never replaced; the reader refuses another schema version or an unknown key.
+- **The MLflow view** (`hmrec.tracking`; `make mlflow-sync`, `make mlflow-check`, `make mlflow-ui`):
+  - **The store is a SQLite file** under `artifacts/mlflow/` (not in git). MLflow 3.18 refuses a folder of files as a store (the risk named in `docs/mlops.md` §15).
+  - **First content: imported records**, marked as such (tag `hmrec.record_kind = imported_record`, experiments named "(imported)"): the stage-1 weekly records of V1–V4 and T1–T4 (9 metrics each) and the M10 calibration (37 runs). Reading the stage-1 result tables of the T weeks reads recorded numbers; no label file was opened, and nothing is selected or tuned with them.
+  - **Every metric carries its source** (file, row, column) as a tag. The check reads the source again with its own reader and requires equal float64 values.
+  - The model registry is left for M12.
+  - **Neither tool reports usage**: DVC's analytics are off in `.dvc/config` and in the Makefile; MLflow's telemetry is off in the Makefile and in `hmrec.tracking.store`.
+- **What was measured** (2026-11-22; details in `docs/mlops.md` §7.4):
+  - upload: 38 min 07 s and 8 min 24 s, 46 min 31 s in all; the bucket holds 40 objects, 6,002,642,515 bytes (two tracked files are byte-identical and stored once);
+  - `dvc status --cloud`: cache and remote in sync;
+  - a clean clone pulled `data/processed` and the category code table (20 files, 1 min 49 s); their sha256 equal the data manifest (0 problems). `data/raw` and the bootstrap state were not downloaded again;
+  - the manifest's sha256 equal the 10 values `configs/m10_calibration.yaml` records, so tracking the files with DVC changed none of them;
+  - MLflow: 45 records, 905 metric values, 0 differences from the source tables; a second sync wrote nothing.
+- **Not changed**: no lock file, no platform record, no stage-1 result table, no earlier entry of this file, no stage-1 code. `AGENTS.md` §5 and §12 list the new modules and the rules of M11.
+- **State of M11**: goal S2 is met for what exists before the pipeline; "every pipeline run is visible in MLflow" needs the first tick of M12. Branch `m11-versioning` is ready to be fast-forwarded into main by the user.
