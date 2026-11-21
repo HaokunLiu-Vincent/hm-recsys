@@ -8,6 +8,7 @@ that does not describe this repository fails here.
 import hashlib
 import re
 import subprocess
+import sys
 from pathlib import Path
 from typing import Any
 
@@ -16,6 +17,7 @@ import yaml
 
 from hmrec.config import load_base_config, load_yaml
 from hmrec.locks import file_sha256
+from hmrec.native_libraries import debian_package_version
 from hmrec.paths import get_paths
 from hmrec.platform_records import load_platform_record, parse_platform_record
 
@@ -57,11 +59,20 @@ def test_the_acceptance_is_the_decision_of_2026_11_22() -> None:
 
 def test_the_record_describes_the_image_of_this_repository() -> None:
     record = load_platform_record(RECORD_FILE)
-    dockerfile = (REPO / "Dockerfile").read_text(encoding="utf-8")
-    # The base image line of the Dockerfile, digest included.
-    assert f"FROM {record.base_image}\n" in dockerfile
-    (libgomp_version,) = re.findall(r"ARG LIBGOMP_VERSION=(\S+)", dockerfile)
-    assert record.openmp_version == f"libgomp1 {libgomp_version}"
+    dockerfile = REPO / "Dockerfile"
+    if dockerfile.is_file():
+        # A checkout (the laptop): the record names the base image line of the Dockerfile,
+        # digest included, and the libgomp1 version the Dockerfile pins.
+        text = dockerfile.read_text(encoding="utf-8")
+        assert f"FROM {record.base_image}\n" in text
+        (libgomp_version,) = re.findall(r"ARG LIBGOMP_VERSION=(\S+)", text)
+        assert record.openmp_version == f"libgomp1 {libgomp_version}"
+    else:
+        # Inside an image the Dockerfile is not copied, but the image IS what it built:
+        # the libgomp1 package that is installed here must be the one the record names.
+        (library,) = sorted(Path("/usr/lib").glob("*/libgomp.so.1"))
+        assert debian_package_version(str(library.resolve())) == record.openmp_version
+        assert "python:3.12" in record.base_image and sys.version_info[:2] == (3, 12)
     assert _locked_versions("lightgbm") == [record.lightgbm_version]
     # torch is locked twice: PyPI for macOS, the CPU-only index for Linux.
     assert record.torch_version in _locked_versions("torch")
