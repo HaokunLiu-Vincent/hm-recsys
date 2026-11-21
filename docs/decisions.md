@@ -1577,3 +1577,71 @@ The evaluation recorded in the entry above was run once. Code, rehearsal, formal
 - **Changes to the calibration driver**: two more run names (`run3`, `run4`) for the two new runs of item C2; a repeat item now names the earlier run with `--against` instead of always comparing the first and the last run; the fine-tune item records the runtime setting its fine-tune ran under.
 - **Not done, on purpose**: no platform record; no tolerance decision; no lock file, stage-1 result table or earlier entry changed; the laptop's fine-tune path is unchanged.
 - **Documents updated**: `docs/mlops.md` §8.1, `AGENTS.md` §5 and §12, `docs/proposal.md` §17, `README.md`.
+
+## 2026-11-22 M10 part 3: what was measured — R6 fine-tuning repeatability on three platforms, item C2 with the Linux-only runtime, and the end-to-end item E (no decision about the tolerance)
+
+- **What this entry is**: a record of what was run and measured in M10 part 3. **It contains no conclusion about the tolerance of `docs/mlops.md` §8.3** and no platform record was created. Nothing was tuned or selected: the only criterion for a runtime setting was bit-identical weights of two runs; recall and loss were recorded and not used.
+- **Code and environments**: reproducer runs of the candidates at commit `4dcad56`; everything else at `3ae9200` (image id `sha256:d1c76af9…`, built with `make image-build` from the clean tree). Before the full-data runs, lint and both test suites passed natively, in the arm64 image and in CI on x86-64 (1076 torch-side and 373 LightGBM-side tests, 0 failed, 0 skipped; CI run 44930428091). Full-data runs with `make image-calibrate`, one container per item, `--cpus 6 --memory 12g`, inputs read-only. No label of a T week was read.
+- **A1. The reproducer** (`scripts/m10_r6_repeatability.py`; synthetic data from a seed, the real fine-tuning code, real model sizes, two fresh processes, weights compared bit by bit). **The smallest scale at which the arm64 container is not repeatable is the smallest one tried: 512 rows, 2 optimizer steps** (largest parameter difference 2.4e-07; it grows with the number of steps: 5.3e-05 at 32 steps, 0.0056 at 512, 0.0145 at 1,862). Synthetic data reproduce the effect, so the real week was not needed for A3.
+- **A2. Repeatable with the settings of stage 1 ("none")?** (`results/m10_calibration/r6_repeatability.csv`; CI publishes its rows as notices)
+
+  | Platform | Scale | Result |
+  |---|---|---|
+  | Laptop, macOS arm64, native | 2, 32 and 512 steps | **not repeatable** (largest difference 1.6e-07, 6.9e-06, 0.0039) |
+  | arm64 container | 2, 8, 32, 512 and 1,862 steps | **not repeatable** |
+  | x86-64 container (CI) | 32 steps | **not repeatable** (3.1e-06) |
+
+  **The laptop row contradicts a statement of stage 1.** The entry of the device selection rule says that training on the CPU is bit-reproducible on the laptop ("tested"), and `device: cpu` was chosen for that reason. With six threads and the real model sizes, two fine-tunes of the same synthetic samples in fresh processes do not give the same weights on the laptop. Whether the same holds for a real week on the laptop was not run (no full-data run on the laptop is authorised in this task), and nothing on the laptop was changed. The recorded models of stage 1 are not affected as records: they are files with recorded sha256, and no result of stage 1 was obtained by training a chain model twice. What does follow: **a chain model of stage 1 cannot be assumed to be reproducible by running its fine-tune again on the laptop.**
+- **A3. Candidate settings in the arm64 container, in the order the user gave** (two fresh processes each; seconds of the update steps of the two runs):
+
+  | Candidate | 2 steps | 32 steps | 512 steps | 1,862 steps |
+  |---|---|---|---|---|
+  | none (for comparison) | not repeatable | not repeatable; 2.11 s, 2.29 s | not repeatable; 34.9 s, 37.6 s | not repeatable; 125.2 s, 120.9 s |
+  | (i) torch's BLAS on one thread, OpenMP threads at 6 | not repeatable | not repeatable; 2.12 s, 2.19 s | | |
+  | (ii) `torch.use_deterministic_algorithms(True)` | **repeatable** | **repeatable**; 2.31 s, 2.19 s | **repeatable**; 34.6 s, 35.3 s | **repeatable**; 141.8 s, 130.3 s |
+  | (ii) together with (i); (iii) one intra-op thread | not run: the search stops at the first repeatable candidate | | | |
+
+  - **Candidate (i) could not be put into the state it describes.** On Linux arm64 the BLAS inside the torch wheel is an OpenBLAS built on OpenMP. Limiting it lowers the OpenMP thread count of the process to 1; once that is set back to 6, the library reports 6 threads again, because it takes its thread count from OpenMP. The recorded thread counts of these rows show BLAS at 6. "BLAS of torch on one thread, OpenMP on six" is not a state this library has; with OpenMP at 1 it would be candidate (iii).
+  - **Wall time of (ii)**: no difference up to 512 steps; at 1,862 steps the two runs took 141.8 s and 130.3 s against 125.2 s and 120.9 s without it (about 10% more, with a run-to-run spread of the same order).
+  - For information, on the laptop at 32 steps (nothing is implemented there): (ii) repeatable, one thread repeatable.
+- **A4. The implemented setting** (`hmrec.recall.twotower.fine_tune_runtime.r6_fine_tune_runtime`): on Linux, deterministic algorithms for the duration of an R6 fine-tune; on macOS nothing.
+  - **x86-64 (CI), reproducer at 32 steps with the setting: repeatable** (difference 0.0; 2.15 s and 2.16 s; without the setting 2.09 s and 2.11 s).
+  - **Item C2 on real data, twice in fresh containers (`run3`, `run4`): bit-identical.** The fine-tuned weights (19 tensors), the losses, the candidates of V3 and of V4, and the V4 vectors are the same in both runs (`repeatability.csv`). Fine-tune 199.2 s and 200.3 s (part 2 without the setting: 197.7 s and 199.8 s); process peak 3.23 GB and 3.24 GB.
+  - **The same comparisons against stage 1 as in part 2** (both runs give the same numbers):
+
+    | Quantity | Container, with the setting | Stage 1 | Part 2 (run 1, without the setting) |
+    |---|---|---|---|
+    | mean training loss | 5.5364044877819545 | 5.536406061190924 | 5.536407634599892 |
+    | alarm loss | 5.616682767868042 | 5.616730213165283 | 5.6167824268341064 |
+    | parameters against the recorded `V3.pt` | largest difference 0.0127; 6,146,270 of 8,601,460 values differ | | 0.0102 |
+    | V4: recorded pairs present | 99.7462% | | 99.7506% |
+    | V4: new pairs not in the record | 0.2538% | | 0.2494% |
+    | V4: common pairs with the same rank | 76.77% | | 78.12% |
+    | V4: Recall@100 | 0.16007876112624939 (−0.0190% relative) | 0.1601091002641404 | 0.16008204661627742 (−0.0169%) |
+    | V4 prediction | 30.7 s; 3.37 GB | 18.3 s | 30.9 s; 3.14 GB |
+
+    The setting makes the container repeatable. **It does not bring the container closer to the stage-1 record, and was not expected to**: the record is one outcome of a fine-tune that is itself not repeatable on its platform, so the remaining difference is of the size of that run-to-run variation (part 2: the two container runs without the setting were as far from each other as from the record).
+- **B. Item E, end to end, week V4** (`run3`): the candidates are the container's own (R1–R5 of `run1`, R6 of `run3` from the repeatable fine-tune); the 71 features are built by the locked feature code; the model is the one item D trained in `run1` (its sha256 equals the stage-1 model's); evaluation against the V4 labels with the M7 evaluator.
+
+  | Quantity | Container | Stage 1 | Difference |
+  |---|---|---|---|
+  | deduplicated candidates of this run | 22,293,932 | 22,293,247 | +0.0031% |
+  | feature rows | 22,293,932 = the deduplicated candidates of this run | | 0 |
+  | duplicate (query, article) keys in the written files | 0 | | |
+  | `tt_dot` equal to the R6 score / `wals_dot` equal to the R5 score | 7,203,500 rows / 6,072,000 rows, bit for bit | | |
+  | category code table | the same sha256 as stage 1 | | |
+  | MAP@12 (500 trees) | 0.03485158034535934 | 0.034849701577104486 | +0.0054% relative |
+  | Recall@12 | 0.07804995050341702 | 0.07797187269574504 | +0.100% relative |
+  | NDCG@12 | 0.05393316668014007 | 0.0539127774637354 | +0.038% relative |
+  | queries with an identical Top-12 list | 72.53% | | |
+  | queries with the same 12 articles in any order | 93.43% | | |
+  | mean Top-12 overlap | 99.45% | | |
+  | feature build: wall time, true peak | 119.6 s (126.3 s with loading); 6.02 GB | 50.0 s; 6.88 GB | |
+  | scoring and evaluation: wall time, true peak | 95.8 s; 2.91 GB | 110.7 s; 2.98 GB | |
+
+  At the earlier checkpoints MAP@12 differs by −0.064% (100 trees), −0.018% (200), −0.128% (300) and −0.057% (400) relative.
+- **Two facts the records show**:
+  1. The feature build loads no OpenMP runtime at all (polars and numpy only); its rows name numpy's BLAS. It took 2.4 times as long as on the laptop.
+  2. Two new tests failed in the first image of this part, before any full-data run: one built a temporary project and asked for the image's code-tree hash of it, the other expected torch's BLAS to stay at one thread on arm64. The first was a test assumption; the second was the measurement of candidate (i) above, and the test now states what was measured. No existing test was changed for them.
+- **Not covered**: one week, one platform for the full-data items (arm64). The x86-64 container is covered only by the reproducer at 32 steps. Item E starts from a recorded model two weeks back and makes one update; it does not show how the R6 difference behaves over the eight chained updates of the replay. The laptop's repeatability on real data was not run.
+- **Code state**: lock files, stage-1 result tables and earlier entries of this file are unchanged; the laptop's fine-tune path is unchanged (tests replace torch's switch by a function that fails and check that the macOS path never calls it).
