@@ -1,7 +1,7 @@
 """Map raw string IDs to dense int32 indexes and back (proposal §2.1).
 
 Inputs: customer_id (64-char hex string), article_id (10-digit string with
-leading zeros, e.g. "0108775015").
+leading zeros, e.g. "0100000015").
 
 Outputs: two mapping tables, one row per entity:
     - customer_id (str) <-> customer_idx (int32)
@@ -89,7 +89,7 @@ def check_article_id_format(article_ids: pl.Series) -> None:
     """Fail if any article_id is not exactly 10 digits.
 
     A shorter ID almost always means the CSV was read as an integer and the
-    leading zeros were lost ("0108775015" -> 108775015).
+    leading zeros were lost ("0100000015" -> 100000015).
 
     Raises:
         ValueError: If any value does not match ARTICLE_ID_PATTERN.
