@@ -1,9 +1,7 @@
 # hmrec — H&M personalized fashion recommendation
 
-**Full report:** [`docs/final_report.md`](docs/final_report.md) (English, the original and the
-authoritative version) and [`docs/final_report.zh-CN.md`](docs/final_report.zh-CN.md) (Chinese
-translation). The numbers in the two are identical; where they differ, the English version
-prevails. This page is the summary (§1 of the report).
+**Full report:** [`docs/final_report.md`](docs/final_report.md). This page is the summary (§1 of
+the report).
 
 ## Summary
 
@@ -77,16 +75,15 @@ code that Claude wrote.
 ## Documents
 
 The only design reference is [`docs/proposal.md`](docs/proposal.md). Design changes are logged in
-[`docs/decisions.md`](docs/decisions.md). Results and their limitations are in the final report:
-[`docs/final_report.md`](docs/final_report.md) (English, authoritative) and
-[`docs/final_report.zh-CN.md`](docs/final_report.zh-CN.md) (Chinese translation). Rules for coding
-agents are in [`AGENTS.md`](AGENTS.md).
+[`docs/decisions.md`](docs/decisions.md). Results and their limitations are in the final report,
+[`docs/final_report.md`](docs/final_report.md). Rules for coding agents are in
+[`AGENTS.md`](AGENTS.md).
 
-English is the primary language of this project: new documents are written in English first, and
-a Chinese version, when there is one, is a translation saved as `*.zh-CN.md` (AGENTS.md §11).
-The proposal, the decision log and `AGENTS.md` were written in Chinese up to tag `v0.1`; those
-originals are kept as frozen archives (`docs/proposal.zh-CN.md`, `docs/decisions.zh-CN.md`,
-`AGENTS.zh-CN.md`) and are no longer maintained. The English files are authoritative.
+The documents are in English only; no translation is maintained (AGENTS.md §11). The proposal, the
+decision log and `AGENTS.md` were written in Chinese up to tag `v0.1` and were then translated.
+One Chinese file is kept, `docs/decisions.zh-CN.md`: a frozen archive of the decision log as it
+was at `v0.1`, because the lock files under `configs/locks/` quote its entry titles and lock files
+are never modified (`docs/decisions.md`, 2026-11-21, gives the English entry for each title).
 
 ## Install
 

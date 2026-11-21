@@ -1,6 +1,6 @@
 # H&M Personalized Fashion Recommendation — Final Report
 
-> **Language.** This English version is the original; `docs/final_report.zh-CN.md` is its Chinese translation. The numbers are identical; where the two differ, the English version prevails.
+> **Language.** This report exists in English only. Its Chinese translation was removed on 2026-11-21 (`docs/decisions.md`); it remains in the git history (on this branch up to tag `v0.1.1`).
 > Date: 2026-11-19. Tag `v0.1`.
 > The design reference is `docs/proposal.md`; every decision made along the way is logged in `docs/decisions.md`. This report is written for readers who did not take part in the project and can be read on its own; for details, follow the sections and files it points to.
 > **Where the numbers come from.** Every result comes from a file under `results/` or from `docs/decisions.md`, cited below the table or at the end of the sentence. Numbers derived from result tables (relative changes, query-weighted pooled values) say how they were computed. Configuration values (quotas, windows, τ and so on) come from the four lock files under `configs/locks/` and from `configs/fold_manifest.yaml`.
