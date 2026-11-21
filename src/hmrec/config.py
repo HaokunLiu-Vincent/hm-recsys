@@ -3225,3 +3225,115 @@ def parse_calibration_config(raw: Mapping[str, Any]) -> CalibrationConfig:
 def load_calibration_config(path: Path) -> CalibrationConfig:
     """Read and validate configs/m10_calibration.yaml."""
     return parse_calibration_config(load_yaml(path))
+
+
+# ---------------------------------------------------------------- m10_r6_repeatability.yaml
+
+
+@dataclass(frozen=True)
+class RepeatabilityTableSizes:
+    """Sizes of the tables the reproducer's model is built on (the real tables' sizes).
+
+    Attributes:
+        n_articles: Number of articles (105,542).
+        n_customers: Number of customers (1,371,980).
+        image_dim: Width of the image vectors (512).
+        text_dim: Width of the text vectors (384).
+        article_code_values: Distinct values of product_code and of each category column.
+        profile_values: Distinct values of each profile column.
+    """
+
+    n_articles: int
+    n_customers: int
+    image_dim: int
+    text_dim: int
+    article_code_values: tuple[int, ...]
+    profile_values: tuple[int, ...]
+
+
+@dataclass(frozen=True)
+class RepeatabilityConfig:
+    """Settings from configs/m10_r6_repeatability.yaml (see that file).
+
+    Attributes:
+        seed: Seed of the synthetic tables and samples.
+        table_sizes: Sizes of the tables the model is built on.
+        scales: Allowed numbers of training rows of a synthetic fine-tune set.
+        alarm_samples: Rows of the alarm users (loss only).
+        popularity_offset: Article k is drawn with probability proportional to
+            1 / (k + popularity_offset).
+        max_group_rows: A synthetic loss group has 1 .. max_group_rows rows.
+    """
+
+    seed: int
+    table_sizes: RepeatabilityTableSizes
+    scales: tuple[int, ...]
+    alarm_samples: int
+    popularity_offset: float
+    max_group_rows: int
+
+
+def _get_positive_ints(raw: Mapping[str, Any], key: str, where: str) -> tuple[int, ...]:
+    """A non-empty list of positive integers."""
+    values = raw.get(key)
+    if not isinstance(values, list) or len(values) == 0:
+        raise ValueError(f"{where}.{key} must be a non-empty list of positive integers")
+    if not all(type(value) is int and value > 0 for value in values):
+        raise ValueError(f"{where}.{key} must be a non-empty list of positive integers")
+    return tuple(int(value) for value in values)
+
+
+def parse_repeatability_config(raw: Mapping[str, Any]) -> RepeatabilityConfig:
+    """Build a RepeatabilityConfig from the parsed content of configs/m10_r6_repeatability.yaml.
+
+    Raises:
+        ValueError: If a key is missing or unknown, or a number is not positive.
+    """
+    where = "m10_r6_repeatability"
+    top_keys = {
+        "seed",
+        "table_sizes",
+        "scales",
+        "alarm_samples",
+        "popularity_offset",
+        "max_group_rows",
+    }
+    check_keys(raw, top_keys, where)
+    sizes_where = f"{where}.table_sizes"
+    sizes_raw = get_mapping(raw, "table_sizes", where)
+    size_keys = {
+        "n_articles",
+        "n_customers",
+        "image_dim",
+        "text_dim",
+        "article_code_values",
+        "profile_values",
+    }
+    check_keys(sizes_raw, size_keys, sizes_where)
+    sizes = RepeatabilityTableSizes(
+        n_articles=get_int(sizes_raw, "n_articles", sizes_where),
+        n_customers=get_int(sizes_raw, "n_customers", sizes_where),
+        image_dim=get_int(sizes_raw, "image_dim", sizes_where),
+        text_dim=get_int(sizes_raw, "text_dim", sizes_where),
+        article_code_values=_get_positive_ints(sizes_raw, "article_code_values", sizes_where),
+        profile_values=_get_positive_ints(sizes_raw, "profile_values", sizes_where),
+    )
+    config = RepeatabilityConfig(
+        seed=get_int(raw, "seed", where),
+        table_sizes=sizes,
+        scales=_get_positive_ints(raw, "scales", where),
+        alarm_samples=get_int(raw, "alarm_samples", where),
+        popularity_offset=get_float(raw, "popularity_offset", where),
+        max_group_rows=get_int(raw, "max_group_rows", where),
+    )
+    for name in ("n_articles", "n_customers", "image_dim", "text_dim"):
+        require_positive(getattr(sizes, name), f"{sizes_where}.{name}")
+    require_positive(config.alarm_samples, f"{where}.alarm_samples")
+    require_positive(config.popularity_offset, f"{where}.popularity_offset")
+    require_positive(config.max_group_rows, f"{where}.max_group_rows")
+    return config
+
+
+def load_repeatability_config(path: Path) -> RepeatabilityConfig:
+    """Read and validate configs/m10_r6_repeatability.yaml."""
+    return parse_repeatability_config(load_yaml(path))

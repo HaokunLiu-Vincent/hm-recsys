@@ -19,10 +19,14 @@ from pathlib import Path
 REPO = Path(__file__).resolve().parents[2]
 SRC = REPO / "src" / "hmrec"
 CALIBRATION = SRC / "calibration"
-CALIBRATION_SCRIPT = REPO / "scripts" / "m10_calibrate.py"
+# The scripts of the calibration: the items of week V4, and the R6 repeatability reproducer.
+CALIBRATION_SCRIPTS = (
+    REPO / "scripts" / "m10_calibrate.py",
+    REPO / "scripts" / "m10_r6_repeatability.py",
+)
 
 SHARED_MODULES = ("records.py", "compare.py", "references.py", "context.py", "run.py", "repeat.py")
-TORCH_SIDE_MODULES = ("recall_items.py",)
+TORCH_SIDE_MODULES = ("recall_items.py", "r6_repeatability.py")
 LIGHTGBM_SIDE_MODULES = ("ranker_items.py",)
 
 # Modules that load LightGBM when imported (AGENTS.md §5).
@@ -95,7 +99,7 @@ def test_only_the_calibration_code_uses_the_tolerance_accepted_entry() -> None:
 def test_no_other_code_imports_the_calibration() -> None:
     files = [*SRC.rglob("*.py"), *(REPO / "scripts").glob("*.py")]
     for path in files:
-        if CALIBRATION in path.parents or path == CALIBRATION_SCRIPT:
+        if CALIBRATION in path.parents or path in CALIBRATION_SCRIPTS:
             continue
         assert not uses(imported_modules(path), "hmrec.calibration"), path
 
@@ -123,7 +127,7 @@ def test_the_two_sides_stay_apart() -> None:
 
 
 def test_no_calibration_code_reaches_t_labels_or_a_module_that_selects() -> None:
-    for path in [*CALIBRATION.glob("*.py"), CALIBRATION_SCRIPT]:
+    for path in [*CALIBRATION.glob("*.py"), *CALIBRATION_SCRIPTS]:
         imports = imported_modules(path)
         for module in FORBIDDEN_EVERYWHERE:
             assert not uses(imports, module), f"{path.name} imports {module}"

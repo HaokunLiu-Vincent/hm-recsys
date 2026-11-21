@@ -1,0 +1,41 @@
+# The R6 fine-tuning repeatability reproducer (M10 part 3; docs/decisions.md 2026-11-22).
+# Read by hmrec.config.load_repeatability_config; used only by
+# hmrec.recall.twotower.repeatability and scripts/m10_r6_repeatability.py.
+#
+# The reproducer runs the REAL fine-tuning code (hmrec.recall.twotower.train.fine_tune)
+# on SYNTHETIC data drawn from a seed. No competition data is read and nothing here is
+# derived from its content. The model layer sizes, the batch size and the optimizer
+# settings come from configs/locks/twotower.lock.yaml, as in a real fine-tune.
+#
+# Nothing here changes a result of the system.
+
+# Seed of the synthetic tables and samples (the model's weights are seeded as in a real
+# run, from the locked training seed).
+seed: 20261122
+
+# Sizes of the tables the model is built on. These are the sizes of the real tables, so
+# that the embedding tables and the layers have their real shapes (they are shapes, not
+# data): 105,542 articles, 1,371,980 customers, image vectors of width 512, text vectors
+# of width 384, and the number of distinct values of each category column.
+table_sizes:
+  n_articles: 105542
+  n_customers: 1371980
+  image_dim: 512
+  text_dim: 384
+  # product_code first, then the six category columns of the item tower.
+  article_code_values: [47224, 132, 19, 21, 5, 57, 50]
+  # age_bucket, club_member_status, fashion_news_frequency.
+  profile_values: [7, 3, 3]
+
+# Samples of one synthetic fine-tune set, by scale. A scale is a number of training
+# rows; with the locked batch size of 512 and 2 epochs, 512 rows are 2 optimizer steps
+# and 476,668 rows (the size of the real fine-tune set of week V3) are 1,862 steps.
+scales: [512, 2048, 8192, 32768, 131072, 476668]
+# Rows of the alarm users (loss only, never trained on), as in a real week (about 2,000).
+alarm_samples: 2000
+# How strongly the synthetic purchases concentrate on few articles: article k (in a random
+# order) is drawn with probability proportional to 1 / (k + popularity_offset). A real week
+# is concentrated too, and repeated articles in a batch are what an embedding update sums.
+popularity_offset: 10.0
+# A synthetic "customer day" (one loss group) has 1 .. max_group_rows purchase rows.
+max_group_rows: 4

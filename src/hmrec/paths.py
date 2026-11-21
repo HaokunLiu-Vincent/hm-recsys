@@ -781,6 +781,16 @@ class ProjectPaths:
         return self.configs_dir / "m10_calibration.yaml"
 
     @property
+    def r6_repeatability_config_file(self) -> Path:
+        """configs/m10_r6_repeatability.yaml: the synthetic R6 fine-tuning reproducer."""
+        return self.configs_dir / "m10_r6_repeatability.yaml"
+
+    @property
+    def r6_repeatability_file(self) -> Path:
+        """results/m10_calibration/r6_repeatability.csv: one row per pair of reproducer runs."""
+        return self.calibration_results_dir / "r6_repeatability.csv"
+
+    @property
     def calibration_artifacts_dir(self) -> Path:
         """artifacts/m10_calibration/: every file a calibration generates (not in git)."""
         return self.artifacts_root / "m10_calibration"
