@@ -2,15 +2,20 @@
 # The leading "/" anchors these to the repo root. Without it, "data/" would
 # also ignore the source package src/hmrec/data/.
 #
-# "/data/*" and not "/data/": git never looks inside an ignored FOLDER, so a file in it
+# "/data/?*" and not "/data/": git never looks inside an ignored FOLDER, so a file in it
 # could not be let back in. The contents are ignored one by one instead, and the small
 # DVC pointer files (*.dvc: path, size and md5 of the data they stand for; docs/mlops.md
 # §7.1) are let back in. The data themselves stay untracked, as before.
-/data/*
+#
+# "?*" (at least one character) and not "*": for git the two are the same. DVC reads
+# this file with its own matcher, which takes "data/" itself as ignored by "/data/*" and
+# then never looks for pointer files inside (found on 2026-11-22: `dvc status` and
+# `dvc pull` saw no tracked data). "/data/?*" does not match "data/".
+/data/?*
 !/data/*.dvc
-/artifacts/*
+/artifacts/?*
 !/artifacts/features/
-/artifacts/features/*
+/artifacts/features/?*
 !/artifacts/features/*.dvc
 
 # DVC: the local configuration holds the URL of the remote (the bucket name), which must
