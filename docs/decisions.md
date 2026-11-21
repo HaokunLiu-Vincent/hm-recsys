@@ -1394,3 +1394,25 @@ The evaluation recorded in the entry above was run once. Code, rehearsal, formal
 
 - **Statement** (by the user, on 2026-11-21): when designing the ranker features, the user consulted the public write-up of the first-place solution of the H&M competition.
 - **Why it is recorded**: `README.md` says that the feature design drew on the first-place solution. This is one of the reasons why the score of the Kaggle late submission is not presented as an official rank.
+
+## 2026-11-21 Stage 3 (MLOps on GCP) approved; decisions D1–D12 of `docs/mlops.md`; T1–T4 labels may be read by the replay, for monitoring and verification only
+
+- **Decision** (by the user, 2026-11-21): stage 3 is approved. Its design is `docs/mlops.md`, committed as the user placed it (commit `1f2a8de`). Stage 3 changes how the system runs, not what it computes: the six recall channels, the 71 features, the LambdaMART ranker and every lock file stay as they are at tag `v0.2.1`. Milestones M10–M15 (`docs/mlops.md` §13), one branch per milestone.
+- **The invariants of `docs/mlops.md` §4 are binding** for all of stage 3 (`AGENTS.md` §12).
+- **Reading T1–T4 labels in the replay: approved by the user, with limits.** The replay of `docs/mlops.md` §6.3 reads the labels of T1–T4 (the closing steps C1 and C2, the `eval`-mode query set, and the comparison with the M8 records). They are read **for monitoring and for verifying the pipeline only, never to select or tune anything**. Alert thresholds and flag rules are fixed and recorded before the first replay tick and are not changed after any T result is seen (invariant 3). T numbers produced by the replay are reported as a verification of the pipeline, not as a new evaluation. `AGENTS.md` §3.2 still holds: any change is compared and selected on V1–V4 only. No code that reads a T label exists yet; the entry point is written in M12 and recorded then.
+- **The twelve decisions of `docs/mlops.md` §14**, one line each (the section named holds the detail):
+  - **D1** Replay weeks: V1–V4 and T1–T4 in `eval` mode, then one `serve` tick at 2020-09-23; T labels for monitoring and verification only (§6.3, invariant 3).
+  - **D2** Serving: the weekly Top-12 is precomputed and the endpoint only looks it up (§9).
+  - **D3** Tolerance for container and cloud results: the tiered values of §8.3, confirmed after the M10 measurement and the M13 x86-64 calibration, before any cloud replay.
+  - **D4** Region: `us-central1` (§12).
+  - **D5** `serve` runs in the cloud: one, the tick at 2020-09-23 (§6.3).
+  - **D6** New dependencies: `dvc` with its Cloud Storage extra, `mlflow`, `fastapi`, `uvicorn`, the Cloud Storage client library, and the PyTorch CPU-only index for torch on Linux; each one is approved explicitly in the prompt of its milestone (`AGENTS.md` §3.4). **Approved for M10: the PyTorch CPU-only index for torch on Linux, and nothing else** (§8.1).
+  - **D7** Infrastructure: scripts of `gcloud` commands in `infra/` with a teardown script; no Terraform (§11).
+  - **D8** Run tracking: MLflow as a local view over the manifests in Cloud Storage; no hosted server; the model registry is a mirror (§7.3).
+  - **D9** DeepFM is not part of the pipeline (§3).
+  - **D10** Starting shape of the Cloud Run job: 6 vCPU and 24 GiB, raised to 8 vCPU and 32 GiB only if the M13 measurements require it (§8.1).
+  - **D11** No hyperparameter search in stage 3, including a parallel search on Cloud Run (§3).
+  - **D12** Business-facing proxy: hit value, tracked in monitoring and labelled as a proxy, with no threshold (§10).
+- **The laptop stays the reference.** Bit-identical checks stay on the laptop (Apple silicon, macOS, Homebrew libomp). Results of a container or of the cloud are accepted by the tolerance of `docs/mlops.md` §8.3, and are never described as bit-identical to the laptop (invariant 4).
+- **Documents updated**: `docs/proposal.md` (new §17, a pointer), `README.md` (a "Stage 3 (in progress)" line and the document list), `AGENTS.md` (new §12).
+- **Not changed**: code logic, configurations, lock files, results, tags. Nothing was run on the data.

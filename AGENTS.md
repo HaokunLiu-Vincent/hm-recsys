@@ -317,3 +317,15 @@ A task is done only when all of the following hold:
 - **`docs/decisions.zh-CN.md` is a frozen archive, kept only for the lock-file references.** The `decision_record` fields of the lock files under `configs/locks/` quote entry titles of the decision log in Chinese, as it was at tag `v0.1`, and lock files may not be modified (§3.3). A quoted title is found in this archive, and the entry at the same position of `docs/decisions.md` is its English version; the table of every quoted title is in `docs/decisions.md` (2026-11-21, "English-only documents"), and `tests/unit/test_locks.py` checks the ranker lock's pointer in this way. **Do not edit this archive and do not delete it.**
 - `docs/decisions.md` stays append-only: new entries are in English, and earlier entries are not edited.
 - This rule is about files in the repository. It does not decide the language of replies in a conversation: reply in the language the user writes in, unless the user asks for another.
+
+---
+
+## 12. Stage 3: MLOps on GCP (M10–M15)
+
+**The design of stage 3 is `docs/mlops.md`** (approved by the user on 2026-11-21; `docs/proposal.md` §17 points to it). Read its relevant sections before any stage-3 task. Stage 3 changes how the system runs, not what it computes; everything in §1–§11 above still holds.
+
+- **The invariants of `docs/mlops.md` §4 are binding**, all eight of them. In short: only data from before the anchor; lock files, existing result tables and the history of `docs/decisions.md` are not modified, and new records go to new tables; **T1–T4 labels are read only by the replay, for monitoring and verification, never to select or tune anything, with thresholds fixed and recorded before the first replay tick**; code names no cloud project, bucket or region (they come from configuration); no token, key or credential file goes into the repository, an image, a log or a document; full-data runs start from committed code and record their commit and image digest; a budget alert exists before any billable resource is created.
+- **Milestone branches**: `m10-…` to `m15-…`, one per milestone (§10), for example `m10-container-ci`.
+- **The laptop stays the reference for bit-identical checks** (Apple silicon, macOS, Homebrew libomp). **Results of a container or of the cloud are accepted by the tolerance of `docs/mlops.md` §8.3** and are never described as bit-identical to the laptop. A difference above the tolerance stops the milestone and is investigated; the tolerance is not widened after a replay result is seen.
+- **A test or a run-time check is never loosened, skipped or deleted to make a container or CI run pass.** A platform assumption (a path, Homebrew, a `.git` directory) is made platform-aware explicitly, with a test for the Linux branch; a bit-exact number that differs on Linux and a test that needs data the container does not have are listed for the user's decision.
+- **New dependencies need the user's explicit approval in the prompt of each milestone** (§3.4; `docs/mlops.md` D6).

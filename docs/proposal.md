@@ -1655,3 +1655,11 @@ Run once at commit `db8e9c7`; tables `results/m9_t_*.csv`; the full record is th
 - V and T, pooled MAP@12: DeepFM (seed mean) 0.032765 → 0.039341; LightGBM lambdarank (seed 42) 0.032713 → 0.039194.
 - Highest true memory peak 10.72 GB; no NaN loss; no stop condition applied.
 - The effects of the input representation and of the loss were not tested on T (§16.12).
+
+## 17. Stage 3: MLOps on GCP (M10–M15)
+
+**The design of stage 3 is `docs/mlops.md`** (approved by the user on 2026-11-21; decisions D1–D12 are in its §14 and in `docs/decisions.md`). This section is only a pointer: where stage 3 is concerned, `docs/mlops.md` is the reference, and this proposal stays the reference for what the system computes.
+
+- **Stage 3 changes how the system runs, not what it computes.** §5–§10 and every lock file stay as they are at tag `v0.2.1`. The weekly pipeline refits model parameters with the locked hyperparameters; it selects and tunes nothing.
+- **Milestones**: M10 container and CI, M11 versioning, M12 the weekly pipeline (local), M13 cloud, M14 serving, monitoring and deployment, M15 close (`docs/mlops.md` §13).
+- **The invariants of `docs/mlops.md` §4 are binding.** In particular: T1–T4 labels are read only by the replay, for monitoring and verification, never to select or tune anything, with thresholds fixed before the first replay tick; the laptop remains the reference for bit-identical checks, and container and cloud results are accepted by the tolerance of `docs/mlops.md` §8.3.

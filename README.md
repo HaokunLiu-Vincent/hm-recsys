@@ -66,6 +66,11 @@ on V and LambdaMART cannot be told apart: pooled MAP@12 0.032765 against 0.03270
 Private 0.03588 against 0.03600 (−0.33%, inside the band of 1% fixed before the run; one late
 submission, seed 42). "Cannot be told apart" does not mean that the two are equal.
 
+**Stage 3 (in progress): MLOps on GCP.** The same system as a weekly pipeline that runs without a
+person: in a container, on a schedule, with versioned inputs, recorded runs, a serving endpoint and
+alerts. It changes how the system runs, not what it computes. Design:
+[`docs/mlops.md`](docs/mlops.md); the first milestone (M10) is the container image and CI.
+
 **Three things to know when reading these numbers:**
 
 1. **T is 19.8% higher than V** (V1–V4 pooled: 0.032713, `results/v_phase_metrics.csv`), contrary
@@ -91,8 +96,8 @@ code that Claude wrote.
 
 The only design reference is [`docs/proposal.md`](docs/proposal.md). Design changes are logged in
 [`docs/decisions.md`](docs/decisions.md). Results and their limitations are in the final report,
-[`docs/final_report.md`](docs/final_report.md). Rules for coding agents are in
-[`AGENTS.md`](AGENTS.md).
+[`docs/final_report.md`](docs/final_report.md). The design of stage 3 (MLOps on GCP, in progress)
+is [`docs/mlops.md`](docs/mlops.md). Rules for coding agents are in [`AGENTS.md`](AGENTS.md).
 
 The documents are in English only; no translation is maintained (AGENTS.md §11). The proposal, the
 decision log and `AGENTS.md` were written in Chinese up to tag `v0.1` and were then translated.
