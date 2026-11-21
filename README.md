@@ -150,6 +150,21 @@ make test         # unit + integration tests (also two processes)
 make format       # auto-format
 ```
 
+**Container image (stage 3, `docs/mlops.md` §8).** The same code in a Linux image, built only
+from a clean, committed tree; the image carries its commit and holds no data. Results computed in
+a container are not bit-identical to the laptop (another OpenMP runtime and BLAS) and are accepted
+by the tolerance of `docs/mlops.md` §8.3.
+
+```bash
+make image-build  # build hmrec:dev from HEAD (refuses uncommitted changes)
+make image-info   # commit, Python, libraries, OpenMP, BLAS, CPUs and memory of the image
+make image-lint   # `make lint` inside the image
+make image-test   # `make test` inside the image (two processes)
+```
+
+GitHub Actions (`.github/workflows/ci.yml`) builds the linux/amd64 image on every push and pull
+request and runs lint and both test suites inside it.
+
 Do not `pip install` into `.venv`. New dependencies are added with `uv add <package>`
 (dev tools: `uv add --group dev <package>`), only after agreement (see AGENTS.md §3.4, §8).
 

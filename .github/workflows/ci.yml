@@ -82,13 +82,14 @@ jobs:
       # torch and LightGBM never share a process (tests/conftest.py), so the suite runs as two
       # processes. They are two steps, and the second runs even if the first fails, so that
       # one run shows every failing test of both sides. The notice is the last line of pytest
-      # ("970 passed in 45.83s"); the step fails if pytest failed.
+      # ("970 passed in 45.83s"); the step fails if pytest failed. (No comma in a notice
+      # title: a comma ends the title.)
       - name: Tests inside the image, torch side
         if: ${{ !cancelled() }}
         run: |
           status=0
           make image-test-torch-side 2>&1 | tee torch-side.txt || status=$?
-          echo "::notice title=tests, torch side::$(grep -E ' (passed|failed|error)' torch-side.txt | tail -n 1)"
+          echo "::notice title=tests (torch side)::$(grep -E ' (passed|failed|error)' torch-side.txt | tail -n 1)"
           exit "$status"
 
       - name: Tests inside the image, LightGBM side
@@ -96,5 +97,5 @@ jobs:
         run: |
           status=0
           make image-test-lightgbm-side 2>&1 | tee lightgbm-side.txt || status=$?
-          echo "::notice title=tests, LightGBM side::$(grep -E ' (passed|failed|error)' lightgbm-side.txt | tail -n 1)"
+          echo "::notice title=tests (LightGBM side)::$(grep -E ' (passed|failed|error)' lightgbm-side.txt | tail -n 1)"
           exit "$status"
