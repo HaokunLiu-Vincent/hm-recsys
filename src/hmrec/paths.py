@@ -771,6 +771,67 @@ class ProjectPaths:
         """results/m9_t_v_and_t.csv: pooled MAP@12 of the two models on V1-V4 and on T1-T4."""
         return self.results_root / "m9_t_v_and_t.csv"
 
+    # ------------------------------------------------------------ stage 3: M10 calibration
+    # docs/mlops.md §8.3, docs/m10_calibration_plan.md. Everything a calibration writes
+    # lies under these two folders; no stage-1 artifact or table is written.
+
+    @property
+    def m10_calibration_config_file(self) -> Path:
+        """configs/m10_calibration.yaml: the week, input hashes and the provisional tolerance."""
+        return self.configs_dir / "m10_calibration.yaml"
+
+    @property
+    def calibration_artifacts_dir(self) -> Path:
+        """artifacts/m10_calibration/: every file a calibration generates (not in git)."""
+        return self.artifacts_root / "m10_calibration"
+
+    @property
+    def calibration_results_dir(self) -> Path:
+        """results/m10_calibration/: the calibration's own result tables (committed)."""
+        return self.results_root / "m10_calibration"
+
+    def calibration_tree_dir(self, platform: str, run: str, tree: str) -> Path:
+        """artifacts/m10_calibration/{platform}/{run}/{tree}/: one artifacts tree of a run.
+
+        Below it the layout is the one of artifacts/ (candidates/, models/, ...), so the
+        stage-1 functions can write into it through a second ProjectPaths
+        (calibration_output_paths).
+
+        Args:
+            platform: e.g. "linux-arm64" (hmrec.platform_fields.PlatformFields.name).
+            run: "run1" or "run2" (the second run checks repeatability).
+            tree: "main" (R1-R5, the R6 chain, the union, the Ranker) or
+                "recorded_model" (R6 candidates from the recorded model, item C1).
+        """
+        return self.calibration_artifacts_dir / platform / run / tree
+
+    @property
+    def calibration_comparisons_file(self) -> Path:
+        """results/m10_calibration/comparisons.csv: one row per measured quantity."""
+        return self.calibration_results_dir / "comparisons.csv"
+
+    @property
+    def calibration_runs_file(self) -> Path:
+        """results/m10_calibration/runs.csv: one row per calibration process."""
+        return self.calibration_results_dir / "runs.csv"
+
+    @property
+    def calibration_repeatability_file(self) -> Path:
+        """results/m10_calibration/repeatability.csv: two container runs compared bit by bit."""
+        return self.calibration_results_dir / "repeatability.csv"
+
+    def calibration_chain_file(self, platform: str, run: str) -> Path:
+        """results/m10_calibration/twotower_chain_{platform}_{run}.csv: the R6 fine-tune of a run.
+
+        The same columns as results/m6_twotower_chain.csv, which is never written
+        by a calibration.
+        """
+        return self.calibration_results_dir / f"twotower_chain_{platform}_{run}.csv"
+
+    def calibration_log_file(self, platform: str, run: str, label: str) -> Path:
+        """artifacts/m10_calibration/{platform}/{run}/logs/{label}.log: the log of one process."""
+        return self.calibration_artifacts_dir / platform / run / "logs" / f"{label}.log"
+
 
 def build_paths(config: BaseConfig, project_root: Path) -> ProjectPaths:
     """Derive ProjectPaths from a BaseConfig.
@@ -789,6 +850,35 @@ def build_paths(config: BaseConfig, project_root: Path) -> ProjectPaths:
         data_root=resolve_root(config.paths.data_root, project_root),
         artifacts_root=resolve_root(config.paths.artifacts_root, project_root),
         results_root=resolve_root(config.paths.results_root, project_root),
+    )
+
+
+def calibration_output_paths(
+    paths: ProjectPaths, platform: str, run: str, tree: str
+) -> ProjectPaths:
+    """A second ProjectPaths whose artifacts and results lie in the calibration folders.
+
+    The stage-1 functions write where a ProjectPaths tells them. Given this one,
+    they write a candidates file to
+    artifacts/m10_calibration/{platform}/{run}/{tree}/candidates/{fold}/... instead
+    of artifacts/candidates/{fold}/..., and a result table under
+    results/m10_calibration/. Inputs (queries, models, features) are still read
+    through the first ProjectPaths.
+
+    Args:
+        paths: The project paths (the stage-1 locations).
+        platform: e.g. "linux-arm64".
+        run: "run1" or "run2".
+        tree: "main" or "recorded_model" (ProjectPaths.calibration_tree_dir).
+
+    Returns:
+        The same project root and data root; artifacts_root and results_root replaced.
+    """
+    return ProjectPaths(
+        project_root=paths.project_root,
+        data_root=paths.data_root,
+        artifacts_root=paths.calibration_tree_dir(platform, run, tree),
+        results_root=paths.calibration_results_dir,
     )
 
 

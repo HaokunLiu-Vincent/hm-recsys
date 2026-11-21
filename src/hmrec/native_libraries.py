@@ -47,6 +47,20 @@ BLAS_LIBRARY_PREFIXES = (
 )
 UNKNOWN = "unknown"
 DPKG_QUERY = "dpkg-query"
+HOMEBREW_CELLAR = "Cellar"
+HOMEBREW_FORMULA = "libomp"
+
+
+def libomp_version_from_path(path: str) -> str:
+    """The Homebrew version in a libomp path, or "unknown".
+
+    ".../Cellar/libomp/22.1.4/lib/libomp.dylib" -> "22.1.4".
+    """
+    parts = Path(path).parts
+    for index, part in enumerate(parts[:-2]):
+        if part == HOMEBREW_CELLAR and parts[index + 1] == HOMEBREW_FORMULA:
+            return parts[index + 2]
+    return UNKNOWN
 
 
 def loaded_library_paths() -> list[str]:

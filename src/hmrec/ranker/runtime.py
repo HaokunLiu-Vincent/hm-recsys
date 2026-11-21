@@ -51,34 +51,22 @@ re-exported here under the names they always had.
 import sys
 from collections.abc import Collection, Sequence
 from dataclasses import dataclass, replace
-from pathlib import Path
 
 import lightgbm as lgb
 
 from hmrec.native_libraries import (  # noqa: F401  (re-exported, see the module docstring)
+    HOMEBREW_CELLAR,
+    HOMEBREW_FORMULA,
     OPENMP_LIBRARY_PREFIXES,
     UNKNOWN,
     debian_package_version,
+    libomp_version_from_path,
     loaded_library_paths,
     openmp_libraries,
 )
 
-HOMEBREW_CELLAR = "Cellar"
-HOMEBREW_FORMULA = "libomp"
 NOT_LOADED = "not loaded"
 LINUX = "linux"
-
-
-def libomp_version_from_path(path: str) -> str:
-    """The Homebrew version in a libomp path, or "unknown".
-
-    ".../Cellar/libomp/22.1.4/lib/libomp.dylib" -> "22.1.4".
-    """
-    parts = Path(path).parts
-    for index, part in enumerate(parts[:-2]):
-        if part == HOMEBREW_CELLAR and parts[index + 1] == HOMEBREW_FORMULA:
-            return parts[index + 2]
-    return UNKNOWN
 
 
 @dataclass(frozen=True)
