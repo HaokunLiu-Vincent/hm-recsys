@@ -31,6 +31,7 @@ is trained there.
 This module is on the LightGBM side; it must not import torch.
 """
 
+import platform
 import sys
 import time
 from collections.abc import Sequence
@@ -141,6 +142,7 @@ def load_ranker_setup(context: CalibrationContext) -> RankerSetup:
         context.base,
         read_lightgbm_runtime(),
         sys.platform,
+        platform.machine(),
         MODE_CALIBRATION,
         context.main_paths,
     )

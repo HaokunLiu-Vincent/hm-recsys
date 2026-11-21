@@ -22,6 +22,7 @@ from hmrec.ranker.platform_entry import (
     MODE_CALIBRATION,
     PlatformNotAccepted,
     load_locked_ranker_for_platform,
+    platform_record_name,
     require_calibration_outputs,
 )
 from hmrec.ranker.runtime import LightGBMRuntime
@@ -61,7 +62,7 @@ def test_calibration_mode_on_linux_gives_the_same_configuration_as_the_strict_en
 ) -> None:
     paths, base, output = _workspace(tmp_path)
     result = load_locked_ranker_for_platform(
-        paths, base, CONTAINER_RUNTIME, "linux", MODE_CALIBRATION, output
+        paths, base, CONTAINER_RUNTIME, "linux", "aarch64", MODE_CALIBRATION, output
     )
     strict = load_locked_ranker(paths, base, LAPTOP_RUNTIME)
     # Every value of the configuration is the one the strict entry returns on the laptop.
@@ -86,21 +87,17 @@ def test_the_entry_refuses_everything_that_is_not_linux(tmp_path: Path, system: 
     paths, base, output = _workspace(tmp_path)
     for runtime in (LAPTOP_RUNTIME, CONTAINER_RUNTIME):
         with pytest.raises(RuntimeError, match="runs on Linux only"):
-            load_locked_ranker_for_platform(paths, base, runtime, system, MODE_CALIBRATION, output)
-
-
-def test_accepted_mode_refuses_because_no_platform_record_exists(tmp_path: Path) -> None:
-    paths, base, output = _workspace(tmp_path)
-    with pytest.raises(PlatformNotAccepted, match="no platform record exists"):
-        load_locked_ranker_for_platform(
-            paths, base, CONTAINER_RUNTIME, "linux", MODE_ACCEPTED, output
-        )
+            load_locked_ranker_for_platform(
+                paths, base, runtime, system, "aarch64", MODE_CALIBRATION, output
+            )
 
 
 def test_an_unknown_mode_is_refused(tmp_path: Path) -> None:
     paths, base, output = _workspace(tmp_path)
     with pytest.raises(ValueError, match="mode must be one of"):
-        load_locked_ranker_for_platform(paths, base, CONTAINER_RUNTIME, "linux", "replay", output)
+        load_locked_ranker_for_platform(
+            paths, base, CONTAINER_RUNTIME, "linux", "aarch64", "replay", output
+        )
 
 
 def test_another_lightgbm_version_or_thread_count_is_refused(tmp_path: Path) -> None:
@@ -108,7 +105,7 @@ def test_another_lightgbm_version_or_thread_count_is_refused(tmp_path: Path) -> 
     other_version = replace(CONTAINER_RUNTIME, lightgbm_version="4.6.0")
     with pytest.raises(ValueError, match="LightGBM version: '4.6.0' here, '4.7.0' in the lock"):
         load_locked_ranker_for_platform(
-            paths, base, other_version, "linux", MODE_CALIBRATION, output
+            paths, base, other_version, "linux", "aarch64", MODE_CALIBRATION, output
         )
     with pytest.raises(ValueError, match="num_threads: 4 here, 6 in the lock"):
         load_locked_ranker_for_platform(
@@ -116,6 +113,7 @@ def test_another_lightgbm_version_or_thread_count_is_refused(tmp_path: Path) -> 
             replace(base, num_threads=4),
             CONTAINER_RUNTIME,
             "linux",
+            "aarch64",
             MODE_CALIBRATION,
             output,
         )
@@ -126,7 +124,7 @@ def test_the_config_id_check_is_the_one_of_the_strict_entry(tmp_path: Path) -> N
     _rewrite(paths.ranker_lock_file, "model", "num_leaves", 63)
     with pytest.raises(ValueError, match="The locked settings were changed"):
         load_locked_ranker_for_platform(
-            paths, base, CONTAINER_RUNTIME, "linux", MODE_CALIBRATION, output
+            paths, base, CONTAINER_RUNTIME, "linux", "aarch64", MODE_CALIBRATION, output
         )
 
 
@@ -136,7 +134,7 @@ def test_a_changed_referenced_lock_file_is_refused(tmp_path: Path) -> None:
         handle.write("\n# edited\n")
     with pytest.raises(ValueError, match="sha256"):
         load_locked_ranker_for_platform(
-            paths, base, CONTAINER_RUNTIME, "linux", MODE_CALIBRATION, output
+            paths, base, CONTAINER_RUNTIME, "linux", "aarch64", MODE_CALIBRATION, output
         )
 
 
@@ -156,7 +154,9 @@ def test_a_runtime_that_cannot_be_named_is_refused(
 ) -> None:
     paths, base, output = _workspace(tmp_path)
     with pytest.raises(ValueError, match="cannot be identified"):
-        load_locked_ranker_for_platform(paths, base, runtime, "linux", MODE_CALIBRATION, output)
+        load_locked_ranker_for_platform(
+            paths, base, runtime, "linux", "aarch64", MODE_CALIBRATION, output
+        )
 
 
 def test_calibration_mode_may_only_write_into_the_calibration_folders(tmp_path: Path) -> None:
@@ -165,7 +165,7 @@ def test_calibration_mode_may_only_write_into_the_calibration_folders(tmp_path: 
     # The stage-1 locations themselves: both roots are refused.
     with pytest.raises(ValueError, match="may write artifacts only under"):
         load_locked_ranker_for_platform(
-            paths, base, CONTAINER_RUNTIME, "linux", MODE_CALIBRATION, paths
+            paths, base, CONTAINER_RUNTIME, "linux", "aarch64", MODE_CALIBRATION, paths
         )
     stage_one_results = replace(output, results_root=paths.results_root)
     with pytest.raises(ValueError, match="may write result tables only under"):
@@ -174,3 +174,115 @@ def test_calibration_mode_may_only_write_into_the_calibration_folders(tmp_path: 
     sibling = replace(output, artifacts_root=paths.artifacts_root / "m10_calibration_other")
     with pytest.raises(ValueError, match="may write artifacts only under"):
         require_calibration_outputs(paths, sibling)
+
+
+# ---------------------------------------------------------------- mode "accepted"
+
+
+def _pipeline_output(paths: ProjectPaths) -> ProjectPaths:
+    """Output locations of a tolerance-accepted run: new folders, not the stage-1 ones."""
+    return replace(
+        paths,
+        artifacts_root=paths.artifacts_root / "weekly",
+        results_root=paths.results_root / "weekly",
+    )
+
+
+def _accepted(
+    paths: ProjectPaths,
+    base: BaseConfig,
+    runtime: LightGBMRuntime = CONTAINER_RUNTIME,
+    system: str = "linux",
+    machine: str = "aarch64",
+) -> Any:
+    return load_locked_ranker_for_platform(
+        paths, base, runtime, system, machine, MODE_ACCEPTED, _pipeline_output(paths)
+    )
+
+
+def test_platform_record_name() -> None:
+    assert platform_record_name("linux", "aarch64") == "linux-arm64"
+    assert platform_record_name("linux", "x86_64") == "linux-amd64"
+
+
+def test_accepted_mode_accepts_the_platform_its_record_describes(tmp_path: Path) -> None:
+    # The real record configs/platforms/linux-arm64.yaml and the runtime of the arm64 image.
+    paths, base, _ = _workspace(tmp_path)
+    result = _accepted(paths, base)
+    assert result.mode == MODE_ACCEPTED
+    assert result.record is not None and result.record.platform == "linux-arm64"
+    assert result.record.acceptance.max_relative_difference == 0.01
+    # The configuration is the one the strict entry returns on the laptop.
+    assert result.locked == load_locked_ranker(paths, base, LAPTOP_RUNTIME)
+    # Calibration mode runs before a platform is accepted and carries no record.
+    calibration = load_locked_ranker_for_platform(
+        paths,
+        base,
+        CONTAINER_RUNTIME,
+        "linux",
+        "aarch64",
+        MODE_CALIBRATION,
+        calibration_output_paths(paths, "linux-arm64", "run1", "main"),
+    )
+    assert calibration.record is None
+
+
+def test_accepted_mode_refuses_a_platform_without_a_record(tmp_path: Path) -> None:
+    # x86-64 has no record yet: its calibration is the first step of M13.
+    paths, base, _ = _workspace(tmp_path)
+    with pytest.raises(PlatformNotAccepted, match="no platform record .*linux-amd64.yaml"):
+        _accepted(paths, base, machine="x86_64")
+
+
+def test_accepted_mode_refuses_a_process_that_is_not_the_recorded_platform(tmp_path: Path) -> None:
+    paths, base, _ = _workspace(tmp_path)
+    # Another version of the OpenMP runtime than the record names (a rebuilt image after
+    # Debian replaced the package): a new record is needed, after item D was run again.
+    other_openmp = replace(CONTAINER_RUNTIME, libomp_version="libgomp1 14.2.0-20")
+    with pytest.raises(PlatformNotAccepted, match="OpenMP runtime: 'libgomp1 14.2.0-20' here"):
+        _accepted(paths, base, runtime=other_openmp)
+    with pytest.raises(PlatformNotAccepted, match="LightGBM version: '4.6.0' here"):
+        _accepted(paths, base, runtime=replace(CONTAINER_RUNTIME, lightgbm_version="4.6.0"))
+    with pytest.raises(PlatformNotAccepted, match="num_threads: 4 here, 6 in the record"):
+        _accepted(paths, replace(base, num_threads=4))
+    # The laptop's own runtime inside a Linux process is not the recorded platform either.
+    with pytest.raises(PlatformNotAccepted, match="OpenMP runtime: '22.1.4' here"):
+        _accepted(paths, base, runtime=LAPTOP_RUNTIME)
+
+
+def test_accepted_mode_refuses_another_ranker_lock_than_the_record_was_made_for(
+    tmp_path: Path,
+) -> None:
+    paths, base, _ = _workspace(tmp_path)
+    with paths.ranker_lock_file.open("a", encoding="utf-8") as handle:
+        handle.write("\n# edited\n")
+    with pytest.raises(PlatformNotAccepted, match="sha256 of the Ranker lock file"):
+        _accepted(paths, base)
+
+
+def test_accepted_mode_refuses_a_record_copied_to_another_platform_name(tmp_path: Path) -> None:
+    paths, base, _ = _workspace(tmp_path)
+    shutil.copy(
+        paths.platform_record_file("linux-arm64"), paths.platform_record_file("linux-amd64")
+    )
+    with pytest.raises(ValueError, match="records platform 'linux-arm64', expected 'linux-amd64'"):
+        _accepted(paths, base, machine="x86_64")
+
+
+def test_accepted_mode_never_writes_into_the_stage_1_folders(tmp_path: Path) -> None:
+    paths, base, _ = _workspace(tmp_path)
+    with pytest.raises(ValueError, match="may not write its artifacts into the stage-1 folder"):
+        load_locked_ranker_for_platform(
+            paths, base, CONTAINER_RUNTIME, "linux", "aarch64", MODE_ACCEPTED, paths
+        )
+    only_results = replace(_pipeline_output(paths), results_root=paths.results_root)
+    with pytest.raises(ValueError, match="may not write result tables into the stage-1 folder"):
+        load_locked_ranker_for_platform(
+            paths, base, CONTAINER_RUNTIME, "linux", "aarch64", MODE_ACCEPTED, only_results
+        )
+
+
+def test_accepted_mode_refuses_macos_before_it_looks_for_a_record(tmp_path: Path) -> None:
+    paths, base, _ = _workspace(tmp_path)
+    with pytest.raises(RuntimeError, match="runs on Linux only"):
+        _accepted(paths, base, runtime=LAPTOP_RUNTIME, system="darwin", machine="arm64")

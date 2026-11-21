@@ -775,6 +775,17 @@ class ProjectPaths:
         """results/m9_t_v_and_t.csv: pooled MAP@12 of the two models on V1-V4 and on T1-T4."""
         return self.results_root / "m9_t_v_and_t.csv"
 
+    # ------------------------------------------------------------ stage 3: platform records
+
+    @property
+    def platforms_dir(self) -> Path:
+        """configs/platforms/: one record per accepted platform (append-only, like locks)."""
+        return self.configs_dir / "platforms"
+
+    def platform_record_file(self, platform: str) -> Path:
+        """configs/platforms/{platform}.yaml, e.g. "linux-arm64" (hmrec.platform_records)."""
+        return self.platforms_dir / f"{platform}.yaml"
+
     # ------------------------------------------------------------ stage 3: M10 calibration
     # docs/mlops.md §8.3, docs/m10_calibration_plan.md. Everything a calibration writes
     # lies under these two folders; no stage-1 artifact or table is written.

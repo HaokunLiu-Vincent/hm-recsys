@@ -1,0 +1,105 @@
+# Platform record: the arm64 Linux container (stage 3; docs/mlops.md §8.3).
+#
+# What this file is: the statement that results computed on THIS platform are accepted
+# against the stage-1 records by the thresholds below, and the description of the runtime
+# that statement was made for. hmrec.ranker.platform_entry (mode "accepted") reads it and
+# refuses a process whose platform, LightGBM version, OpenMP runtime, thread count or
+# Ranker lock file is not the one recorded here.
+#
+# APPEND-ONLY, like the lock files (AGENTS.md §3.3): this file is never modified or
+# deleted. A changed runtime (another libgomp1 version, another base image) gets a NEW
+# record file after calibration item D was run again on it.
+#
+# Written by hand on 2026-11-22 from the Dockerfile, uv.lock and results/m10_calibration/.
+# tests/unit/test_platform_records.py compares it with those files.
+
+platform: linux-arm64
+os: linux
+architecture: aarch64
+recorded_on: 2026-11-22
+decision_record: "docs/decisions.md 2026-11-22 M10 closed: acceptance across environments simplified to a 1.0% relative difference on four quantities and two structural checks; platform record for linux-arm64"
+
+# The base image of the Dockerfile (a multi-platform index; pinned by digest).
+base_image: "python:3.12.16-slim-trixie@sha256:5e2bdb1b0d542d5039cffb8181c65930093949194a65c365dfb1b0fe13a4fa5b"
+
+# The Ranker side: LightGBM processes (Dataset, training, scoring). This is what the
+# tolerance-accepted entry compares with the running process.
+ranker_runtime:
+  lightgbm_version: "4.7.0"
+  # The GNU OpenMP runtime of the Debian package, as hmrec.ranker.runtime records it.
+  openmp_version: "libgomp1 14.2.0-19"
+  num_threads: 6
+
+# The recall side: R1-R6. These processes import torch first, so `implicit` (R5) and
+# torch (R6) run on the copy of libgomp INSIDE the torch wheel; it belongs to no Debian
+# package and is identified by the torch version (uv.lock). The feature build loads no
+# OpenMP runtime at all.
+recall_runtime:
+  torch_version: "2.15.0+cpu"
+  openmp: "the libgomp copy inside the torch wheel, identified by torch_version"
+  implicit_version: "0.7.3"
+  numpy_version: "2.5.4"
+  scipy_version: "1.18.1"
+  polars_version: "2.1.0"
+
+# Thread and determinism settings in force on this platform (docs/mlops.md §8.1).
+# Both apply on Linux only; the laptop runs exactly as in stage 1.
+settings:
+  num_threads: 6
+  # hmrec.recall.twotower.fine_tune_runtime: torch.use_deterministic_algorithms(True)
+  # for the duration of an R6 fine-tune, and nowhere else.
+  r6_fine_tune: deterministic
+  # hmrec.blas_threads: during an R5 fit the BLAS of scipy runs on one thread;
+  # implicit keeps num_threads OpenMP threads.
+  r5_fit_scipy_blas_threads: 1
+
+# Acceptance against the stage-1 record (the user's decision of 2026-11-22). Fixed for
+# this platform; not changed after a replay result is seen.
+acceptance:
+  # |result - record| / record must be at most this, for each quantity listed.
+  max_relative_difference: 0.01
+  quantities:
+    - recall of a channel in a week
+    - union recall of a week
+    - MAP@12 of a single week
+    - pooled MAP@12 over the replayed weeks
+  # These detect bugs, not numeric differences.
+  structural_checks:
+    - feature rows equal the deduplicated candidates of the same run
+    - no duplicate (query, article) key
+  # Measured and written down for every week; never a reason to accept or reject.
+  reported_only:
+    - pair overlap of the candidates of every channel
+    - deduplicated candidate count
+    - bit-equality of scores
+  # Bit-identical repetition on this platform is not required and not verified by a run.
+  bit_identical_repetition_required: false
+
+# The measurement the acceptance rests on: the M10 calibration of week V4.
+calibration:
+  week: V4
+  # The images the full-data items ran in: (commit the image was built from, hash of its
+  # code tree). Items A, B, C1, C2, union and D of 2026-11-22 (run1, run2); then item C2
+  # with the deterministic setting and item E (run3, run4).
+  images:
+    - commit: 664f473ed0a2af8bab36be2ae346b67e17d1a357
+      code_tree_sha256: 6db3acf8d7af2c85cf62dad8446c696b7d4d3f220b3dffbe5b8ac22ba43f079c
+    - commit: 3ae9200f6d602206ec1b0e9770d1b69e2473605c
+      code_tree_sha256: bfeb85380cad22253b785b70101eb580538658406d5b0ff5e6ba8e362efb8915
+  # The largest relative difference on an acceptance quantity in the calibration
+  # (R6 Recall@100 after one fine-tune), and MAP@12 of V4 end to end.
+  largest_relative_difference: 0.00048
+  end_to_end_map_relative_difference: 0.000054
+  # sha256 of the result tables as they were at the commit below (the tables are
+  # append-only: later rows change the files, not these values).
+  result_tables_commit: afce4e59c3bb7ff9052716c441d4d99a05ef60db
+  result_tables:
+    results/m10_calibration/comparisons.csv: 53761c13c3cec5dcddefb0a2c2c7f33a85a66900849e91224669f6d0c566f763
+    results/m10_calibration/runs.csv: 6b9742b8b4c099e96e9eed6e1cab5030066cde21a93a189f3ae6c5ffe9d79432
+    results/m10_calibration/repeatability.csv: 27af325f668692866cd04db6aea5357afe7a566ac73416452188a819248bc506
+    results/m10_calibration/r6_repeatability.csv: 84be3531deb5a79d3fb43110a51e40309e7dd10e32c4fc3bf777bd09de02d523
+
+# The Ranker lock this record was made for. Another lock file needs another record.
+ranker_lock:
+  path: configs/locks/ranker.lock.yaml
+  sha256: e5309f504e6af9750f585cd108e48fd42f585edc369e653258a6d760f091fb5c

@@ -23,10 +23,14 @@ What is checked, compared with the strict entry:
 Rules of this entry:
 
   - It refuses macOS. On the laptop the strict entry is the only one.
-  - Mode "accepted" needs a platform record: a file that says which OpenMP
-    runtime of which platform the user accepted, by which tolerance. NO such
-    record exists yet, and its format is not decided, so this mode always
-    refuses today (PlatformNotAccepted).
+  - Mode "accepted" needs a platform record (hmrec.platform_records,
+    configs/platforms/{platform}.yaml): the file that says which runtime of
+    which platform the user accepted, and by which thresholds. The process must
+    be the platform the record describes: the same OS and architecture, the
+    same LightGBM version, the same OpenMP runtime, the same thread count and
+    the same Ranker lock file (by sha256). A platform without a record is
+    refused (PlatformNotAccepted). Its outputs may go anywhere EXCEPT the
+    stage-1 locations.
   - Mode "calibration" is for measuring a platform before it is accepted
     (docs/m10_calibration_plan.md). It records the OpenMP runtime it finds and
     may write ONLY into the calibration folders; the caller passes where it
@@ -44,8 +48,10 @@ from dataclasses import dataclass
 from pathlib import Path
 
 from hmrec.config import BaseConfig, load_ranker_config
-from hmrec.locks import RankerLock, load_ranker_lock
+from hmrec.locks import RankerLock, file_sha256, load_ranker_lock
 from hmrec.paths import ProjectPaths
+from hmrec.platform_fields import ARCHITECTURE_NAMES
+from hmrec.platform_records import PlatformRecord, load_platform_record
 from hmrec.ranker.locked import (
     LockedRanker,
     check_lock_config_id,
@@ -73,11 +79,14 @@ class PlatformLockedRanker:
         mode: "calibration" or "accepted".
         runtime: The LightGBM version and the OpenMP runtime of this process,
             as recorded (not compared with the lock).
+        record: The platform record the process was accepted by; None in
+            calibration mode, which runs before a platform is accepted.
     """
 
     locked: LockedRanker
     mode: str
     runtime: LightGBMRuntime
+    record: PlatformRecord | None
 
 
 def require_tolerance_platform(system: str) -> None:
@@ -169,6 +178,86 @@ def require_calibration_outputs(paths: ProjectPaths, output_paths: ProjectPaths)
         )
 
 
+def require_new_output_locations(paths: ProjectPaths, output_paths: ProjectPaths) -> None:
+    """Fail if `output_paths` is a stage-1 location (accepted mode).
+
+    A tolerance-accepted result is never written among the stage-1 artifacts or
+    into a stage-1 result table.
+
+    Raises:
+        ValueError: If the artifacts root or the results root is the one of `paths`.
+    """
+    if output_paths.artifacts_root == paths.artifacts_root:
+        raise ValueError(
+            f"a tolerance-accepted run may not write its artifacts into the stage-1 folder "
+            f"{paths.artifacts_root}"
+        )
+    if output_paths.results_root == paths.results_root:
+        raise ValueError(
+            f"a tolerance-accepted run may not write result tables into the stage-1 folder "
+            f"{paths.results_root}"
+        )
+
+
+def platform_record_name(system: str, machine: str) -> str:
+    """The name of a platform's record file, e.g. ("linux", "aarch64") -> "linux-arm64"."""
+    return f"{system}-{ARCHITECTURE_NAMES.get(machine, machine)}"
+
+
+def accepted_platform_record(
+    paths: ProjectPaths, system: str, machine: str, runtime: LightGBMRuntime, num_threads: int
+) -> PlatformRecord:
+    """The platform record this process is accepted by, after comparing the two.
+
+    Args:
+        paths: Project paths.
+        system: sys.platform of the process.
+        machine: platform.machine() of the process.
+        runtime: The LightGBM version and OpenMP runtime of the process.
+        num_threads: num_threads of configs/base.yaml.
+
+    Raises:
+        PlatformNotAccepted: If the platform has no record, or the process is
+            not the platform its record describes (another OS, architecture,
+            LightGBM version, OpenMP runtime or thread count), or the Ranker
+            lock file is not the one the record was made for.
+    """
+    record_file = paths.platform_record_file(platform_record_name(system, machine))
+    if not record_file.is_file():
+        raise PlatformNotAccepted(
+            f"no platform record {record_file}: the platform {system} / {machine} has not "
+            "been accepted (docs/mlops.md 8.3). A platform is accepted by the user after its "
+            "calibration; only mode 'calibration' can run before that."
+        )
+    record = load_platform_record(record_file)
+    lock_file = paths.project_root / record.ranker_lock_path
+    pairs = (
+        ("os", system, record.os),
+        ("architecture", machine, record.architecture),
+        ("LightGBM version", runtime.lightgbm_version, record.lightgbm_version),
+        ("OpenMP runtime", runtime.libomp_version, record.openmp_version),
+        ("num_threads", num_threads, record.num_threads),
+        ("Ranker lock file", lock_file, paths.ranker_lock_file),
+        (
+            "sha256 of the Ranker lock file",
+            file_sha256(paths.ranker_lock_file),
+            record.ranker_lock_sha256,
+        ),
+    )
+    differences = [
+        f"{name}: {actual!r} here, {recorded!r} in the record"
+        for name, actual, recorded in pairs
+        if actual != recorded
+    ]
+    if differences:
+        raise PlatformNotAccepted(
+            f"this process is not the platform {record_file.name} describes: "
+            + "; ".join(differences)
+            + ". A changed runtime needs a new platform record (they are append-only)."
+        )
+    return record
+
+
 def _is_inside(path: Path, folder: Path) -> bool:
     """True if `path` is `folder` itself or lies below it (no file system access)."""
     return path == folder or folder in path.parents
@@ -179,6 +268,7 @@ def load_locked_ranker_for_platform(
     base: BaseConfig,
     runtime: LightGBMRuntime,
     system: str,
+    machine: str,
     mode: str,
     output_paths: ProjectPaths,
 ) -> PlatformLockedRanker:
@@ -189,6 +279,7 @@ def load_locked_ranker_for_platform(
         base: configs/base.yaml (its num_threads must equal the lock's).
         runtime: hmrec.ranker.runtime.read_lightgbm_runtime() of this process.
         system: sys.platform of this process.
+        machine: platform.machine() of this process, e.g. "aarch64".
         mode: "calibration" or "accepted".
         output_paths: Where everything produced with this configuration is
             written (hmrec.paths.calibration_output_paths in calibration mode).
@@ -198,23 +289,23 @@ def load_locked_ranker_for_platform(
 
     Raises:
         RuntimeError: On macOS.
-        PlatformNotAccepted: In mode "accepted": no platform record exists yet.
+        PlatformNotAccepted: In mode "accepted": the platform has no record, or
+            the process is not the platform its record describes.
         ValueError: On an unknown mode; if the lock's settings do not give its
             config_id; if a referenced lock file has another sha256; if the
             LightGBM version or num_threads differ from the lock; if the OpenMP
             runtime cannot be identified; if calibration mode would write
-            outside the calibration folders.
+            outside the calibration folders, or accepted mode into a stage-1 folder.
     """
     require_tolerance_platform(system)
     if mode not in MODES:
         raise ValueError(f"mode must be one of {MODES}, got {mode!r}")
+    record = None
     if mode == MODE_ACCEPTED:
-        raise PlatformNotAccepted(
-            "no platform record exists: no platform other than the laptop has been accepted "
-            "yet (docs/mlops.md 8.3). Only mode 'calibration' can run; the format of a "
-            "platform record is decided by the user after the M10 calibration."
-        )
-    require_calibration_outputs(paths, output_paths)
+        require_new_output_locations(paths, output_paths)
+        record = accepted_platform_record(paths, system, machine, runtime, base.num_threads)
+    else:
+        require_calibration_outputs(paths, output_paths)
     lock = load_ranker_lock(paths.ranker_lock_file)
     config = locked_ranker_config(lock, load_ranker_config(paths.ranker_config_file))
     # The first two checks are the strict entry's own functions, unchanged.
@@ -231,4 +322,4 @@ def load_locked_ranker_for_platform(
         num_threads=lock.runtime.num_threads,
         config_id=lock.selection.config_id,
     )
-    return PlatformLockedRanker(locked=locked, mode=mode, runtime=runtime)
+    return PlatformLockedRanker(locked=locked, mode=mode, runtime=runtime, record=record)
