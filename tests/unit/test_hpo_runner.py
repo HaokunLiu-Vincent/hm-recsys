@@ -12,6 +12,7 @@ from conftest import make_queries, make_recall_inputs
 from hmrec.config import load_base_config, load_selection_rule, load_yaml
 from hmrec.data.folds import Fold
 from hmrec.eval.report import FoldEvaluator, MultiFoldSummary
+from hmrec.git_state import IMAGE_COMMIT_VARIABLE
 from hmrec.hpo.grid import load_phase_grid, parse_step
 from hmrec.hpo.records import (
     TrialRecord,
@@ -367,6 +368,17 @@ def _git(repo: Path, *args: str) -> str:
     return subprocess.run(command, cwd=repo, capture_output=True, text=True, check=True).stdout
 
 
+@pytest.fixture
+def asks_git(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Make git_state ask git, as on the laptop, also when the tests run in a container image.
+
+    Inside an image HMREC_IMAGE_GIT_COMMIT is set and git_state returns the image's
+    commit without calling git (tests/unit/test_git_state.py tests that branch). The
+    tests below are about the git branch, so the variable is removed for them.
+    """
+    monkeypatch.delenv(IMAGE_COMMIT_VARIABLE, raising=False)
+
+
 def _make_repo(tmp_path: Path) -> Path:
     """A committed repo with src/, configs/ and results/, like the project layout."""
     repo = tmp_path / "repo"
@@ -379,6 +391,7 @@ def _make_repo(tmp_path: Path) -> Path:
     return repo
 
 
+@pytest.mark.usefixtures("asks_git")
 def test_git_state_clean_repo(tmp_path: Path) -> None:
     repo = _make_repo(tmp_path)
     commit, dirty = git_state(repo, repo / "results")
@@ -386,6 +399,7 @@ def test_git_state_clean_repo(tmp_path: Path) -> None:
     assert dirty is False
 
 
+@pytest.mark.usefixtures("asks_git")
 def test_git_state_ignores_results(tmp_path: Path) -> None:
     # This is what happens between two channels: the first channel modified
     # results/d_phase.csv and wrote a new, untracked step report.
@@ -396,6 +410,7 @@ def test_git_state_ignores_results(tmp_path: Path) -> None:
     assert git_state(repo, repo / "results")[1] is False
 
 
+@pytest.mark.usefixtures("asks_git")
 @pytest.mark.parametrize(
     ("relative", "tracked"),
     [("src/model.py", True), ("configs/model.yaml", True), ("src/new_module.py", False)],

@@ -9,10 +9,20 @@ import torch, because torch and LightGBM each bring their own copy of the OpenMP
 runtime (libomp), and two copies in one process abort, hang or crash. Until
 2026-11-18 these two functions lived in hmrec.hpo.runner, which imports the
 recall channels and with them torch; hmrec.hpo.runner still re-exports them.
+
+Inside a container image (docs/mlops.md §8.1) there is no `.git` directory, so
+git cannot be asked. The image carries its commit instead: it is built only
+from a clean, committed tree (`make image-build` refuses anything else; a CI
+checkout is clean by construction), and the commit hash is stored in the
+environment variable HMREC_IMAGE_GIT_COMMIT (and as an image label). git_state
+returns that commit there. On the laptop the variable is not set and git is
+asked, exactly as before.
 """
 
+import os
+import re
 import subprocess
-from collections.abc import Sequence
+from collections.abc import Mapping, Sequence
 from pathlib import Path
 
 from hmrec.logging_utils import get_logger
@@ -22,6 +32,10 @@ from hmrec.logging_utils import get_logger
 LOGGER = get_logger("hpo.runner")
 
 UNCOMMITTED_BANNER = "!" * 78
+
+# Set by the Dockerfile from the build argument GIT_COMMIT; never set on the laptop.
+IMAGE_COMMIT_VARIABLE = "HMREC_IMAGE_GIT_COMMIT"
+FULL_COMMIT_HASH = re.compile(r"[0-9a-f]{40}")
 
 
 def warn_uncommitted_changes(commit: str) -> None:
@@ -37,8 +51,67 @@ def warn_uncommitted_changes(commit: str) -> None:
     LOGGER.warning(UNCOMMITTED_BANNER)
 
 
+def image_commit(environment: Mapping[str, str]) -> str | None:
+    """The commit a container image was built from, or None outside an image.
+
+    Args:
+        environment: The environment variables of the process (os.environ).
+
+    Returns:
+        The full commit hash in HMREC_IMAGE_GIT_COMMIT, or None if the variable
+        is not set (the laptop).
+
+    Raises:
+        ValueError: If the variable is set but is not a full 40-character
+            lower-case hexadecimal hash. A short hash, a branch name or an empty
+            value would make a run record point to no definite commit.
+    """
+    value = environment.get(IMAGE_COMMIT_VARIABLE)
+    if value is None:
+        return None
+    if FULL_COMMIT_HASH.fullmatch(value) is None:
+        raise ValueError(
+            f"{IMAGE_COMMIT_VARIABLE}={value!r} is not a full 40-character commit hash; "
+            "the image must be built with --build-arg GIT_COMMIT=$(git rev-parse HEAD)"
+        )
+    return value
+
+
+def image_git_state(repo_root: Path, commit: str) -> tuple[str, bool]:
+    """The code state inside a container image: the image's commit, never dirty.
+
+    "Not dirty" rests on how the image is made, not on a comparison done here:
+    the image is built only from a clean, committed tree, and the code inside
+    it belongs to root while the process runs as another user, so it cannot be
+    edited in place. What this function CAN see is a working tree mounted over
+    the image's code: then a `.git` directory is present, the commit of the
+    image no longer describes the code, and the run is refused.
+
+    Args:
+        repo_root: Root of the code inside the image.
+        commit: The commit the image was built from (image_commit).
+
+    Raises:
+        RuntimeError: If repo_root contains `.git`.
+    """
+    if (repo_root / ".git").exists():
+        raise RuntimeError(
+            f"{IMAGE_COMMIT_VARIABLE} is set (this process runs in a container image built "
+            f"from commit {commit[:12]}), but {repo_root} contains a .git directory: a "
+            "working tree is mounted over the image's code, so the image's commit does not "
+            "describe the code that runs. Run the image without mounting the repository "
+            "over it, or run natively without the variable."
+        )
+    return commit, False
+
+
 def git_state(repo_root: Path, results_root: Path) -> tuple[str, bool]:
     """HEAD commit, and whether the code or configs differ from HEAD.
+
+    Inside a container image (HMREC_IMAGE_GIT_COMMIT is set, see the module
+    docstring) the answer is the commit the image was built from and False
+    (image_git_state); git is not called. Everything below describes the
+    laptop, where the variable is not set.
 
     "Dirty" means any tracked change or untracked file in the working tree,
     EXCEPT under results_root. results/ holds this runner's own output: after
@@ -53,7 +126,15 @@ def git_state(repo_root: Path, results_root: Path) -> tuple[str, bool]:
 
     Returns:
         (HEAD commit hash, True if there are changes outside results_root).
+        Inside a container image: (the image's commit, False).
+
+    Raises:
+        ValueError: Inside an image, if HMREC_IMAGE_GIT_COMMIT is not a full hash.
+        RuntimeError: Inside an image, if a working tree is mounted over the code.
     """
+    commit_of_image = image_commit(os.environ)
+    if commit_of_image is not None:
+        return image_git_state(repo_root, commit_of_image)
     commit = subprocess.run(
         ["git", "rev-parse", "HEAD"], cwd=repo_root, capture_output=True, text=True, check=True
     ).stdout.strip()
