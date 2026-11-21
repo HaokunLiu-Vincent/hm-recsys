@@ -27,8 +27,15 @@ Already-bought articles are NOT excluded.
 
 Uses the CPU version of implicit, num_threads from configs/base.yaml, and a
 fixed random_seed for the initial factors.
+
+Threads (measured 2026-11-21, docs/m10_calibration_plan.md §8): on the laptop
+the macOS wheel of implicit has no OpenMP, so the fit runs on ONE thread and
+num_threads has no effect. On Linux the fit runs on num_threads OpenMP threads;
+there the BLAS of scipy is limited to one thread for the duration of the fit
+(hmrec.blas_threads, decision of 2026-11-22). Nothing is limited on the laptop.
 """
 
+import sys
 from dataclasses import dataclass
 
 import numpy as np
@@ -36,6 +43,7 @@ import polars as pl
 from implicit.cpu.als import AlternatingLeastSquares
 from scipy import sparse
 
+from hmrec.blas_threads import single_threaded_scipy_blas
 from hmrec.config import WalsConfig
 from hmrec.data.asof import history_window
 from hmrec.logging_utils import get_logger
@@ -152,7 +160,12 @@ def fit_wals(confidence: ConfidenceMatrix, config: WalsConfig, num_threads: int)
         UserItemVectors with float32 [n_users, factors] and [n_items, factors].
     """
     model = build_als_model(config, num_threads)
-    model.fit(confidence.matrix, show_progress=False)
+    # Linux only: scipy's BLAS runs on one thread inside the block, because implicit calls
+    # it from each of its own OpenMP threads. On macOS the block changes nothing.
+    with single_threaded_scipy_blas(sys.platform) as limited_libraries:
+        if limited_libraries:
+            LOGGER.info("BLAS limited to 1 thread during the fit: %s", limited_libraries)
+        model.fit(confidence.matrix, show_progress=False)
     return UserItemVectors(
         user_customer_idx=confidence.user_customer_idx,
         user_vectors=np.ascontiguousarray(model.user_factors, dtype=np.float32),

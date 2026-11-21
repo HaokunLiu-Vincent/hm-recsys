@@ -17,11 +17,15 @@ Matrix rows = customers [1, 3], columns = articles [10, 12].
 """
 
 import math
+import sys
+from collections.abc import Iterator
+from contextlib import contextmanager
 
 import numpy as np
 import polars as pl
 import pytest
 
+import hmrec.recall.r5_wals as r5_wals
 from conftest import make_queries, make_recall_inputs
 from hmrec.config import WalsConfig
 from hmrec.recall.base import RecallInputs, validate_candidates
@@ -104,6 +108,34 @@ def test_library_alpha_is_one() -> None:
 
 
 # ---------------------------------------------------------------- fitting and output
+
+
+def test_the_fit_runs_inside_the_blas_limit_of_this_platform(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    # The limit itself is tested in test_blas_threads.py (it does nothing on macOS and
+    # limits scipy's BLAS on Linux). Here: fit_wals asks for it with the platform of THIS
+    # process, and implicit's fit runs inside the block, not before or after it.
+    events: list[str] = []
+
+    @contextmanager
+    def recording_limit(platform: str) -> Iterator[list[str]]:
+        events.append(f"limit on {platform}")
+        yield []
+        events.append("limit ended")
+
+    class RecordingModel:
+        user_factors = np.zeros((2, 4), dtype=np.float32)
+        item_factors = np.zeros((2, 4), dtype=np.float32)
+
+        def fit(self, matrix: object, show_progress: bool) -> None:
+            events.append("fit")
+
+    monkeypatch.setattr(r5_wals, "single_threaded_scipy_blas", recording_limit)
+    monkeypatch.setattr(r5_wals, "build_als_model", lambda config, threads: RecordingModel())
+    confidence = _channel(_config()).build_confidence(make_recall_inputs(HAND_ROWS, ANCHOR_DAY))
+    r5_wals.fit_wals(confidence, _config(), num_threads=2)
+    assert events == [f"limit on {sys.platform}", "fit", "limit ended"]
 
 
 def test_fixed_seed_is_reproducible() -> None:
