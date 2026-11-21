@@ -1446,3 +1446,10 @@ The evaluation recorded in the entry above was run once. Code, rehearsal, formal
   - The existing Kaggle code, the stage-2 code and every existing result table and artifact are unchanged; the LightGBM submission's files under `artifacts/kaggle/` were only read.
   - The Kaggle CLI was run as `uvx --with six kaggle`, as for the LightGBM submission; nothing was added to `pyproject.toml` or `uv.lock`.
   - The final report is not written here; that is a later step on `m9-deepfm`.
+
+## 2026-11-21 Before publication: the table of other models' autonomous runs is removed from the final report
+
+- **What**: before the repository is made public, the block "Context: autonomous runs by other models" was removed from §4.6 of `docs/final_report.md` and `docs/final_report.zh-CN.md`: the table with the scores of three runs in which a model worked on its own, the paragraph that introduced it, and the four notes under it. The section numbering is unchanged.
+- **Why**: the scores in that table were reported verbally by the user. The conditions of those runs (number of submissions, time budget, prompts, dates) were not recorded, and their code is not in this repository, so the scores cannot be traced to a file under `results/` or to this log. Every other number of the report can be traced.
+- **What stays**: the table remains in the git history (it is in the commits from 2026-11-19 up to tag `v0.2`). `README.md`, `docs/proposal.md` and this log were searched: none of them mentions those scores.
+- **Nothing else changes**: the scores of this project's two late submissions (§4.6, §10.6 of the report) and every other result stay as they are.

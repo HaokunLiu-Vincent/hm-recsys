@@ -427,20 +427,6 @@ Before the real run, the same code path was rehearsed on T4: it trained the same
 
 The position says where the Private score would stand. Kaggle does not rank a late submission, and the submission was made years after the competition ended; this report states no other rank.
 
-**Context: autonomous runs by other models.** Outside this repository, the user also made three runs in which a model worked on its own. Each model was given the dataset and the same precomputed text and image embeddings, and no guidance on the design. The table puts their scores next to this project's; they are as the user reported them on 2026-11-19.
-
-| System | Public | Private |
-|---|---|---|
-| This project (human-directed design, Claude Code as implementer) | 0.03548 | 0.03600 |
-| Claude Fable 5.2, autonomous | 0.03443 | 0.03486 |
-| Gemini Hydrogen Extra, autonomous | 0.03368 | 0.03330 |
-| GPT 6.0 Astra Ultra, autonomous | not submitted | not submitted |
-
-- **One run was not submitted.** The GPT 6.0 Astra Ultra run has no Kaggle score: its offline MAP@12 on T1–T4, from that run's own evaluation, was about 0.029, and the user did not submit it. That offline number is not a Kaggle score and is not compared with the scores in the table.
-- **What is not recorded.** The conditions of the three runs were not written down: how many submissions the two submitted runs made, and each run's time budget, prompts and dates. Their code is not in this repository. So, unlike the other numbers of this report, these scores cannot be traced to a file under `results/` or to `docs/decisions.md`.
-- **The differences.** On the Private leaderboard this project is 3.3% above the Claude Fable 5.2 run (0.03600 / 0.03486 − 1) and 8.1% above the Gemini Hydrogen Extra run (0.03600 / 0.03330 − 1).
-- **This is background, not a controlled experiment.** Each system has one result, and the systems differ in many ways at once. The difference cannot be attributed to any single cause.
-
 ---
 
 ## 5. Why T is higher than V
