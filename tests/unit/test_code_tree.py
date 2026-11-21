@@ -100,15 +100,27 @@ def test_read_recorded_code_tree(tmp_path: Path) -> None:
         read_recorded_code_tree(path)
 
 
-def test_the_entries_are_the_allow_list_of_dockerignore_without_results() -> None:
-    # .dockerignore lists what may enter an image: lines "!name" or "!name/". If a folder
-    # is added there, it must be added to the tree hash too (or left out on purpose here).
-    allowed = []
-    for line in (REPO / ".dockerignore").read_text(encoding="utf-8").splitlines():
-        if line.startswith("!"):
-            allowed.append(line[1:].rstrip("/"))
-    assert "results" in allowed
-    assert sorted(CODE_TREE_ENTRIES) == sorted(name for name in allowed if name != "results")
+def test_the_entries_are_what_may_enter_an_image_without_results() -> None:
+    dockerignore = REPO / ".dockerignore"
+    if dockerignore.is_file():
+        # A checkout (the laptop, CI before the build). .dockerignore lists what may enter
+        # an image: lines "!name" or "!name/". If a folder is added there, it must be added
+        # to the tree hash too (or left out on purpose here).
+        allowed = [
+            line[1:].rstrip("/")
+            for line in dockerignore.read_text(encoding="utf-8").splitlines()
+            if line.startswith("!")
+        ]
+        assert "results" in allowed
+        assert sorted(CODE_TREE_ENTRIES) == sorted(name for name in allowed if name != "results")
+    else:
+        # Inside an image: .dockerignore itself is not copied, but the image's code folder
+        # IS what it allowed. Besides the hashed entries it holds only results/, the
+        # environment the build created, and mount points for data and artifacts.
+        not_code = {"results", ".venv", "data", "artifacts"}
+        present = {path.name for path in REPO.iterdir()}
+        assert present - not_code == set(CODE_TREE_ENTRIES)
+        assert "results" in present
 
 
 def test_the_tree_of_this_repository_can_be_hashed() -> None:
