@@ -24,12 +24,15 @@ FROM python:3.12.16-slim-trixie@sha256:5e2bdb1b0d542d5039cffb8181c65930093949194
 # git:      the tests of hmrec.git_state build throw-away repositories. The image itself
 #           has no .git; its commit comes from the build argument below.
 # make:     `make lint` and `make test` run inside the image.
+# libatomic1: the prebuilt Node.js that pyright runs on needs it (on arm64 the binary does
+#           not start without it). It takes no part in any computation of the project.
 ARG LIBGOMP_VERSION=14.2.0-19
 RUN apt-get update \
     && apt-get install --yes --no-install-recommends \
         "libgomp1=${LIBGOMP_VERSION}" \
         git \
         make \
+        libatomic1 \
     && rm -rf /var/lib/apt/lists/*
 
 COPY --from=uv /uv /usr/local/bin/uv
