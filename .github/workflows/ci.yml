@@ -22,6 +22,12 @@ concurrency:
   group: ci-${{ github.ref }}
   cancel-in-progress: true
 
+# bash with -o pipefail: a step that pipes its output into `tee` still fails when the
+# command before the pipe fails.
+defaults:
+  run:
+    shell: bash
+
 jobs:
   image:
     name: image, lint, tests (linux/amd64)
@@ -60,19 +66,35 @@ jobs:
           cache-from: type=gha
           cache-to: type=gha,mode=max
 
+      # The three steps below also publish their result outside the log: as a notice on the
+      # run page (readable without signing in) and, for the image information, in the run
+      # summary. `tee` keeps the full output in the log as well.
       - name: Image information (commit, Python, libraries, OpenMP, BLAS, CPUs, memory)
-        run: make image-info
+        run: |
+          make image-info | tee image-info.txt
+          { echo '### Image information (linux/amd64)'; echo '```'; cat image-info.txt; echo '```'; } >> "$GITHUB_STEP_SUMMARY"
+          # A notice is one line: "%0A" stands for a line break inside it.
+          echo "::notice title=image information::$(awk '{printf "%s%%0A", $0}' image-info.txt)"
 
       - name: Lint inside the image (ruff format, ruff check, pyright)
         run: make image-lint
 
       # torch and LightGBM never share a process (tests/conftest.py), so the suite runs as two
       # processes. They are two steps, and the second runs even if the first fails, so that
-      # one run shows every failing test of both sides.
+      # one run shows every failing test of both sides. The notice is the last line of pytest
+      # ("970 passed in 45.83s"); the step fails if pytest failed.
       - name: Tests inside the image, torch side
         if: ${{ !cancelled() }}
-        run: make image-test-torch-side
+        run: |
+          status=0
+          make image-test-torch-side 2>&1 | tee torch-side.txt || status=$?
+          echo "::notice title=tests, torch side::$(grep -E ' (passed|failed|error)' torch-side.txt | tail -n 1)"
+          exit "$status"
 
       - name: Tests inside the image, LightGBM side
         if: ${{ !cancelled() }}
-        run: make image-test-lightgbm-side
+        run: |
+          status=0
+          make image-test-lightgbm-side 2>&1 | tee lightgbm-side.txt || status=$?
+          echo "::notice title=tests, LightGBM side::$(grep -E ' (passed|failed|error)' lightgbm-side.txt | tail -n 1)"
+          exit "$status"
