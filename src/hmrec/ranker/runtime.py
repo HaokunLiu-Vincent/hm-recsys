@@ -32,13 +32,24 @@ bit-identical to the laptop and is accepted by the tolerance of docs/mlops.md
 A process with TWO OpenMP runtimes (for example torch's own libomp next to
 Homebrew's) aborts, hangs or crashes, so read_lightgbm_runtime refuses it.
 
+Counting runtime FILES is not enough on Linux. Measured in the arm64 image
+(2026-11-21): the torch wheel carries a copy of libgomp under the SAME library
+name as the system's ("libgomp.so.1"), and the dynamic loader loads a library
+name only once. A process that imports torch and then lightgbm therefore holds
+ONE runtime, torch's copy, and LightGBM silently runs on it: another library
+than the image pins, with thread settings that torch changes
+(torch.set_num_threads). So read_lightgbm_runtime also refuses any process in
+which torch is imported, whatever the number of runtime files. On the laptop
+this adds nothing: such a process already has two runtimes and is refused for
+that, with the same message as before.
+
 The functions that list loaded libraries live in hmrec.native_libraries (bottom
 layer, no lightgbm), because the torch side reports its libraries too; they are
 re-exported here under the names they always had.
 """
 
 import sys
-from collections.abc import Sequence
+from collections.abc import Collection, Sequence
 from dataclasses import dataclass, replace
 from pathlib import Path
 
@@ -121,6 +132,23 @@ def runtime_from_libraries(lightgbm_version: str, openmp_paths: Sequence[str]) -
     return LightGBMRuntime(lightgbm_version, path, libomp_version_from_path(path))
 
 
+def refuse_torch_in_process(imported_modules: Collection[str]) -> None:
+    """Fail if torch is imported in this process (see the module docstring).
+
+    Args:
+        imported_modules: Names of the imported modules (sys.modules).
+
+    Raises:
+        RuntimeError: If "torch" is among them.
+    """
+    if "torch" in imported_modules:
+        raise RuntimeError(
+            "torch is imported in this process. A Ranker process must not import torch "
+            "(AGENTS.md §5): torch and LightGBM would share or duplicate the OpenMP "
+            "runtime, so LightGBM would not run on the runtime that is recorded for it."
+        )
+
+
 def with_platform_version(runtime: LightGBMRuntime, platform: str) -> LightGBMRuntime:
     """Fill in the OpenMP version on Linux, where the path does not tell it.
 
@@ -149,7 +177,11 @@ def read_lightgbm_runtime() -> LightGBMRuntime:
     the library is already in the process when this function looks for it.
 
     Raises:
-        RuntimeError: If more than one OpenMP runtime is loaded.
+        RuntimeError: If more than one OpenMP runtime is loaded, or if torch is
+            imported in this process.
     """
+    # The order matters for the laptop: a process with torch has two runtimes there and
+    # must keep failing with the message it always had ("2 OpenMP runtimes are loaded").
     runtime = runtime_from_libraries(lgb.__version__, openmp_libraries(loaded_library_paths()))
+    refuse_torch_in_process(sys.modules)
     return with_platform_version(runtime, sys.platform)

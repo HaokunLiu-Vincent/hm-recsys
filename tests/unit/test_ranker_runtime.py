@@ -17,6 +17,7 @@ from hmrec.ranker.runtime import (
     loaded_library_paths,
     openmp_libraries,
     read_lightgbm_runtime,
+    refuse_torch_in_process,
     runtime_from_libraries,
     with_platform_version,
 )
@@ -135,4 +136,22 @@ def test_a_process_that_also_imports_torch_is_refused() -> None:
     result = subprocess.run(
         [sys.executable, "-c", code], capture_output=True, text=True, check=True, cwd=REPO
     )
-    assert result.stdout.startswith("refused: 2 OpenMP runtimes are loaded")
+    two_runtimes = "refused: 2 OpenMP runtimes are loaded"
+    torch_imported = "refused: torch is imported in this process"
+    if sys.platform == "darwin":
+        # The laptop: torch's own libomp next to Homebrew's, refused as it always was.
+        assert result.stdout.startswith(two_runtimes)
+    else:
+        # A Linux container. Where the torch wheel's libgomp has its own library name there
+        # are two runtimes, as on the laptop. Where it has the system's name (the arm64
+        # wheel) the loader keeps only one, and the process is refused because of torch.
+        assert result.stdout.startswith((two_runtimes, torch_imported))
+
+
+def test_torch_in_the_process_is_refused_whatever_the_number_of_runtimes() -> None:
+    refuse_torch_in_process({"lightgbm", "numpy", "hmrec.ranker.runtime"})  # no error
+    refuse_torch_in_process({"torchvision_like_name", "pytorch"})  # only the module "torch"
+    with pytest.raises(RuntimeError, match="torch is imported in this process"):
+        refuse_torch_in_process({"lightgbm", "torch"})
+    # This test process is a LightGBM-side process: the real check passes.
+    refuse_torch_in_process(sys.modules)
