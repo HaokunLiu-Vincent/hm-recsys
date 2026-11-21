@@ -236,3 +236,21 @@ def test_paths_of_the_diagnostics_after_m8(tmp_path: Path) -> None:
     }
     assert len(diag_files) == 5 and all(path.name.startswith("t_diag_") for path in diag_files)
     assert paths.t_phase_label_access_file not in diag_files
+
+
+def test_paths_of_m11_versioning(tmp_path: Path) -> None:
+    paths = build_paths(make_config("data", "artifacts"), tmp_path)
+    assert paths.versioning_config_file == tmp_path / "configs" / "m11_versioning.yaml"
+    # The manifest of the DVC-tracked files is in git, next to the other configs.
+    assert paths.data_manifest_file == tmp_path / "configs" / "data_manifest.json"
+    # The bootstrap state is data (tracked with DVC), not a regenerable artifact.
+    assert paths.bootstrap_dir == tmp_path / "data" / "bootstrap"
+    assert paths.bootstrap_manifest_file == tmp_path / "data" / "bootstrap" / "manifest.json"
+    runs = tmp_path / "artifacts" / "pipeline" / "runs"
+    assert paths.pipeline_runs_dir == runs
+    assert paths.run_manifest_file("2020-07-29-eval") == runs / "2020-07-29-eval" / "manifest.json"
+    # The MLflow store is under artifacts/, which git ignores; a pipeline run is not a
+    # stage-1 run folder (artifacts/runs/).
+    assert paths.mlflow_store_file == tmp_path / "artifacts" / "mlflow" / "mlflow.db"
+    assert paths.mlflow_artifacts_dir == tmp_path / "artifacts" / "mlflow" / "artifacts"
+    assert paths.pipeline_runs_dir != paths.run_dir("x").parent

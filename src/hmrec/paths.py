@@ -857,6 +857,58 @@ class ProjectPaths:
         """artifacts/m10_calibration/{platform}/{run}/logs/{label}.log: the log of one process."""
         return self.calibration_artifacts_dir / platform / run / "logs" / f"{label}.log"
 
+    # ------------------------------------------------------------ stage 3: M11 versioning
+    # docs/mlops.md §6.3 and §7. The data themselves are tracked with DVC; git holds the
+    # pointer files (*.dvc) and the data manifest.
+
+    @property
+    def versioning_config_file(self) -> Path:
+        """configs/m11_versioning.yaml: the bootstrap state and the local MLflow view."""
+        return self.configs_dir / "m11_versioning.yaml"
+
+    @property
+    def data_manifest_file(self) -> Path:
+        """configs/data_manifest.json: path, size and sha256 of every DVC-tracked file (in git)."""
+        return self.configs_dir / "data_manifest.json"
+
+    @property
+    def bootstrap_dir(self) -> Path:
+        """data/bootstrap/: the state at the end of F4 that the replay starts from.
+
+        Below it the layout is the one of artifacts/ (models/, twotower/, ranker/),
+        plus monitoring/ for the history rows of the result tables.
+        """
+        return self.data_root / "bootstrap"
+
+    @property
+    def bootstrap_manifest_file(self) -> Path:
+        """data/bootstrap/manifest.json: every file of the state with its stage-1 source."""
+        return self.bootstrap_dir / "manifest.json"
+
+    @property
+    def pipeline_runs_dir(self) -> Path:
+        """artifacts/pipeline/runs/: one folder per tick (the runs/ prefix of mlops §7.2)."""
+        return self.artifacts_root / "pipeline" / "runs"
+
+    def run_manifest_file(self, run_id: str) -> Path:
+        """artifacts/pipeline/runs/{run_id}/manifest.json: the record of one tick."""
+        return self.pipeline_runs_dir / run_id / "manifest.json"
+
+    @property
+    def mlflow_dir(self) -> Path:
+        """artifacts/mlflow/: the local MLflow store (not in git; rebuilt by `make mlflow-sync`)."""
+        return self.artifacts_root / "mlflow"
+
+    @property
+    def mlflow_store_file(self) -> Path:
+        """artifacts/mlflow/mlflow.db: the SQLite backend of the local MLflow view."""
+        return self.mlflow_dir / "mlflow.db"
+
+    @property
+    def mlflow_artifacts_dir(self) -> Path:
+        """artifacts/mlflow/artifacts/: where the local MLflow store would keep run files."""
+        return self.mlflow_dir / "artifacts"
+
 
 def build_paths(config: BaseConfig, project_root: Path) -> ProjectPaths:
     """Derive ProjectPaths from a BaseConfig.

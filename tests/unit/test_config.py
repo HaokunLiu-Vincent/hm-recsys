@@ -34,6 +34,7 @@ from hmrec.config import (
     load_sibling_config,
     load_twotower_config,
     load_union_check_config,
+    load_versioning_config,
     load_wals_config,
     load_yaml,
     parse_base_config,
@@ -52,6 +53,7 @@ from hmrec.config import (
     parse_sibling_config,
     parse_twotower_config,
     parse_union_check_config,
+    parse_versioning_config,
     parse_wals_config,
     preprocess_config_hash,
 )
@@ -850,3 +852,48 @@ def test_calibration_config_errors() -> None:
     raw["tolerance"] = raw.pop("provisional_tolerance")
     with pytest.raises(ValueError):
         parse_calibration_config(raw)
+
+
+# ---------------------------------------------------------------- m11_versioning.yaml
+
+
+def _versioning_raw() -> dict[str, Any]:
+    return load_yaml(REPO_CONFIGS / "m11_versioning.yaml")
+
+
+def test_repo_versioning_config() -> None:
+    config = load_versioning_config(REPO_CONFIGS / "m11_versioning.yaml")
+    # The replay starts with V1 (docs/mlops.md §6.3); monitoring looks back 4 weeks (§10).
+    assert config.bootstrap.first_tick_fold == "V1"
+    assert config.bootstrap.monitoring_weeks == 4
+    assert config.bootstrap.ranker_experiment == "full"
+    # The UI is served on this machine only, and not on the port macOS uses itself.
+    assert (config.mlflow.ui_host, config.mlflow.ui_port) == ("127.0.0.1", 5001)
+    assert len(set(config.mlflow.experiments)) == 3
+    # Records made before the pipeline existed are marked as imported in the name.
+    assert "(imported)" in config.mlflow.experiment_stage1
+    assert "(imported)" in config.mlflow.experiment_calibration
+    assert "(imported)" not in config.mlflow.experiment_pipeline
+
+
+def test_versioning_config_errors() -> None:
+    raw = _versioning_raw()
+    raw["bootstrap"]["monitoring_weeks"] = 0
+    with pytest.raises(ValueError, match="monitoring_weeks must be > 0"):
+        parse_versioning_config(raw)
+    raw = _versioning_raw()
+    raw["bootstrap"]["window_weeks"] = 4
+    with pytest.raises(ValueError, match="unknown keys"):
+        parse_versioning_config(raw)
+    raw = _versioning_raw()
+    del raw["mlflow"]["ui_port"]
+    with pytest.raises(ValueError, match="missing keys"):
+        parse_versioning_config(raw)
+    raw = _versioning_raw()
+    raw["mlflow"]["experiment_pipeline"] = raw["mlflow"]["experiment_stage1"]
+    with pytest.raises(ValueError, match="different names"):
+        parse_versioning_config(raw)
+    raw = _versioning_raw()
+    raw["extra"] = {}
+    with pytest.raises(ValueError, match="unknown keys"):
+        parse_versioning_config(raw)

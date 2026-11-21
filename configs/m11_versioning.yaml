@@ -1,0 +1,31 @@
+# M11 (docs/mlops.md §6.3, §7): the bootstrap state of the replay and the local MLflow
+# view. Read by hmrec.config.load_versioning_config; used by hmrec.bootstrap_state,
+# hmrec.tracking and the scripts scripts/m11_*.py.
+#
+# NOTHING here changes a result of the system. The recall and Ranker configurations
+# come only from configs/locks/.
+
+bootstrap:
+  # The first tick of the replay (docs/mlops.md §6.3). The bootstrap state is the state
+  # at the END of the week right before it: that week is closed, so the first tick only
+  # opens a new week.
+  first_tick_fold: V1
+  # How many weeks of history the monitoring rules of docs/mlops.md §10 compare a week
+  # with ("the previous 4 weeks"). The Ranker's training window is NOT set here: it comes
+  # from the Ranker lock (training_window.window_weeks), like the sampling ratio.
+  monitoring_weeks: 4
+  # The Ranker experiment whose sample files the pipeline trains on: "full" = the six
+  # channels (the other experiment of stage 1, "minus_r6", was an ablation).
+  ranker_experiment: full
+
+mlflow:
+  # Where `make mlflow-ui` serves the local view. Not port 5000: macOS uses it itself
+  # (AirPlay Receiver). The host is this machine only; the view is never served to a network.
+  ui_host: 127.0.0.1
+  ui_port: 5001
+  # The experiments of the view. "imported" marks records that were made before the
+  # weekly pipeline existed (stage-1 result tables, the M10 calibration); they are
+  # copied into the view, they are not pipeline runs.
+  experiment_stage1: "stage1-weekly-records (imported)"
+  experiment_calibration: "m10-calibration (imported)"
+  experiment_pipeline: "weekly-pipeline"

@@ -3353,3 +3353,107 @@ def parse_repeatability_config(raw: Mapping[str, Any]) -> RepeatabilityConfig:
 def load_repeatability_config(path: Path) -> RepeatabilityConfig:
     """Read and validate configs/m10_r6_repeatability.yaml."""
     return parse_repeatability_config(load_yaml(path))
+
+
+# ---------------------------------------------------------------- m11_versioning.yaml
+
+
+@dataclass(frozen=True)
+class BootstrapConfig:
+    """Settings of the bootstrap state (configs/m11_versioning.yaml, docs/mlops.md §6.3).
+
+    Attributes:
+        first_tick_fold: The first tick of the replay, e.g. "V1". The bootstrap
+            state is the state at the end of the week right before it.
+        monitoring_weeks: Weeks of history the monitoring rules compare a week with.
+        ranker_experiment: The Ranker experiment whose sample files are kept ("full").
+    """
+
+    first_tick_fold: str
+    monitoring_weeks: int
+    ranker_experiment: str
+
+
+@dataclass(frozen=True)
+class MlflowViewConfig:
+    """Settings of the local MLflow view (configs/m11_versioning.yaml, docs/mlops.md §7.3).
+
+    Attributes:
+        ui_host: Host the UI listens on (this machine only).
+        ui_port: Port of the UI.
+        experiment_stage1: Experiment of the imported stage-1 weekly records.
+        experiment_calibration: Experiment of the imported M10 calibration runs.
+        experiment_pipeline: Experiment of the weekly pipeline's runs (from M12 on).
+    """
+
+    ui_host: str
+    ui_port: int
+    experiment_stage1: str
+    experiment_calibration: str
+    experiment_pipeline: str
+
+    @property
+    def experiments(self) -> tuple[str, ...]:
+        """The three experiment names, in a fixed order."""
+        return (self.experiment_stage1, self.experiment_calibration, self.experiment_pipeline)
+
+
+@dataclass(frozen=True)
+class VersioningConfig:
+    """Settings from configs/m11_versioning.yaml. Nothing here changes a result.
+
+    Attributes:
+        bootstrap: The bootstrap state of the replay.
+        mlflow: The local MLflow view.
+    """
+
+    bootstrap: BootstrapConfig
+    mlflow: MlflowViewConfig
+
+
+def parse_versioning_config(raw: Mapping[str, Any]) -> VersioningConfig:
+    """Build a VersioningConfig from the parsed content of configs/m11_versioning.yaml.
+
+    Raises:
+        ValueError: If a key is missing or unknown, a number is not positive, or
+            two experiments have the same name.
+    """
+    where = "m11_versioning"
+    check_keys(raw, {"bootstrap", "mlflow"}, where)
+    bootstrap_where = f"{where}.bootstrap"
+    bootstrap_raw = get_mapping(raw, "bootstrap", where)
+    check_keys(
+        bootstrap_raw, {"first_tick_fold", "monitoring_weeks", "ranker_experiment"}, bootstrap_where
+    )
+    bootstrap = BootstrapConfig(
+        first_tick_fold=get_str(bootstrap_raw, "first_tick_fold", bootstrap_where),
+        monitoring_weeks=get_int(bootstrap_raw, "monitoring_weeks", bootstrap_where),
+        ranker_experiment=get_str(bootstrap_raw, "ranker_experiment", bootstrap_where),
+    )
+    require_positive(bootstrap.monitoring_weeks, f"{bootstrap_where}.monitoring_weeks")
+    mlflow_where = f"{where}.mlflow"
+    mlflow_raw = get_mapping(raw, "mlflow", where)
+    mlflow_keys = {
+        "ui_host",
+        "ui_port",
+        "experiment_stage1",
+        "experiment_calibration",
+        "experiment_pipeline",
+    }
+    check_keys(mlflow_raw, mlflow_keys, mlflow_where)
+    mlflow = MlflowViewConfig(
+        ui_host=get_str(mlflow_raw, "ui_host", mlflow_where),
+        ui_port=get_int(mlflow_raw, "ui_port", mlflow_where),
+        experiment_stage1=get_str(mlflow_raw, "experiment_stage1", mlflow_where),
+        experiment_calibration=get_str(mlflow_raw, "experiment_calibration", mlflow_where),
+        experiment_pipeline=get_str(mlflow_raw, "experiment_pipeline", mlflow_where),
+    )
+    require_positive(mlflow.ui_port, f"{mlflow_where}.ui_port")
+    if len(set(mlflow.experiments)) != len(mlflow.experiments):
+        raise ValueError(f"{mlflow_where}: the three experiments must have different names")
+    return VersioningConfig(bootstrap=bootstrap, mlflow=mlflow)
+
+
+def load_versioning_config(path: Path) -> VersioningConfig:
+    """Read and validate configs/m11_versioning.yaml."""
+    return parse_versioning_config(load_yaml(path))
