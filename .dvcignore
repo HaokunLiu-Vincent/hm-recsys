@@ -1,0 +1,8 @@
+# Files DVC leaves out of a tracked folder (https://dvc.org/doc/user-guide/dvcignore).
+
+# Written by the macOS Finder; not data.
+.DS_Store
+
+# Not a pipeline input: the Kaggle submission template. docs/mlops.md §7.1 tracks the
+# three CSV files of data/raw/ that preprocessing reads; the fourth file stays local.
+/data/raw/sample_submission.csv

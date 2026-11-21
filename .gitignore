@@ -1,8 +1,24 @@
 # Data and generated artifacts are never committed (AGENTS.md §10).
 # The leading "/" anchors these to the repo root. Without it, "data/" would
 # also ignore the source package src/hmrec/data/.
-/data/
-/artifacts/
+#
+# "/data/*" and not "/data/": git never looks inside an ignored FOLDER, so a file in it
+# could not be let back in. The contents are ignored one by one instead, and the small
+# DVC pointer files (*.dvc: path, size and md5 of the data they stand for; docs/mlops.md
+# §7.1) are let back in. The data themselves stay untracked, as before.
+/data/*
+!/data/*.dvc
+/artifacts/*
+!/artifacts/features/
+/artifacts/features/*
+!/artifacts/features/*.dvc
+
+# DVC: the local configuration holds the URL of the remote (the bucket name), which must
+# not be in a public repository; the cache holds the data. .dvc/.gitignore lists them
+# too; they are repeated here so that this file alone shows what is never committed.
+/.dvc/config.local
+/.dvc/cache/
+/.dvc/tmp/
 
 # results/ IS committed (small summary tables), so it is not listed here.
 
