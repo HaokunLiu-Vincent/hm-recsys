@@ -310,9 +310,10 @@ A task is done only when all of the following hold:
 
 ## 11. Documentation language
 
-**English is the primary language of this project (from 2026-11-19).** This section is written in English for that reason.
+**The repository keeps English documents only (from 2026-11-21; English had been the primary language since 2026-11-19).**
 
-- **Write in English first.** All new documents, new entries in `docs/decisions.md`, commit messages and code comments (including docstrings) are written in English.
-- **A Chinese version is a translation.** When a Chinese version of a document is needed, save it next to the original as `*.zh-CN.md` (for example `docs/final_report.md` and `docs/final_report.zh-CN.md`). It has the same structure, sections and numbers as the English original, says at the top that it is a translation, and where the two differ the English version prevails. When the English original changes, update the translation in the same task or say in the reply that it is now out of date.
-- **Three Chinese files are frozen archives of the v0.1 state**: `docs/proposal.zh-CN.md`, `docs/decisions.zh-CN.md` and `AGENTS.zh-CN.md`. They were the originals up to tag `v0.1` and were then translated into the English files at the original paths (`docs/proposal.md`, `docs/decisions.md`, `AGENTS.md`), which are authoritative. The archives are no longer maintained: do not edit them and do not keep them in step with the English files. `docs/decisions.md` stays append-only: new entries are in English, and earlier entries are not edited.
+- **Write in English.** All documents, entries in `docs/decisions.md`, commit messages and code comments (including docstrings) are written in English.
+- **No translations.** No Chinese version, or version in any other language, of a document is written or maintained. The translations and Chinese archives that existed before 2026-11-21 were deleted; they remain in the git history up to tag `v0.2`.
+- **`docs/decisions.zh-CN.md` is a frozen archive, kept only for the lock-file references.** The `decision_record` fields of the lock files under `configs/locks/` quote entry titles of the decision log in Chinese, as it was at tag `v0.1`, and lock files may not be modified (§3.3). A quoted title is found in this archive, and the entry at the same position of `docs/decisions.md` is its English version; the table of every quoted title is in `docs/decisions.md` (2026-11-21, "English-only documents"), and `tests/unit/test_locks.py` checks the ranker lock's pointer in this way. **Do not edit this archive and do not delete it.**
+- `docs/decisions.md` stays append-only: new entries are in English, and earlier entries are not edited.
 - This rule is about files in the repository. It does not decide the language of replies in a conversation: reply in the language the user writes in, unless the user asks for another.
