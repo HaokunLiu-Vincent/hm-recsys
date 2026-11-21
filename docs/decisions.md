@@ -1485,3 +1485,75 @@ The evaluation recorded in the entry above was run once. Code, rehearsal, formal
 - **What "identical" means in the tables, to avoid a silent choice**: for R1–R4 the provisional tolerance of `docs/mlops.md` §8.3 is "identical". The tables report two things separately: whether the (customer, article, rank) rows are identical, and whether the float32 scores are bit-identical. The verdict "inside / outside" is attached to the rows; the scores are reported next to it without a verdict. Whether "identical" should include the scores is for the user to say with the tolerance.
 - **Not done, on purpose**: no platform record was created; no tolerance decision is written; no lock file, stage-1 table or earlier entry of this file was changed; the full-data calibration was not started before the code was committed and the image built from that commit.
 - **Documents updated**: `AGENTS.md` §5 and §12, `docs/proposal.md` §17, `README.md`, `docs/m10_calibration_plan.md` (a note at the top that lists the five differences above).
+
+## 2026-11-22 M10 part 2: the calibration of week V4 in the arm64 container was run; what was measured (no decision about the tolerance)
+
+- **What this entry is**: a record of what was run and what was measured. **It contains no conclusion about the tolerance of `docs/mlops.md` §8.3**: the user decides the thresholds after reading the report, and that decision gets its own entry. No platform record was created. Nothing was tuned, selected or re-run with other settings.
+- **What was run**: image built with `make image-build` from the clean tree at commit `664f473ed0a2af8bab36be2ae346b67e17d1a357` (arm64, image id `sha256:47a0b85a…`, code-tree hash `6db3acf8d7af2c85cf62dad8446c696b7d4d3f220b3dffbe5b8ac22ba43f079c`; the x86-64 image CI built from the same commit has the same code-tree hash). Before the first item: lint and both test suites passed natively, in this image and in CI on x86-64 (1052 torch-side and 371 LightGBM-side tests, 0 failed, 0 skipped; CI run 44923305437). Every item ran with `make image-calibrate`, one container per item, `--cpus 6 --memory 12g`, `data/processed` and `artifacts` mounted read-only. Run 1: items A, B, C1, C2, union, D, in this order (about 13 minutes). Run 2: items B, C2 and D again in fresh containers, then the bit-by-bit comparison of the two runs. Labels of V4 were read for recall and MAP@12 through the guarded loaders of M6 and M7. **No label of a T week was read.**
+- **Where the numbers are**: `results/m10_calibration/comparisons.csv` (232 rows: every measured quantity next to its stage-1 value), `runs.csv` (one row per process: wall time, true memory peak, platform), `repeatability.csv`, and the R6 chain table of each run. Every row carries the run, the commit, the code-tree hash and the platform fields. The artifacts are under `artifacts/m10_calibration/linux-arm64/` (not in git). The column `within_tolerance` of `comparisons.csv` describes each row against the *provisional* thresholds; it is not a decision.
+- **Measured, run 1 against the stage-1 record of V4**:
+
+  | Item | Quantity | Container | Stage 1 | Difference |
+  |---|---|---|---|---|
+  | A: R1, R2, R3, R4 | (customer, article, rank) rows | identical in all four channels | | 0 differing rows |
+  | | scores (float32) | bit-identical in all four channels | | largest absolute and relative difference 0 |
+  | | candidate files | the same sha256 as the stage-1 files | | |
+  | | recall | 0.109989 / 0.041286 / 0.033426 / 0.088194 | the same float64 values | 0 |
+  | B: R5 | recorded pairs present | 99.9798% (6,070,776 of 6,072,000) | | 1,224 pairs missing |
+  | | new pairs not in the record | 0.0202% | | |
+  | | common pairs with the same rank | 98.1724% | | |
+  | | Recall@100 | 0.09497178490073865 | 0.09497516644781423 | −0.0036% relative |
+  | | largest score difference | 0.0229 absolute, 5.4% relative | | |
+  | | largest vector difference | users 0.0245, articles 0.00037 | | |
+  | C1: R6, recorded model `V3.pt` | recorded pairs present | 99.99997% (2 of 7,203,500 missing) | | |
+  | | common pairs with the same rank | 99.9951% (716 differing rows) | | |
+  | | Recall@100 | 0.1601091002641404 | 0.1601091002641404 | 0 |
+  | | largest score difference | 2.4e-07 absolute | | |
+  | C2: fine-tune `V2.pt` on V3 | rows and steps | 238,334 new + 238,334 replay rows, 1,862 steps | the same | 0 |
+  | | mean training loss | 5.536407634599892 | 5.536406061190924 | +2.8e-07 relative |
+  | | alarm loss | 5.6167824268341064 | 5.616730213165283 | +9.3e-06 relative |
+  | | parameters against the recorded `V3.pt` | largest absolute difference 0.0102; 6,146,555 of 8,601,460 values differ | | |
+  | C2: R6 candidates of V4 from that model | recorded pairs present | 99.7506% | | |
+  | | new pairs not in the record | 0.2494% | | |
+  | | common pairs with the same rank | 78.1174% | | |
+  | | Recall@100 | 0.16008204661627742 | 0.1601091002641404 | −0.0169% relative |
+  | Union (the run's own A, B and C2) | deduplicated rows | 22,294,520 | 22,293,247 | +0.0057% |
+  | | union recall | 0.27610162394225035 | 0.2761626403149555 | −0.0221% relative |
+  | D: LightGBM | binary Dataset | the same sha256 as the stage-1 Dataset | | |
+  | | model | the same sha256 as the stage-1 model; all 500 trees identical; no tree differs | | |
+  | | MAP@12 / Recall@12 / NDCG@12 at 500 trees | 0.034849701577104486 / 0.07797187269574504 / 0.0539127774637354 | the same float64 values | 0 |
+  | | Top-12 | identical list for 100% of the 72,035 queries; mean overlap 1.0 | | |
+
+- **Wall time and true memory peak (ru_maxrss), run 1, next to the laptop's records**:
+
+  | Item | Container | Laptop (stage 1) |
+  |---|---|---|
+  | R1 / R2 / R3 | 1.1 s / 0.4 s / 0.5 s; 2.39 / 1.35 / 1.44 GB | 1.0 s / 0.3 s / 0.4 s; 1.97 / 0.96 / 1.12 GB |
+  | R4 | 29.3 s; 3.44 GB | 23.2 s; 4.09 GB |
+  | R5 (fit and scoring) | 116.0 s; 2.66 GB | 178.7 s; 3.77 GB (the laptop fits on one thread) |
+  | R6 prediction (C1; C2) | 30.5 s; 30.9 s; 3.16 GB; 3.14 GB | 18.3 s; 4.38 GB (peak of the process that also fine-tuned) |
+  | R6 process of V3 (C2): prediction, then fine-tune | 28.7 s + **197.7 s**; 3.28 GB | 16.8 s + 55.8 s; 4.68 GB |
+  | Union | 5.9 s; 5.67 GB (builds the fused table) | 2.7 s; 2.00 GB (the monitor step, which did not build it) |
+  | LightGBM Dataset | 11.1 s; 1.65 GB | 6.4 s; 1.93 GB |
+  | LightGBM training / scoring / whole process | 180.3 s / 96.6 s / 278.3 s; 3.09 GB | 156.1 s / 110.7 s / 267.6 s; 2.98 GB |
+
+  The highest peak of any process was 5.67 GB. The R6 fine-tune took 3.5 times as long as on the laptop.
+- **Repeatability: two container runs compared bit by bit** (`results/m10_calibration/repeatability.csv`):
+  - **B (R5): bit-identical.** Candidates (6,072,000 rows) and the saved user and article vectors are the same in both runs.
+  - **D (LightGBM): bit-identical.** The 500 trees, the Top-12 of every query at every checkpoint with its scores, and the per-query metric values are the same in both runs.
+  - **C2 (R6 fine-tune): NOT bit-identical.** The prediction of V3 with the recorded model, before the fine-tune, is bit-identical in both runs. The fine-tuned weights differ (all 19 tensors), the losses differ (training 5.536407634599892 and 5.536400292024704; alarm 5.6167824268341064 and 5.616631984710693), and so do the V4 vectors and candidates.
+- **Read-only diagnosis of C2** (computed on the laptop from the saved outputs; nothing was run again):
+
+  | Pair of models | Largest parameter difference | V4 pairs in common | Same rank among common pairs | Top-12 pairs in common |
+  |---|---|---|---|---|
+  | stage 1 and container run 1 | 0.01021 | 99.7506% | 78.12% | 99.70% |
+  | stage 1 and container run 2 | 0.00938 | 99.7488% | 77.18% | 99.69% |
+  | container run 1 and run 2 | 0.01020 | 99.7558% | 79.35% | 99.71% |
+
+  **The two container runs are as far from each other as each of them is from the laptop's record.** For scale, the fine-tune itself moved the weights by at most 0.066 (recorded `V2.pt` to recorded `V3.pt`). Recall@100 of V4 in run 2 is 0.16003278429780568 (−0.048% relative against stage 1; run 1: −0.017%).
+  The first step that differs is the fine-tune: everything before it is bit-identical between the two runs (inputs by sha256, the start model by sha256, the prediction of V3), and C1 shows that applying a given model differs from the laptop only in the last bits. **Stage 1 chose `device: cpu` for R6 because the training was bit-reproducible on the laptop's CPU** (entry of the device selection rule, above). **That property does not hold in the arm64 container.** Which operation of the fine-tune is not deterministic there was not determined: that needs an experiment (for example a short fine-tune on test-size data with one thread, or with torch's deterministic-algorithms switch), and no experiment was run, because this task allows no run with other settings.
+- **Two facts about the runtime that the records show** (`runs.csv`, columns `openmp_library` and `openmp_version`):
+  1. **The recall processes do not run on the system libgomp the `Dockerfile` pins.** They import torch first, and the dynamic loader then keeps the copy of libgomp inside the torch wheel for the whole process, so `implicit` (R5) and torch (R6) run on that copy (`…/torch/lib/libgomp.so.1`, version "unknown" because no Debian package owns it; it is fixed by the torch version in `uv.lock`). Only the LightGBM processes run on `libgomp1 14.2.0-19`.
+  2. `implicit` still prints its OpenBLAS warning once in the R5 process, as expected: it looks at every BLAS of the process, and only scipy's is limited (entry above).
+- **Not covered by this calibration**: one week and one platform (arm64; the x86-64 calibration is the first step of M13). Item D scored the frozen stage-1 features, so it shows that LightGBM on this platform reproduces the model from the same inputs; it does not show the ranking that results from the container's own candidates, because feature building is not a calibration item. How the R6 difference behaves over the eight chained updates of the replay is not shown by one update.
+- **Code state**: the calibration code is at `664f473`; this entry and the tables are committed after the run. Lock files, stage-1 result tables and earlier entries of this file are unchanged.
