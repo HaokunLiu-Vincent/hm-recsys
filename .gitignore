@@ -16,6 +16,30 @@ __pycache__/
 .pytest_cache/
 .ipynb_checkpoints/
 
+# Secrets and credentials: never committed
+.env
+.env.*
+kaggle.json
+.claude/settings.local.json
+
+# Kaggle submission files and model / array / table files, wherever they are.
+# Competition data and anything derived from it row by row must not be committed.
+# (results/*.csv are small summary tables and ARE committed, so *.csv is not listed;
+#  .dvc/ is not listed either: its config has to be committable.)
+submission*.csv
+submission*.csv.gz
+*.pt
+*.pth
+*.pkl
+*.npy
+*.npz
+*.parquet
+
+# Experiment trackers
+mlruns/
+mlartifacts/
+wandb/
+
 # OS / editor
 .DS_Store
 .idea/
