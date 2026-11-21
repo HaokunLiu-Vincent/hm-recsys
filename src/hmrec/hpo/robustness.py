@@ -2,7 +2,7 @@
 
 configs/hpo/d_phase.yaml `robustness` says, per channel, which step, how many of
 its candidates (top_k), which config key holds the seed and which extra seeds
-to run (proposal §5 R6 "稳健性": the top 2 update configs, 2 more seeds each).
+to run (proposal §5 R6 "Robustness": the top 2 update configs, 2 more seeds each).
 
 Ranking of the step's candidates by the §4.2 rule:
     rank 1 = the candidate the rule selects against the step's default;
