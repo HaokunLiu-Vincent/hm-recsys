@@ -29,6 +29,9 @@
 
 # Python environment and caches
 .venv/
+# The second environment, for DVC and MLflow only (Makefile, "M11 versioning"). They are
+# kept out of .venv so that lint, tests and every run use exactly the packages of stage 1.
+.venv-tools/
 __pycache__/
 *.py[cod]
 *.egg-info/

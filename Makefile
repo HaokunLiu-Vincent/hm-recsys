@@ -8,6 +8,8 @@ export OMP_NUM_THREADS := 6
 .PHONY: setup format lint test-fast test test-torch-side test-lightgbm-side
 .PHONY: image-require-clean image-build image-info image-lint image-test-fast image-test
 .PHONY: image-test-torch-side image-test-lightgbm-side image-calibrate image-r6-repeatability
+.PHONY: setup-tools dvc data-manifest data-verify bootstrap-verify
+.PHONY: mlflow-sync mlflow-check mlflow-ui test-tools
 
 ## setup: create / update .venv from uv.lock (includes the dev group)
 setup:
@@ -152,3 +154,71 @@ image-calibrate:
 #   make image-r6-repeatability ARGS="--setting implemented --rows 8192"
 image-r6-repeatability:
 	$(IMAGE_RUN) python scripts/m10_r6_repeatability.py $(ARGS)
+
+# ---------------------------------------------------------------- M11 versioning
+# docs/mlops.md §7. DVC and MLflow are in dependency groups of their own ("versioning",
+# "tracking"): `make setup` and the container image install neither.
+#
+# They also get an environment of their own, .venv-tools, and are never installed into
+# .venv. Why: .venv is what lint, tests and every run use, and it must stay exactly the
+# runtime + dev set of uv.lock. MLflow brings pandas, and with pandas installed the type
+# checker reads LightGBM's optional types differently (found on 2026-11-22: `make lint`
+# then reports an error in M7 code that did not change).
+#
+#   make setup-tools       create / update .venv-tools (the project + both groups)
+#   make dvc ARGS="pull"   run a DVC command (README, "Data")
+#   make data-manifest     write configs/data_manifest.json from the DVC-tracked files
+#   make data-verify       compare the DVC-tracked files on disk with the manifest
+#                          (some of them: ARGS="--only data/processed")
+#   make bootstrap-verify  compare data/bootstrap/ with the manifest inside it
+#   make mlflow-sync       copy result tables and run manifests into the local MLflow store
+#   make mlflow-check      every metric in the store against its source
+#   make mlflow-ui         serve the local MLflow UI (configs/m11_versioning.yaml: host, port)
+#   make test-tools        the tracking tests with MLflow installed (a real SQLite store)
+#
+# Neither tool reports usage to its maker from this repository: DVC's analytics are off in
+# .dvc/config and here; MLflow's telemetry is switched off here and in hmrec.tracking.store.
+export DVC_NO_ANALYTICS := 1
+export MLFLOW_DISABLE_TELEMETRY := true
+export DO_NOT_TRACK := true
+export MLFLOW_DISABLE_AGENT_HINT := 1
+TOOLS_ENVIRONMENT = .venv-tools
+TOOLS_GROUPS = --group versioning --group tracking
+TOOLS_RUN = UV_PROJECT_ENVIRONMENT=$(TOOLS_ENVIRONMENT) uv run $(TOOLS_GROUPS)
+
+## setup-tools: create / update .venv-tools with DVC and MLflow (never touches .venv)
+setup-tools:
+	UV_PROJECT_ENVIRONMENT=$(TOOLS_ENVIRONMENT) uv sync $(TOOLS_GROUPS)
+
+## dvc: run a DVC command in the tools environment, e.g. make dvc ARGS="status --cloud"
+dvc:
+	$(TOOLS_RUN) dvc $(ARGS)
+
+## data-manifest: write the manifest (path, size, sha256, md5) of every DVC-tracked file
+data-manifest:
+	$(TOOLS_RUN) python scripts/m11_data_manifest.py write
+
+## data-verify: compare DVC-tracked files on disk with the manifest (ARGS="--only data/processed")
+# Needs no DVC: it only hashes files, so it runs in .venv.
+data-verify:
+	uv run python scripts/m11_data_manifest.py verify $(ARGS)
+
+## bootstrap-verify: compare the bootstrap state with the manifest inside it
+bootstrap-verify:
+	uv run python scripts/m11_bootstrap_state.py --verify
+
+## mlflow-sync: write the records that are missing to the local MLflow store
+mlflow-sync:
+	$(TOOLS_RUN) python scripts/m11_mlflow.py sync
+
+## mlflow-check: every metric in the local MLflow store against its source table
+mlflow-check:
+	$(TOOLS_RUN) python scripts/m11_mlflow.py check
+
+## mlflow-ui: serve the local MLflow UI (stop with Ctrl-C)
+mlflow-ui:
+	$(TOOLS_RUN) python scripts/m11_mlflow.py ui
+
+## test-tools: the tracking tests where MLflow is installed (sync into a real SQLite store)
+test-tools:
+	$(TOOLS_RUN) pytest tests/unit/test_tracking_store.py tests/unit/test_tracking_check.py tests/unit/test_tracking_records.py -q
