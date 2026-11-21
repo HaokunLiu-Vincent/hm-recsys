@@ -1,0 +1,48 @@
+# What may enter a container image build (docs/mlops.md §8.1).
+#
+# This is an allow-list: everything is excluded first, then the tracked source folders
+# and files are let in one by one. A new top-level folder is therefore NOT in the image
+# until it is added here on purpose. Never let in: data/, artifacts/ (data and models are
+# mounted or read from Cloud Storage, never copied), .git (the commit comes from a build
+# argument), .venv (the image builds its own environment), caches, credentials.
+*
+
+!src/
+!scripts/
+!tests/
+!configs/
+!results/
+!docs/
+!pyproject.toml
+!uv.lock
+!.python-version
+!Makefile
+!README.md
+!AGENTS.md
+!CLAUDE.md
+
+# Inside the folders let in above: files that git ignores too (.gitignore).
+**/__pycache__/
+**/*.py[cod]
+**/.DS_Store
+**/.ipynb_checkpoints/
+**/.pytest_cache/
+**/.ruff_cache/
+**/.mypy_cache/
+**/*.parquet
+**/*.npy
+**/*.npz
+**/*.pt
+**/*.pth
+**/*.pkl
+**/.env
+**/.env.*
+**/kaggle.json
+**/submission*.csv
+**/submission*.csv.gz
+
+# Named explicitly although `*` already covers them, so that nobody lets them in by mistake.
+data/
+artifacts/
+.git/
+.venv/
