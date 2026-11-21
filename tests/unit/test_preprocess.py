@@ -1,8 +1,8 @@
 """Tests for hmrec.data.preprocess, using the hand-made CSVs in tests/fixtures/preprocess/.
 
 See tests/fixtures/preprocess/README.md for how the expected indexes are derived:
-customer_idx: cust_a..cust_j -> 0..9; article_idx: 0108775015 -> 0, 0108775044 -> 1,
-0110065001 -> 2, 0951111001 -> 3; day 0 = 2018-09-20.
+customer_idx: cust_a..cust_j -> 0..9; article_idx: 0100000015 -> 0, 0100000044 -> 1,
+0110000001 -> 2, 0951111001 -> 3; day 0 = 2018-09-20.
 """
 
 from datetime import date
@@ -146,8 +146,8 @@ def test_unknown_customer_is_rejected(
     csv_path = tmp_path / "transactions.csv"
     csv_path.write_text(
         "t_dat,customer_id,article_id,price,sales_channel_id\n"
-        "2018-09-20,cust_a,0108775015,0.01,2\n"
-        "2018-09-20,cust_unknown,0108775015,0.01,2\n"
+        "2018-09-20,cust_a,0100000015,0.01,2\n"
+        "2018-09-20,cust_unknown,0100000015,0.01,2\n"
     )
     raw = scan_transactions_csv(csv_path)
     transactions = build_transactions(raw, customer_map, article_map, DAY_ZERO)
@@ -259,15 +259,15 @@ def test_build_articles(article_map: pl.DataFrame) -> None:
         "colour_group_code": pl.Int8,
     }
     assert articles["article_idx"].to_list() == [0, 1, 2, 3]
-    # "0108775" -> 108775: the two colour variants share one product_code.
-    assert articles["product_code"].to_list() == [108775, 108775, 110065, 951111]
-    assert articles["colour_group_code"].to_list() == [9, 10, -1, 93]
+    # "0100000" -> 100000: the two colour variants share one product_code.
+    assert articles["product_code"].to_list() == [100000, 100000, 110000, 951111]
+    assert articles["colour_group_code"].to_list() == [7, 8, -1, 93]
     assert articles["product_group_name"][3] == "Garment Full body"
 
 
 def test_product_code_mismatch_raises() -> None:
     raw = pl.DataFrame(
-        {"article_id": ["0108775015", "0108775044"], "product_code": ["0108775", "0108776"]}
+        {"article_id": ["0100000015", "0100000044"], "product_code": ["0100000", "0100001"]}
     )
     with pytest.raises(ValueError, match=r"1 rows have product_code != article_id\[:7\]"):
         check_product_code_matches_article_id(raw)
@@ -277,12 +277,12 @@ def test_product_code_mismatch_raises() -> None:
 
 
 def make_embedding_source() -> tuple[np.ndarray, pl.DataFrame]:
-    """3 unit vectors (dim 2) in a shuffled order; article 0108775044 (idx 1) has none."""
+    """3 unit vectors (dim 2) in a shuffled order; article 0100000044 (idx 1) has none."""
     vectors = np.array([[1.0, 0.0], [0.0, 1.0], [0.6, 0.8]], dtype=np.float32)
     row_ids = pl.DataFrame(
         {
             "embedding_row": [0, 1, 2],
-            "article_id": ["0951111001", "0108775015", "0110065001"],
+            "article_id": ["0951111001", "0100000015", "0110000001"],
         }
     )
     return vectors, row_ids
@@ -318,7 +318,7 @@ def test_align_embeddings_rejects_bad_row_ids(article_map: pl.DataFrame) -> None
     with pytest.raises(ValueError, match=r"embedding_row must be exactly 0\.\.2"):
         align_embeddings(vectors, gap, article_map, 2, NORM_TOLERANCE)
     duplicated = row_ids.with_columns(
-        pl.Series("article_id", ["0951111001", "0951111001", "0110065001"])
+        pl.Series("article_id", ["0951111001", "0951111001", "0110000001"])
     )
     with pytest.raises(ValueError, match="duplicated article_id"):
         align_embeddings(vectors, duplicated, article_map, 2, NORM_TOLERANCE)
@@ -327,7 +327,7 @@ def test_align_embeddings_rejects_bad_row_ids(article_map: pl.DataFrame) -> None
 def test_align_embeddings_rejects_unknown_article(article_map: pl.DataFrame) -> None:
     vectors, row_ids = make_embedding_source()
     unknown = row_ids.with_columns(
-        pl.Series("article_id", ["0951111001", "0999999999", "0110065001"])
+        pl.Series("article_id", ["0951111001", "0999999999", "0110000001"])
     )
     with pytest.raises(ValueError, match="not in the ID map"):
         align_embeddings(vectors, unknown, article_map, 2, NORM_TOLERANCE)

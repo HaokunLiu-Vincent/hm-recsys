@@ -370,7 +370,7 @@ def build_articles(raw: pl.LazyFrame, article_map: pl.DataFrame) -> pl.DataFrame
     """
     raw_articles = raw.select(ARTICLE_ID, *ARTICLE_COLUMN_DTYPES.keys()).collect()
     check_product_code_matches_article_id(raw_articles)
-    # Casting "0108775" to int32 drops the leading zero. That is fine: product_code
+    # Casting "0100000" to int32 drops the leading zero. That is fine: product_code
     # is only used as a grouping key, and the 7-digit check above already passed.
     typed = raw_articles.with_columns(
         pl.col(column).cast(dtype, strict=True) for column, dtype in ARTICLE_COLUMN_DTYPES.items()
@@ -491,7 +491,7 @@ def scan_transactions_csv(path: Path) -> pl.LazyFrame:
 def scan_all_string_csv(path: Path) -> pl.LazyFrame:
     """Lazily scan a CSV with every column as a string (customers.csv, articles.csv).
 
-    Reading everything as text keeps leading zeros ("0108775015") and lets the
+    Reading everything as text keeps leading zeros ("0100000015") and lets the
     build_* functions do every cast explicitly and strictly.
     """
     return pl.scan_csv(path, infer_schema=False)

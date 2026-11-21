@@ -253,19 +253,19 @@ def test_article_codes_cover_product_code_and_categories() -> None:
     articles = pl.DataFrame(
         {
             "article_idx": [0, 1],
-            "product_code": [108775, 108775],
-            "product_type_no": [-1, 253],
-            "product_group_name": ["Garment Upper body", "Accessories"],
-            "garment_group_no": [1002, 1002],
+            "product_code": [100000, 100000],
+            "product_type_no": [-1, 901],
+            "product_group_name": ["Group B", "Group A"],
+            "garment_group_no": [1101, 1101],
             "index_group_no": [1, 1],
-            "section_no": [16, 16],
-            "colour_group_code": [9, -1],
+            "section_no": [11, 11],
+            "colour_group_code": [7, -1],
         }
     )
     codes = build_article_codes(articles)
     # Same product_code -> same code; -1 sorts first, so it gets code 1.
     assert codes.codes.tolist() == [[1, 1, 2, 1, 1, 1, 2], [1, 2, 1, 1, 1, 1, 1]]
-    assert codes.vocabularies["product_type_no"] == ("-1", "253")
+    assert codes.vocabularies["product_type_no"] == ("-1", "901")
 
 
 def _articles(n: int) -> pl.DataFrame:

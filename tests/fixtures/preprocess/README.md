@@ -2,8 +2,9 @@
 
 Hand-made inputs for `tests/unit/test_preprocess.py`. Small enough to check by hand.
 
-- `articles.csv`: 4 articles, IDs with leading zeros, rows NOT in ID order.
-  Sorted IDs give article_idx: 0108775015 -> 0, 0108775044 -> 1, 0110065001 -> 2, 0951111001 -> 3.
+- `articles.csv`: 4 articles, IDs with leading zeros, rows NOT in ID order. Every row is
+  made up: no ID, product code or name is one of the H&M catalogue.
+  Sorted IDs give article_idx: 0100000015 -> 0, 0100000044 -> 1, 0110000001 -> 2, 0951111001 -> 3.
   One colour_group_code is -1; one description contains a comma and quotes.
 - `customers.csv`: 10 customers (cust_a..cust_j -> customer_idx 0..9), rows NOT in ID order.
   Ages cover every age bucket and both edges of AGE_18_24 / AGE_55_PLUS:
