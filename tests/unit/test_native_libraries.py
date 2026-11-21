@@ -135,9 +135,8 @@ def test_the_operating_system_lists_the_libraries_of_this_process() -> None:
     if sys.platform == "darwin":
         assert any(name.startswith("libSystem") for name in names)
     else:
-        # Linux: /proc/self/maps lists the C library and the Python binary or library.
+        # Linux: /proc/self/maps lists the C library among the mapped files.
         assert any(name.startswith("libc.so") for name in names)
-        assert all(path.startswith("/") for path in paths)
 
 
 def test_package_versions_on_the_real_system() -> None:

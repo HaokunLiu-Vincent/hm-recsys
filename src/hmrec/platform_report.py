@@ -24,8 +24,10 @@ OpenMP runtimes into one process.
 """
 
 import importlib.metadata
+import json
 import os
 import platform
+import subprocess
 import sys
 from collections.abc import Mapping, Sequence
 from dataclasses import dataclass
@@ -212,6 +214,42 @@ def library_lines(paths: Sequence[str]) -> list[str]:
     return lines
 
 
+def openmp_of_import(module: str) -> list[str]:
+    """The OpenMP runtimes a fresh Python process holds after importing only `module`.
+
+    Why a fresh process: which runtime a library gets can depend on what was
+    imported before it. Measured in the arm64 image (2026-11-21): torch carries a
+    copy of libgomp under the same library name as the system's, and the loader
+    loads a library name once, so whichever of torch and implicit is imported
+    first decides which file both use. Importing one module alone shows what that
+    module asks for by itself; an empty list means it uses no OpenMP at all (the
+    macOS wheel of implicit: R5 is fitted on one thread on the laptop).
+
+    Args:
+        module: A module name, e.g. "torch" or "implicit.cpu._als".
+
+    Returns:
+        Resolved paths of the OpenMP runtimes, sorted.
+    """
+    code = (
+        f"import json, {module}; "
+        "from hmrec.native_libraries import loaded_library_paths, openmp_libraries; "
+        "print(json.dumps(openmp_libraries(loaded_library_paths())))"
+    )
+    result = subprocess.run(
+        [sys.executable, "-c", code], capture_output=True, text=True, check=True
+    )
+    paths = json.loads(result.stdout.splitlines()[-1])
+    return [str(path) for path in paths]
+
+
+def openmp_of_import_line(module: str) -> str:
+    """One report line: the OpenMP runtimes of importing `module` alone."""
+    paths = openmp_of_import(module)
+    found = ", ".join(paths) if paths else "none (this build uses no OpenMP: one thread)"
+    return f"openmp of `import {module}` alone: {found}"
+
+
 def build_blas_line(package: str, build_config: Mapping[str, object] | None) -> str:
     """The BLAS a numpy or scipy wheel was built against, from its show_config dictionary.
 
@@ -265,6 +303,10 @@ def torch_side_lines() -> list[str]:
             lines.append(f"torch build: {setting.strip()}")
     lines.append(f"torch mps available: {torch.backends.mps.is_available()}")
     lines.extend(numpy_scipy_blas_lines())
+    # What each library asks for by itself, then what THIS process ended up with
+    # (implicit was imported before torch here; see openmp_of_import).
+    lines.append(openmp_of_import_line("implicit.cpu._als"))
+    lines.append(openmp_of_import_line("torch"))
     lines.extend(library_lines(loaded_library_paths()))
     return lines
 

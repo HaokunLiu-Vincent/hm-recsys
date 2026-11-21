@@ -18,6 +18,8 @@ from hmrec.platform_report import (
     is_reference_platform,
     library_lines,
     machine_lines,
+    openmp_of_import,
+    openmp_of_import_line,
     package_version_lines,
     parse_cgroup_cpu_max,
     parse_cgroup_memory_max,
@@ -156,22 +158,35 @@ def test_the_torch_side_report_of_this_process() -> None:
     assert any(line.startswith("numpy blas: ") for line in lines)
     openmp = [line for line in lines if line.startswith("openmp runtime: ")]
     reference = [line for line in lines if line.startswith("reference platform: ")]
+    implicit_alone = [line for line in lines if line.startswith("openmp of `import implicit")]
+    torch_alone = [line for line in lines if line.startswith("openmp of `import torch`")]
+    assert len(implicit_alone) == 1 and len(torch_alone) == 1
     if sys.platform == "darwin":
         # The laptop: torch brings LLVM's libomp; the implicit wheel has no OpenMP at all,
         # so R5 (WALS) is fitted on one thread here. numpy and scipy use Accelerate.
         assert len(openmp) == 1 and "/torch/lib/libomp.dylib" in openmp[0]
+        assert implicit_alone[0].endswith("none (this build uses no OpenMP: one thread)")
+        assert "/torch/lib/libomp.dylib" in torch_alone[0]
         assert "numpy blas: accelerate unknown" in lines
         assert reference[0].startswith("reference platform: yes")
         assert "torch mps available: True" in lines
     else:
-        # A Linux container: torch and implicit each bring a copy of GNU libgomp inside
-        # their wheels, so the implicit build IS multi-threaded here. No MPS.
+        # A Linux container: both use GNU libgomp, so the implicit build IS multi-threaded
+        # here (R5 runs on num_threads threads, unlike on the laptop). No MPS, no Accelerate.
         assert len(openmp) >= 1
         assert all("libgomp" in line for line in openmp)
-        assert any("implicit" in line for line in openmp)
+        assert "libgomp" in implicit_alone[0] and "libgomp" in torch_alone[0]
         assert reference[0].startswith("reference platform: NO")
         assert "torch mps available: False" in lines
         assert not any("accelerate" in line.lower() for line in lines)
+
+
+def test_openmp_of_a_module_that_uses_none() -> None:
+    # The standard library's json module loads no OpenMP runtime on any platform.
+    assert openmp_of_import("json") == []
+    assert openmp_of_import_line("json") == (
+        "openmp of `import json` alone: none (this build uses no OpenMP: one thread)"
+    )
 
 
 def test_an_unknown_side_is_refused() -> None:
