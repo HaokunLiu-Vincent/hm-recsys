@@ -1,0 +1,2 @@
+fold,anchor,start_model,start_sha256,model,sha256,n_new_rows,n_replay_rows,epochs,steps,n_train_samples,n_alarm_samples,mean_train_loss,alarm_loss,fine_tune_seconds,sampled_peak_rss_gb,git_commit,git_dirty,finished_at
+V3,2020-08-12,V2.pt,8cbd33f961fa97c1f2f8cd1ecda7da3020f167f9083fe7c16d0353f541c22caf,V3.pt,fe76630d4a5ec9026d4ab57f0920fef7fee0f6c9ea6ea102e7d67bf2225cbf1e,238334,238334,2,1862,476668,1928,5.536400292024704,5.616631984710693,199.76412938099998,1.5970573425292969,664f473ed0a2af8bab36be2ae346b67e17d1a357,False,2026-11-21T16:35:42

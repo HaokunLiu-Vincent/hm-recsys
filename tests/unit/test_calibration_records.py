@@ -21,6 +21,8 @@ from hmrec.calibration.records import (
     value_text,
     within_text,
 )
+from hmrec.csv_records import read_rows
+from hmrec.paths import get_paths
 from hmrec.platform_fields import PLATFORM_COLUMNS, PlatformFields
 
 COMMIT = "0123456789abcdef0123456789abcdef01234567"
@@ -115,3 +117,35 @@ def test_a_table_with_another_header_is_not_appended_to(tmp_path: Path) -> None:
     with pytest.raises(ValueError, match="expected"):
         append_comparisons(path, [Measurement("A", "r1", "rows", 1, 1)], IDENTITY)
     assert path.read_text(encoding="utf-8") == "item,scope\nA,r1\n"  # nothing was written
+
+
+def test_the_committed_calibration_tables_have_the_fixed_headers_and_say_what_they_ran_on() -> None:
+    # results/m10_calibration/ holds the calibration of week V4 in the arm64 container
+    # (2026-11-22). read_rows fails on another header. Every row must name its run, a full
+    # commit, a verified code tree and the OpenMP runtime: a container result is only
+    # meaningful together with what it was computed on.
+    paths = get_paths()
+    tables = (
+        (paths.calibration_comparisons_file, COMPARISON_COLUMNS),
+        (paths.calibration_runs_file, RUN_COLUMNS),
+        (paths.calibration_repeatability_file, REPEAT_COLUMNS),
+    )
+    for path, columns in tables:
+        rows = read_rows(path, columns)
+        assert rows, f"{path} is empty or missing"
+        for row in rows:
+            assert row["run"] in ("run1", "run2")
+            assert len(row["git_commit"]) == 40 and row["git_dirty"] == "False"
+            assert row["image_commit"] == row["git_commit"]
+            assert len(row["code_tree_sha256"]) == 64
+            assert (row["os"], row["architecture"]) == ("linux", "aarch64")
+            # A process that computed something loaded an OpenMP runtime and names it. The
+            # comparison of two Ranker runs only reads files, so it may have loaded none.
+            if path != paths.calibration_repeatability_file:
+                assert row["openmp_library"] != "not loaded"
+    # The Ranker rows ran on the system OpenMP runtime the Dockerfile pins.
+    ranker_rows = [
+        row for row in read_rows(paths.calibration_runs_file, RUN_COLUMNS) if row["item"] == "D"
+    ]
+    assert ranker_rows
+    assert {row["openmp_version"] for row in ranker_rows} == {"libgomp1 14.2.0-19"}
