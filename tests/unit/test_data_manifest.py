@@ -68,8 +68,11 @@ def test_parse_dvc_listing_sorts_and_rejects_bad_entries() -> None:
         parse_dvc_listing(json.dumps([{**listing[0], "isdir": True}]))
     with pytest.raises(ValueError, match="folder or has no md5"):
         parse_dvc_listing(json.dumps([{"path": "x", "size": 1, "isdir": False}]))
-    with pytest.raises(ValueError, match="has no size"):
-        parse_dvc_listing(json.dumps([{**listing[0], "size": None}]))
+    with pytest.raises(ValueError, match="size that is not a number"):
+        parse_dvc_listing(json.dumps([{**listing[0], "size": "4"}]))
+    # For a file inside a tracked folder DVC may not know the size (null): the md5 decides.
+    without_size = parse_dvc_listing(json.dumps([{**listing[0], "size": None}]))
+    assert without_size == (TrackedFile("data/raw/b.csv", None, "b" * 32),)
     with pytest.raises(ValueError, match="expected a list"):
         parse_dvc_listing(json.dumps({"path": "x"}))
 
@@ -83,6 +86,13 @@ def test_build_entries_requires_the_file_dvc_tracks(tmp_path: Path) -> None:
     # The file on disk is not the one DVC recorded: no entry may be written for it.
     with pytest.raises(ValueError, match="DVC tracks"):
         build_entries(tmp_path, (TrackedFile("data/raw/a.csv", 3, "0" * 32),))
+    with pytest.raises(ValueError, match="DVC tracks"):
+        build_entries(tmp_path, (TrackedFile("data/raw/a.csv", 4, ABC_MD5),))
+    # Without a size from DVC the md5 alone decides.
+    without_size = (TrackedFile("data/raw/a.csv", None, ABC_MD5),)
+    assert build_entries(tmp_path, without_size)[0].size_bytes == 3
+    with pytest.raises(ValueError, match="DVC tracks"):
+        build_entries(tmp_path, (TrackedFile("data/raw/a.csv", None, "0" * 32),))
     with pytest.raises(FileNotFoundError):
         build_entries(tmp_path, (TrackedFile("data/raw/missing.csv", 3, ABC_MD5),))
 

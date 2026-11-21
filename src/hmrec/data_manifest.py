@@ -66,12 +66,14 @@ class TrackedFile:
 
     Attributes:
         path: Path relative to the repository root, with "/".
-        size_bytes: The size DVC recorded.
+        size_bytes: The size DVC recorded, or None: for a file inside a tracked
+            folder DVC does not always know it (the folder's record holds only
+            the md5 of each file).
         md5: The md5 DVC recorded.
     """
 
     path: str
-    size_bytes: int
+    size_bytes: int | None
     md5: str
 
 
@@ -125,11 +127,11 @@ def parse_dvc_listing(text: str) -> tuple[TrackedFile, ...]:
 
     Args:
         text: The JSON the command printed: a list with one object per file,
-            holding at least "path", "size", "md5" and "isdir".
+            holding at least "path", "size" (a number or null), "md5" and "isdir".
 
     Raises:
         ValueError: If the text is not such a list, an entry is a folder or has
-            no md5 or size, or a path appears twice.
+            no md5, a size is not a number, or a path appears twice.
     """
     parsed = json.loads(text)
     if not isinstance(parsed, list):
@@ -142,8 +144,8 @@ def parse_dvc_listing(text: str) -> tuple[TrackedFile, ...]:
         size = item.get("size")
         if item.get("isdir") or not _is_hex(item.get("md5"), MD5_LENGTH):
             raise ValueError(f"DVC listing: {path!r} is a folder or has no md5: {item!r}")
-        if isinstance(size, bool) or not isinstance(size, int):
-            raise ValueError(f"DVC listing: {path!r} has no size: {item!r}")
+        if size is not None and (isinstance(size, bool) or not isinstance(size, int)):
+            raise ValueError(f"DVC listing: {path!r} has a size that is not a number: {item!r}")
         if path in files:
             raise ValueError(f"DVC listing: {path!r} is listed twice")
         files[path] = TrackedFile(path=path, size_bytes=size, md5=item["md5"])
@@ -190,14 +192,15 @@ def build_entries(root: Path, tracked: Sequence[TrackedFile]) -> tuple[FileEntry
 
     Raises:
         FileNotFoundError: If a tracked file is not on disk.
-        ValueError: If a file's size or md5 is not the one DVC recorded: the file
-            on disk is then not the file DVC would upload, and a sha256 of it
-            would describe something else.
+        ValueError: If a file's md5 (or its size, where DVC recorded one) is not
+            the one DVC recorded: the file on disk is then not the file DVC
+            would upload, and a sha256 of it would describe something else.
     """
     entries: list[FileEntry] = []
     for file in tracked:
         entry = file_entry(root, file.path)
-        if (entry.size_bytes, entry.md5) != (file.size_bytes, file.md5):
+        same_size = file.size_bytes is None or file.size_bytes == entry.size_bytes
+        if not same_size or entry.md5 != file.md5:
             raise ValueError(
                 f"{file.path}: on disk size {entry.size_bytes} md5 {entry.md5}, but DVC "
                 f"tracks size {file.size_bytes} md5 {file.md5}; run `dvc status` first"
