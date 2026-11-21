@@ -66,6 +66,14 @@ read; the verdict was written by code to `results/t_phase_goals.csv`):
 3. **T1–T4 has been used once.** Any later change may only be compared and selected on V1–V4
    (`AGENTS.md` §3.2).
 
+## How this project was built
+
+The author designed the system, set the selection rules, reviewed every result and made every
+decision recorded in [`docs/decisions.md`](docs/decisions.md). Most of the code was written by
+Claude Code, working under the rules in [`AGENTS.md`](AGENTS.md). Commits that Claude made itself
+carry a `Co-Authored-By` trailer; commits made by the author carry none, also where they contain
+code that Claude wrote.
+
 ## Documents
 
 The only design reference is [`docs/proposal.md`](docs/proposal.md). Design changes are logged in
@@ -128,6 +136,13 @@ make format       # auto-format
 Do not `pip install` into `.venv`. New dependencies are added with `uv add <package>`
 (dev tools: `uv add --group dev <package>`), only after agreement (see AGENTS.md §3.4, §8).
 
+## Data
+
+The H&M competition data are **not included** in this repository. Download them from the Kaggle
+competition [H&M Personalized Fashion Recommendations](https://www.kaggle.com/competitions/h-and-m-personalized-fashion-recommendations)
+under the competition rules. The files under `tests/fixtures/` are made up and hold no row of the
+competition data.
+
 ## Data layout
 
 `data/` is not tracked by git. Put the files here:
@@ -170,3 +185,5 @@ The main entry point of each milestone. See proposal §11 for the milestones and
 | M6 | Features per fold | `scripts/m6_build_features.py --fold F1` |
 | M7 | Ranker HPO on V1–V4 | `scripts/m7_ranker_hpo.py --stage ...` |
 | M8 | Final evaluation on T1–T4 | `scripts/m8_final_eval.py --stage ...` |
+
+Copyright (c) 2026 Haokun Liu. All rights reserved.
