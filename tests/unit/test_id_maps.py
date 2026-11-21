@@ -14,14 +14,14 @@ from hmrec.data.id_maps import (
     write_id_map,
 )
 
-# Deliberately unsorted. Sorted order: 0108775015, 0108775044, 0951111001.
-ARTICLE_IDS = ["0951111001", "0108775015", "0108775044"]
+# Deliberately unsorted. Sorted order: 0100000015, 0100000044, 0951111001.
+ARTICLE_IDS = ["0951111001", "0100000015", "0100000044"]
 
 
 def test_article_map_numbers_sorted_ids_and_keeps_leading_zeros() -> None:
     article_map = build_article_id_map(pl.Series(ARTICLE_IDS))
     assert article_map.schema == {"article_idx": pl.Int32, "article_id": pl.String}
-    assert article_map.rows() == [(0, "0108775015"), (1, "0108775044"), (2, "0951111001")]
+    assert article_map.rows() == [(0, "0100000015"), (1, "0100000044"), (2, "0951111001")]
 
 
 def test_customer_map_ignores_input_order() -> None:
@@ -41,16 +41,16 @@ def test_null_ids_raise() -> None:
         build_customer_id_map(pl.Series(["a", None]))
 
 
-@pytest.mark.parametrize("bad_id", ["108775015", "01087750150", "01087750x5"])
+@pytest.mark.parametrize("bad_id", ["100000015", "01000000150", "01000000x5"])
 def test_article_id_must_be_ten_digits(bad_id: str) -> None:
-    # "108775015" is what you get when the CSV is read as an integer.
+    # "100000015" is what you get when the CSV is read as an integer.
     with pytest.raises(ValueError, match="10-digit string"):
-        build_article_id_map(pl.Series(["0108775015", bad_id]))
+        build_article_id_map(pl.Series(["0100000015", bad_id]))
 
 
 def test_round_trip_keeps_row_order_and_duplicates() -> None:
     article_map = build_article_id_map(pl.Series(ARTICLE_IDS))
-    frame = pl.DataFrame({"article_id": ["0951111001", "0108775015", "0951111001"], "x": [1, 2, 3]})
+    frame = pl.DataFrame({"article_id": ["0951111001", "0100000015", "0951111001"], "x": [1, 2, 3]})
 
     encoded = article_ids_to_idx(frame, article_map)
     assert encoded.columns == ["article_idx", "x"]
@@ -71,7 +71,7 @@ def test_customer_round_trip() -> None:
 
 def test_unknown_id_raises() -> None:
     article_map = build_article_id_map(pl.Series(ARTICLE_IDS))
-    frame = pl.DataFrame({"article_id": ["0108775015", "0999999999"]})
+    frame = pl.DataFrame({"article_id": ["0100000015", "0999999999"]})
     with pytest.raises(ValueError, match=r"1 article_id values are not in the ID map.*0999999999"):
         article_ids_to_idx(frame, article_map)
 
