@@ -1,0 +1,73 @@
+# M10 calibration: week V4 in a Linux container, compared with the stage-1 records
+# (docs/mlops.md §8.3, docs/m10_calibration_plan.md). Read by
+# hmrec.config.load_calibration_config; used only by hmrec.calibration and
+# scripts/m10_calibrate.py.
+#
+# NOTHING here changes a result of the system. The recall and Ranker configurations
+# come only from configs/locks/. This file says which week is measured, which files
+# the measurement must read, and what a difference is compared with.
+
+# The week whose candidates, ranking and metrics are compared.
+fold: V4
+# The week of the R6 fine-tuning step (item C2): the recorded model after V2 is
+# fine-tuned on this week, and the result predicts `fold`.
+fine_tune_fold: V3
+# Names of the container runs. The second run repeats items B, C2 and D in fresh
+# containers to see whether two container runs give the same bits.
+runs: [run1, run2]
+# The stage-1 Ranker record the container model is compared with: the M8 rehearsal
+# trained the locked configuration on V4 to exactly 500 trees and was bit-identical
+# to the M7 record (results/m8_rehearsal_check.csv).
+ranker_reference_area: m8_rehearsal
+# The Ranker metrics that are compared, in the column order of the stage-1 metric
+# tables (results/m8_rehearsal_metrics.csv). The first one is the main metric.
+metrics: [map@12, recall@12, ndcg@12]
+
+# sha256 of every input, checked inside the container BEFORE an item reads it; a
+# mismatch stops the item. Paths are relative to data/processed/ and to artifacts/.
+# The sample hashes are the ones the passed M8 rehearsal trained on
+# (results/m8_rehearsal_check.csv); the others were computed on the laptop on
+# 2026-11-21 (docs/m10_calibration_plan.md §3) and 2026-11-22 (queries/V3).
+# R6 model files are not listed: the chain code checks them against
+# results/m6_twotower_chain.csv and the twotower lock before loading.
+inputs:
+  processed:
+    transactions.parquet: 67391a1e9f7f6ac6902a358c192b5ee4004a2b0261710535f280b72f73e75315
+    articles.parquet: 515d85638a2ae0f6d430ef9be540f934ba579abb2c0f67362e7c699c546c77df
+    customers.parquet: 8995d79e2a2c86499acd934d0af0ccb79db5ae7fe85e430ae1b8db5414aefa39
+    metadata.json: da0a6023af36d02014a4df2feb7ee369bcb50745311bb9550b854cf3e4ec017c
+  artifacts:
+    queries/V3.parquet: 4d5428f05b41e3b6eb73f90f2a50014c9f90884eac5b9dd1d4271c0ca3b940e0
+    queries/V4.parquet: 8dc76f9100391f887dba2964cd302f9b90752a9d001f7aab3e87d70a3b2fd104
+    labels/V4.parquet: 32af63ff461ccd93d6f392bdc9583b259beb4ba3e15f37d5b7bd5827981c58b6
+    features/V4/features.json: f5c769eb58016a799f7062d756f229b1a972a395bb98d023735c2545195ee1f1
+    features/category_codes.json: 049accdf849d05b9bf5c6726225c50a9e2197d2923cffcf6db219ac1a2484dff
+    ranker/samples/full/F4/r40.parquet: 98f98abf212c751de3eaa5cdb2331b6d2adc486acde3abed878d6bcd961b2a47
+    ranker/samples/full/V1/r40.parquet: 914e7ffa8272e09a03135334330cb8217019aed2ada3f29eaa0a652c4f725d79
+    ranker/samples/full/V2/r40.parquet: b68b799c9dd5ea0346d25d285cedc25c44554fc9156fbfafc36d3ad8b62041cb
+    ranker/samples/full/V3/r40.parquet: b6662a1a1bd2f5f94fa3ee5111d99a64f9c9494eecabeb909164d4d029ad0284
+
+# sha256 of the stage-1 candidates of `fold` the container's candidates are compared
+# with (computed on the laptop on 2026-11-21). Checked before a comparison reads them.
+references:
+  candidates/V4/r1_popularity.parquet: aea2e4f234960cd53c07b2baab8d74fd1c37c00a66155a64e6810d9d7cad32b0
+  candidates/V4/r2_repurchase.parquet: f23e3ea4c0c5fe3a1543e89c36ba50267c52ffb74d15c78dd0ce7a6bdf4e9721
+  candidates/V4/r3_sibling.parquet: 28a5db10b34e7b8e9ad7e89485cbbeb16278d38e0d2e340ee3a56a8df4b3e1a7
+  candidates/V4/r4_itemcf.parquet: 8a5a629186f8d4c27a8fb143703fc1739969bfe76ec9f9bf62ebb9a1be4b9d3b
+  candidates/V4/r5_wals.parquet: cc047f0cac98d70d69a726aa257c4dc1a093bb5a1981b4252d66bbd1f625f1f9
+  candidates/V4/r6_twotower.parquet: f243ee8a329d4d45b5a4447af4b32e203016e905dd3b8db3ddd751f0d4f18c1d
+
+# The PROVISIONAL tolerance of docs/mlops.md §8.3, copied here so that every
+# comparison row can say "inside" or "outside" of it. These numbers are NOT a
+# decision: the user confirms or changes each of them after the calibration, and
+# the decision is recorded in docs/decisions.md. A row outside of them stops
+# nothing and tunes nothing; it is reported.
+provisional_tolerance:
+  # R5 and R6: share of the recorded (customer, article) pairs that must be present.
+  min_recorded_pair_share: 0.99
+  # Deduplicated candidates of the week: allowed relative difference of the count.
+  max_count_relative_difference: 0.01
+  # Recall of a channel and union recall: allowed relative difference.
+  max_recall_relative_difference: 0.01
+  # MAP@12 of a single week: allowed relative difference.
+  max_map_relative_difference: 0.01

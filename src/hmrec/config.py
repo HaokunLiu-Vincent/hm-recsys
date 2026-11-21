@@ -3095,3 +3095,133 @@ def parse_t_eval_config(raw: Mapping[str, Any]) -> TEvalConfig:
 def load_t_eval_config(path: Path) -> TEvalConfig:
     """Read and validate configs/m9_t_eval.yaml."""
     return parse_t_eval_config(load_yaml(path))
+
+
+# ---------------------------------------------------------------- m10_calibration.yaml
+
+SHA256_HEX_LENGTH = 64
+
+
+@dataclass(frozen=True)
+class CalibrationTolerance:
+    """The provisional tolerance of docs/mlops.md §8.3 (not a decision; see the YAML file).
+
+    Attributes:
+        min_recorded_pair_share: R5 / R6: smallest share of the recorded
+            (customer, article) pairs that must be present (0.99).
+        max_count_relative_difference: Largest relative difference of the
+            number of deduplicated candidates (0.01).
+        max_recall_relative_difference: Largest relative difference of a
+            channel's recall and of the union recall (0.01).
+        max_map_relative_difference: Largest relative difference of MAP@12 of
+            one week (0.01).
+    """
+
+    min_recorded_pair_share: float
+    max_count_relative_difference: float
+    max_recall_relative_difference: float
+    max_map_relative_difference: float
+
+
+@dataclass(frozen=True)
+class CalibrationConfig:
+    """Settings from configs/m10_calibration.yaml (docs/m10_calibration_plan.md).
+
+    Nothing here changes a result of the system; see the YAML file.
+
+    Attributes:
+        fold: The week that is measured and compared, e.g. "V4".
+        fine_tune_fold: The week of the R6 fine-tuning step, e.g. "V3".
+        runs: Names of the container runs, e.g. ("run1", "run2").
+        ranker_reference_area: The results area of the stage-1 Ranker record
+            ("m8_rehearsal").
+        metrics: The Ranker metrics that are compared, the main metric first.
+        processed_sha256: File name under data/processed/ -> its sha256.
+        artifact_sha256: Path under artifacts/ -> its sha256 (inputs).
+        reference_sha256: Path under artifacts/ -> its sha256 (stage-1 outputs
+            the container results are compared with).
+        tolerance: The provisional tolerance.
+    """
+
+    fold: str
+    fine_tune_fold: str
+    runs: tuple[str, ...]
+    ranker_reference_area: str
+    metrics: tuple[str, ...]
+    processed_sha256: dict[str, str]
+    artifact_sha256: dict[str, str]
+    reference_sha256: dict[str, str]
+    tolerance: CalibrationTolerance
+
+
+def _get_sha256_mapping(raw: Mapping[str, Any], key: str, where: str) -> dict[str, str]:
+    """A mapping file path -> sha256 (64 lower-case hexadecimal characters); not empty."""
+    mapping = get_mapping(raw, key, where)
+    if not mapping:
+        raise ValueError(f"{where}.{key} must list at least one file")
+    result: dict[str, str] = {}
+    for name in mapping:
+        value = get_str(mapping, name, f"{where}.{key}")
+        is_hex = set(value) <= set("0123456789abcdef")
+        if len(value) != SHA256_HEX_LENGTH or not is_hex:
+            raise ValueError(f"{where}.{key}.{name} must be a sha256 in hexadecimal, got {value!r}")
+        result[str(name)] = value
+    return result
+
+
+def parse_calibration_config(raw: Mapping[str, Any]) -> CalibrationConfig:
+    """Build a CalibrationConfig from the parsed content of configs/m10_calibration.yaml.
+
+    Raises:
+        ValueError: If a key is missing or unknown, a hash is not a sha256, a
+            share is outside (0, 1), or the run names repeat.
+    """
+    where = "m10_calibration"
+    top_keys = {
+        "fold",
+        "fine_tune_fold",
+        "runs",
+        "ranker_reference_area",
+        "metrics",
+        "inputs",
+        "references",
+        "provisional_tolerance",
+    }
+    check_keys(raw, top_keys, where)
+    inputs = get_mapping(raw, "inputs", where)
+    check_keys(inputs, {"processed", "artifacts"}, f"{where}.inputs")
+    tolerance_where = f"{where}.provisional_tolerance"
+    tolerance_raw = get_mapping(raw, "provisional_tolerance", where)
+    tolerance_keys = {
+        "min_recorded_pair_share",
+        "max_count_relative_difference",
+        "max_recall_relative_difference",
+        "max_map_relative_difference",
+    }
+    check_keys(tolerance_raw, tolerance_keys, tolerance_where)
+    tolerance = CalibrationTolerance(
+        **{name: get_float(tolerance_raw, name, tolerance_where) for name in sorted(tolerance_keys)}
+    )
+    for name in sorted(tolerance_keys):
+        value = getattr(tolerance, name)
+        if not 0 < value < 1:
+            raise ValueError(f"{tolerance_where}.{name} must be in (0, 1), got {value}")
+    runs = get_str_list(raw, "runs", where)
+    if not runs or len(set(runs)) != len(runs):
+        raise ValueError(f"{where}.runs must be distinct names and not empty, got {runs}")
+    return CalibrationConfig(
+        fold=get_str(raw, "fold", where),
+        fine_tune_fold=get_str(raw, "fine_tune_fold", where),
+        runs=runs,
+        ranker_reference_area=get_str(raw, "ranker_reference_area", where),
+        metrics=get_str_list(raw, "metrics", where),
+        processed_sha256=_get_sha256_mapping(inputs, "processed", f"{where}.inputs"),
+        artifact_sha256=_get_sha256_mapping(inputs, "artifacts", f"{where}.inputs"),
+        reference_sha256=_get_sha256_mapping(raw, "references", where),
+        tolerance=tolerance,
+    )
+
+
+def load_calibration_config(path: Path) -> CalibrationConfig:
+    """Read and validate configs/m10_calibration.yaml."""
+    return parse_calibration_config(load_yaml(path))

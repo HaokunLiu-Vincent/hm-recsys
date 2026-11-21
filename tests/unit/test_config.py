@@ -15,8 +15,10 @@ from hmrec.config import (
     RANKER_DATASET_PARAM_KEYS,
     RANKER_TRAIN_PARAM_KEYS,
     ActivePoolConfig,
+    CalibrationTolerance,
     RankerTunedParams,
     load_base_config,
+    load_calibration_config,
     load_candidate_run_config,
     load_catalog_config,
     load_diagnostics_config,
@@ -35,6 +37,7 @@ from hmrec.config import (
     load_wals_config,
     load_yaml,
     parse_base_config,
+    parse_calibration_config,
     parse_candidate_run_config,
     parse_catalog_config,
     parse_diagnostics_config,
@@ -786,3 +789,56 @@ def test_m8_diagnostics_config_refuses_missing_and_unknown_keys() -> None:
     del raw["bootstrap"]["seed"]
     with pytest.raises(ValueError, match="seed"):
         parse_diagnostics_config(raw)
+
+
+# ---------------------------------------------------------------- m10_calibration.yaml
+
+
+def _calibration_raw() -> dict[str, Any]:
+    return load_yaml(REPO_CONFIGS / "m10_calibration.yaml")
+
+
+def test_repo_calibration_config() -> None:
+    config = load_calibration_config(REPO_CONFIGS / "m10_calibration.yaml")
+    assert (config.fold, config.fine_tune_fold, config.runs) == ("V4", "V3", ("run1", "run2"))
+    assert config.ranker_reference_area == "m8_rehearsal"
+    assert config.metrics == ("map@12", "recall@12", "ndcg@12")
+    # The provisional tolerance of docs/mlops.md 8.3.
+    assert config.tolerance == CalibrationTolerance(
+        min_recorded_pair_share=0.99,
+        max_count_relative_difference=0.01,
+        max_recall_relative_difference=0.01,
+        max_map_relative_difference=0.01,
+    )
+    assert sorted(config.processed_sha256) == [
+        "articles.parquet",
+        "customers.parquet",
+        "metadata.json",
+        "transactions.parquet",
+    ]
+    assert len(config.reference_sha256) == 6  # the six channels of V4
+    assert "ranker/samples/full/V3/r40.parquet" in config.artifact_sha256
+    assert all(len(value) == 64 for value in config.artifact_sha256.values())
+
+
+def test_calibration_config_errors() -> None:
+    raw = _calibration_raw()
+    raw["inputs"]["processed"]["metadata.json"] = "not-a-hash"
+    with pytest.raises(ValueError, match="must be a sha256 in hexadecimal"):
+        parse_calibration_config(raw)
+    raw = _calibration_raw()
+    raw["provisional_tolerance"]["min_recorded_pair_share"] = 1.5
+    with pytest.raises(ValueError, match=r"must be in \(0, 1\)"):
+        parse_calibration_config(raw)
+    raw = _calibration_raw()
+    raw["runs"] = ["run1", "run1"]
+    with pytest.raises(ValueError, match="must be distinct names"):
+        parse_calibration_config(raw)
+    raw = _calibration_raw()
+    raw["references"] = {}
+    with pytest.raises(ValueError, match="must list at least one file"):
+        parse_calibration_config(raw)
+    raw = _calibration_raw()
+    raw["tolerance"] = raw.pop("provisional_tolerance")
+    with pytest.raises(ValueError):
+        parse_calibration_config(raw)

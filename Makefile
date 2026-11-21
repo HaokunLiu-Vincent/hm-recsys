@@ -7,7 +7,7 @@ export OMP_NUM_THREADS := 6
 
 .PHONY: setup format lint test-fast test test-torch-side test-lightgbm-side
 .PHONY: image-require-clean image-build image-info image-lint image-test-fast image-test
-.PHONY: image-test-torch-side image-test-lightgbm-side
+.PHONY: image-test-torch-side image-test-lightgbm-side image-calibrate
 
 ## setup: create / update .venv from uv.lock (includes the dev group)
 setup:
@@ -119,3 +119,29 @@ image-test-torch-side:
 ## image-test-lightgbm-side: the LightGBM-side half of `make test` inside the image
 image-test-lightgbm-side:
 	$(IMAGE_RUN) make test-lightgbm-side
+
+# ---------------------------------------------------------------- M10 calibration
+# docs/mlops.md §8.3, docs/m10_calibration_plan.md §2. One calibration item per container.
+#
+#   make image-calibrate ARGS="--run run1 --item recall --channel r1_popularity"
+#
+# The mounts are fixed here on purpose. Inputs (data/processed, artifacts) are mounted
+# READ-ONLY, so no stage-1 file can be written whatever the code does. The only writable
+# folders are the two calibration folders. 6 CPUs = num_threads of configs/base.yaml;
+# 12 GiB = the project's memory budget: a process above it is stopped by the kernel.
+CALIBRATION_CPUS ?= 6
+CALIBRATION_MEMORY ?= 12g
+CALIBRATION_ARTIFACTS = $(CURDIR)/artifacts/m10_calibration
+CALIBRATION_RESULTS = $(CURDIR)/results/m10_calibration
+ARGS ?=
+
+## image-calibrate: run one calibration item in a container (ARGS = arguments of scripts/m10_calibrate.py)
+image-calibrate:
+	@mkdir -p "$(CALIBRATION_ARTIFACTS)" "$(CALIBRATION_RESULTS)"
+	docker run --rm $(IMAGE_PLATFORM_FLAG) \
+		--cpus $(CALIBRATION_CPUS) --memory $(CALIBRATION_MEMORY) \
+		--mount "type=bind,src=$(CURDIR)/data/processed,dst=/app/data/processed,readonly" \
+		--mount "type=bind,src=$(CURDIR)/artifacts,dst=/app/artifacts,readonly" \
+		--mount "type=bind,src=$(CALIBRATION_ARTIFACTS),dst=/app/artifacts/m10_calibration" \
+		--mount "type=bind,src=$(CALIBRATION_RESULTS),dst=/app/results/m10_calibration" \
+		$(IMAGE) python scripts/m10_calibrate.py $(ARGS)
