@@ -100,12 +100,17 @@ def test_the_blas_of_torch_on_this_platform() -> None:
     threads = torch.get_num_threads()
     before = _pools()
     if torch_blas:
-        # Linux arm64: torch brings an OpenBLAS file. Inside the block it runs on one
-        # thread, torch's OpenMP thread count is unchanged, and no other BLAS is touched.
+        # Linux arm64: torch brings an OpenBLAS file, built on OpenMP. Inside the block
+        # torch's OpenMP thread count is unchanged and no other BLAS is touched. MEASURED
+        # 2026-11-22: the library does NOT stay at one thread. It takes its thread count
+        # from OpenMP, so it reports the OpenMP count again as soon as that is set back.
+        # This is why the candidate "BLAS of torch on one thread, OpenMP unchanged" could
+        # not make a fine-tune repeatable: the state it asks for does not exist here. If a
+        # later torch build changes this, the assertion below fails and says so.
         with torch_blas_one_thread() as limited:
             inside = _pools()
             assert limited == torch_blas
-            assert all(inside[path] == 1 for path in torch_blas)
+            assert all(inside[path] == threads for path in torch_blas)
             assert torch.get_num_threads() == threads
             others = [path for path in inside if path not in torch_blas and "gomp" not in path]
             assert all(inside[path] == before[path] for path in others)

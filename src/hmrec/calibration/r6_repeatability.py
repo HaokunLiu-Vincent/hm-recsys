@@ -45,7 +45,7 @@ from hmrec.config import (
 from hmrec.csv_records import append_row
 from hmrec.git_state import git_state
 from hmrec.logging_utils import get_logger
-from hmrec.paths import ProjectPaths
+from hmrec.paths import PROJECT_ROOT, ProjectPaths
 from hmrec.platform_fields import read_platform_fields
 from hmrec.platform_report import read_machine_info
 from hmrec.recall.locked import load_locked_recall
@@ -337,7 +337,9 @@ def run_worker(
         mean_train_loss=result.mean_train_loss,
         alarm_loss=result.alarm_loss,
         threads=threads,
-        platform=read_platform_fields(paths.project_root).columns(),
+        # The code that runs is the code of this package (in an image: /app, whose tree hash
+        # is verified), whatever folder `paths` takes its configs from.
+        platform=read_platform_fields(PROJECT_ROOT).columns(),
     )
     state_file.with_suffix(".json").write_text(json.dumps(asdict(summary)), encoding="utf-8")
     LOGGER.info(

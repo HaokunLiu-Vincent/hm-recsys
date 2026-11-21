@@ -88,6 +88,13 @@ def torch_blas_one_thread() -> Iterator[list[str]]:
     process (measured 2026-11-22: torch.get_num_threads() went from 6 to 1). So
     the OpenMP thread count is set back to its value right after the limit.
 
+    MEASURED RESULT (arm64 image, 2026-11-22): this setting cannot do what its
+    name says there. Once the OpenMP thread count is back at 6, the library
+    reports 6 threads again: an OpenBLAS built on OpenMP takes its thread count
+    from OpenMP, so "BLAS on one thread, OpenMP on six" is not a state this
+    library can be in. The block is kept because it was a candidate that was
+    tried, and its recorded thread counts show why it changed nothing.
+
     Yields:
         The file paths of the limited libraries.
 
