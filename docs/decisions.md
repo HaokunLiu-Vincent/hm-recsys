@@ -1362,3 +1362,10 @@ The evaluation recorded in the entry above was run once. Code, rehearsal, formal
 - **Where the Private score would stand**: 3 of the 2,954 teams of the final leaderboard have a higher score, so 0.03588 would be at position 4, the same place as the LightGBM submission: **late submission, not an official rank**.
 - **What it does not change**: the locked system, its T1–T4 result and its Kaggle scores stay as they are. AGENTS.md §3.2 still holds: later changes are compared and selected on V1–V4 only; neither the T weeks nor a Kaggle score may be used for it.
 - **Documents updated**: `docs/final_report.md` and `docs/final_report.zh-CN.md` (new §10 on stage 2; one paragraph and item 3 in §1, §7.2 item 5, §9.2), `README.md` (stage-2 lines).
+
+## 2026-11-21 Before publication: the table of other models' autonomous runs is removed from the final report
+
+- **What**: before the repository is made public, the block "Context: autonomous runs by other models" was removed from §4.6 of `docs/final_report.md` and `docs/final_report.zh-CN.md`: the table with the scores of three runs in which a model worked on its own, the paragraph that introduced it, and the four notes under it. The section numbering is unchanged.
+- **Why**: the scores in that table were reported verbally by the user. The conditions of those runs (number of submissions, time budget, prompts, dates) were not recorded, and their code is not in this repository, so the scores cannot be traced to a file under `results/` or to this log. Every other number of the report can be traced.
+- **What stays**: the table remains in the git history (it is in the commits from 2026-11-19 up to tag `v0.2`). `README.md`, `docs/proposal.md` and this log were searched: none of them mentions those scores.
+- **Nothing else changes**: the scores of this project's two late submissions (§4.6, §10.6 of the report) and every other result stay as they are.
