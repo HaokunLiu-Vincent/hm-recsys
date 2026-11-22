@@ -1,0 +1,106 @@
+week,anchor,kind,quantity,subject,value,record,relative_difference,threshold,inside,record_source,git_commit,recorded_at
+V1,2020-07-29,acceptance,recall,r1_popularity,0.07813545685962682,0.07813545685962682,0.0,0.01,True,results/m6_candidates.csv,5325fd2a5c07c8ef8f1ecadefac5146817b69e8e,2026-11-22T21:47:15
+V1,2020-07-29,acceptance,recall,r2_repurchase,0.03872368805281572,0.03872368805281572,0.0,0.01,True,results/m6_candidates.csv,5325fd2a5c07c8ef8f1ecadefac5146817b69e8e,2026-11-22T21:47:15
+V1,2020-07-29,acceptance,recall,r3_sibling,0.03408442021770993,0.03408442021770993,0.0,0.01,True,results/m6_candidates.csv,5325fd2a5c07c8ef8f1ecadefac5146817b69e8e,2026-11-22T21:47:15
+V1,2020-07-29,acceptance,recall,r4_itemcf,0.09065414366332576,0.09065414366332576,0.0,0.01,True,results/m6_candidates.csv,5325fd2a5c07c8ef8f1ecadefac5146817b69e8e,2026-11-22T21:47:15
+V1,2020-07-29,acceptance,recall,r5_wals,0.10148852293741242,0.10147702102982104,0.00011334494720738762,0.01,True,results/m6_candidates.csv,5325fd2a5c07c8ef8f1ecadefac5146817b69e8e,2026-11-22T21:47:15
+V1,2020-07-29,acceptance,recall,r6_twotower,0.15527738046802192,0.15527738046802192,0.0,0.01,True,results/m6_candidates.csv,5325fd2a5c07c8ef8f1ecadefac5146817b69e8e,2026-11-22T21:47:15
+V1,2020-07-29,acceptance,recall,union,0.2543905967171144,0.2543785197141435,4.747650463754564e-05,0.01,True,results/m6_candidates.csv,5325fd2a5c07c8ef8f1ecadefac5146817b69e8e,2026-11-22T21:47:15
+V1,2020-07-29,acceptance,map@12,,0.030108223383130718,0.030112271332103004,0.00013442854999684754,0.01,True,results/v_phase_metrics.csv,5325fd2a5c07c8ef8f1ecadefac5146817b69e8e,2026-11-22T21:47:15
+V1,2020-07-29,reported,rrf_baseline_map@12,,0.018510511085857956,0.018510960720404597,2.429017885305562e-05,,,results/v_phase_metrics.csv,5325fd2a5c07c8ef8f1ecadefac5146817b69e8e,2026-11-22T21:47:15
+V1,2020-07-29,reported,deduplicated_candidates,union,25226168.0,25226147.0,8.324695800749913e-07,,,results/m6_candidates.csv,5325fd2a5c07c8ef8f1ecadefac5146817b69e8e,2026-11-22T21:47:15
+V1,2020-07-29,reported,queries,,82802.0,82802.0,0.0,,,results/v_phase_metrics.csv,5325fd2a5c07c8ef8f1ecadefac5146817b69e8e,2026-11-22T21:47:15
+V1,2020-07-29,structural,feature_rows_minus_deduplicated_candidates,,0.0,0.0,0.0,,True,the feature step of the same tick (weeks/{anchor}/features/step.json),5325fd2a5c07c8ef8f1ecadefac5146817b69e8e,2026-11-22T21:47:15
+V1,2020-07-29,structural,duplicate_keys,,0.0,0.0,0.0,,True,the feature step of the same tick (weeks/{anchor}/features/step.json),5325fd2a5c07c8ef8f1ecadefac5146817b69e8e,2026-11-22T21:47:15
+V2,2020-08-05,acceptance,recall,r1_popularity,0.0915571149896121,0.0915571149896121,0.0,0.01,True,results/m6_candidates.csv,5325fd2a5c07c8ef8f1ecadefac5146817b69e8e,2026-11-22T22:19:57
+V2,2020-08-05,acceptance,recall,r2_repurchase,0.039979417601450754,0.039979417601450754,0.0,0.01,True,results/m6_candidates.csv,5325fd2a5c07c8ef8f1ecadefac5146817b69e8e,2026-11-22T22:19:57
+V2,2020-08-05,acceptance,recall,r3_sibling,0.034141945606937875,0.034141945606937875,0.0,0.01,True,results/m6_candidates.csv,5325fd2a5c07c8ef8f1ecadefac5146817b69e8e,2026-11-22T22:19:57
+V2,2020-08-05,acceptance,recall,r4_itemcf,0.09138932037045529,0.09138932037045529,0.0,0.01,True,results/m6_candidates.csv,5325fd2a5c07c8ef8f1ecadefac5146817b69e8e,2026-11-22T22:19:57
+V2,2020-08-05,acceptance,recall,r5_wals,0.10525532639708611,0.10527203025768236,0.00015867330149676537,0.01,True,results/m6_candidates.csv,5325fd2a5c07c8ef8f1ecadefac5146817b69e8e,2026-11-22T22:19:57
+V2,2020-08-05,acceptance,recall,r6_twotower,0.16676642681084564,0.16681631894421176,0.00029908424836304484,0.01,True,results/m6_candidates.csv,5325fd2a5c07c8ef8f1ecadefac5146817b69e8e,2026-11-22T22:19:57
+V2,2020-08-05,acceptance,recall,union,0.27540462707921964,0.2754150163900527,3.772238336622617e-05,0.01,True,results/m6_candidates.csv,5325fd2a5c07c8ef8f1ecadefac5146817b69e8e,2026-11-22T22:19:57
+V2,2020-08-05,acceptance,map@12,,0.031274626042917315,0.031332322343837385,0.001841430720867634,0.01,True,results/v_phase_metrics.csv,5325fd2a5c07c8ef8f1ecadefac5146817b69e8e,2026-11-22T22:19:57
+V2,2020-08-05,reported,rrf_baseline_map@12,,0.01907058582499292,0.019064142667827806,0.0003379725633288464,,,results/v_phase_metrics.csv,5325fd2a5c07c8ef8f1ecadefac5146817b69e8e,2026-11-22T22:19:57
+V2,2020-08-05,reported,deduplicated_candidates,union,22935908.0,22935793.0,5.013997117954456e-06,,,results/m6_candidates.csv,5325fd2a5c07c8ef8f1ecadefac5146817b69e8e,2026-11-22T22:19:57
+V2,2020-08-05,reported,queries,,74833.0,74833.0,0.0,,,results/v_phase_metrics.csv,5325fd2a5c07c8ef8f1ecadefac5146817b69e8e,2026-11-22T22:19:57
+V2,2020-08-05,structural,feature_rows_minus_deduplicated_candidates,,0.0,0.0,0.0,,True,the feature step of the same tick (weeks/{anchor}/features/step.json),5325fd2a5c07c8ef8f1ecadefac5146817b69e8e,2026-11-22T22:19:57
+V2,2020-08-05,structural,duplicate_keys,,0.0,0.0,0.0,,True,the feature step of the same tick (weeks/{anchor}/features/step.json),5325fd2a5c07c8ef8f1ecadefac5146817b69e8e,2026-11-22T22:19:57
+V3,2020-08-12,acceptance,recall,r1_popularity,0.08153861671828519,0.08153861671828519,0.0,0.01,True,results/m6_candidates.csv,5325fd2a5c07c8ef8f1ecadefac5146817b69e8e,2026-11-22T22:51:01
+V3,2020-08-12,acceptance,recall,r2_repurchase,0.04288280431170523,0.04288280431170523,0.0,0.01,True,results/m6_candidates.csv,5325fd2a5c07c8ef8f1ecadefac5146817b69e8e,2026-11-22T22:51:01
+V3,2020-08-12,acceptance,recall,r3_sibling,0.034837750074099234,0.034837750074099234,0.0,0.01,True,results/m6_candidates.csv,5325fd2a5c07c8ef8f1ecadefac5146817b69e8e,2026-11-22T22:51:01
+V3,2020-08-12,acceptance,recall,r4_itemcf,0.0914883064650976,0.0914883064650976,0.0,0.01,True,results/m6_candidates.csv,5325fd2a5c07c8ef8f1ecadefac5146817b69e8e,2026-11-22T22:51:01
+V3,2020-08-12,acceptance,recall,r5_wals,0.10220198642074181,0.10218932712459866,0.00012388080535763276,0.01,True,results/m6_candidates.csv,5325fd2a5c07c8ef8f1ecadefac5146817b69e8e,2026-11-22T22:51:01
+V3,2020-08-12,acceptance,recall,r6_twotower,0.16251163461575038,0.16252551305259938,8.539235833394835e-05,0.01,True,results/m6_candidates.csv,5325fd2a5c07c8ef8f1ecadefac5146817b69e8e,2026-11-22T22:51:01
+V3,2020-08-12,acceptance,recall,union,0.2638750432352098,0.2638402268591854,0.00013196007462125476,0.01,True,results/m6_candidates.csv,5325fd2a5c07c8ef8f1ecadefac5146817b69e8e,2026-11-22T22:51:01
+V3,2020-08-12,acceptance,map@12,,0.035154518218712724,0.03502883086378067,0.0035881116164232104,0.01,True,results/v_phase_metrics.csv,5325fd2a5c07c8ef8f1ecadefac5146817b69e8e,2026-11-22T22:51:01
+V3,2020-08-12,reported,rrf_baseline_map@12,,0.020599506712651056,0.020603725892440503,0.0002047775150704652,,,results/v_phase_metrics.csv,5325fd2a5c07c8ef8f1ecadefac5146817b69e8e,2026-11-22T22:51:01
+V3,2020-08-12,reported,deduplicated_candidates,union,21965348.0,21965434.0,3.915242466868626e-06,,,results/m6_candidates.csv,5325fd2a5c07c8ef8f1ecadefac5146817b69e8e,2026-11-22T22:51:01
+V3,2020-08-12,reported,queries,,71094.0,71094.0,0.0,,,results/v_phase_metrics.csv,5325fd2a5c07c8ef8f1ecadefac5146817b69e8e,2026-11-22T22:51:01
+V3,2020-08-12,structural,feature_rows_minus_deduplicated_candidates,,0.0,0.0,0.0,,True,the feature step of the same tick (weeks/{anchor}/features/step.json),5325fd2a5c07c8ef8f1ecadefac5146817b69e8e,2026-11-22T22:51:01
+V3,2020-08-12,structural,duplicate_keys,,0.0,0.0,0.0,,True,the feature step of the same tick (weeks/{anchor}/features/step.json),5325fd2a5c07c8ef8f1ecadefac5146817b69e8e,2026-11-22T22:51:01
+V4,2020-08-19,acceptance,recall,r1_popularity,0.10998886166831044,0.10998886166831044,0.0,0.01,True,results/m6_candidates.csv,5325fd2a5c07c8ef8f1ecadefac5146817b69e8e,2026-11-22T23:25:04
+V4,2020-08-19,acceptance,recall,r2_repurchase,0.041286443877527515,0.041286443877527515,0.0,0.01,True,results/m6_candidates.csv,5325fd2a5c07c8ef8f1ecadefac5146817b69e8e,2026-11-22T23:25:04
+V4,2020-08-19,acceptance,recall,r3_sibling,0.03342640473048481,0.03342640473048481,0.0,0.01,True,results/m6_candidates.csv,5325fd2a5c07c8ef8f1ecadefac5146817b69e8e,2026-11-22T23:25:04
+V4,2020-08-19,acceptance,recall,r4_itemcf,0.08819439160024008,0.08819439160024008,0.0,0.01,True,results/m6_candidates.csv,5325fd2a5c07c8ef8f1ecadefac5146817b69e8e,2026-11-22T23:25:04
+V4,2020-08-19,acceptance,recall,r5_wals,0.09497285275770988,0.09497516644781423,2.4361000784597182e-05,0.01,True,results/m6_candidates.csv,5325fd2a5c07c8ef8f1ecadefac5146817b69e8e,2026-11-22T23:25:04
+V4,2020-08-19,acceptance,recall,r6_twotower,0.15998910923660442,0.1601091002641404,0.0007494329013031222,0.01,True,results/m6_candidates.csv,5325fd2a5c07c8ef8f1ecadefac5146817b69e8e,2026-11-22T23:25:04
+V4,2020-08-19,acceptance,recall,union,0.27608491348871184,0.2761626403149555,0.0002814530819774882,0.01,True,results/m6_candidates.csv,5325fd2a5c07c8ef8f1ecadefac5146817b69e8e,2026-11-22T23:25:04
+V4,2020-08-19,acceptance,map@12,,0.03469429058796567,0.034849701577104486,0.004459463986943173,0.01,True,results/v_phase_metrics.csv,5325fd2a5c07c8ef8f1ecadefac5146817b69e8e,2026-11-22T23:25:04
+V4,2020-08-19,reported,rrf_baseline_map@12,,0.01965094329051826,0.019661576090256858,0.00054079081401146,,,results/v_phase_metrics.csv,5325fd2a5c07c8ef8f1ecadefac5146817b69e8e,2026-11-22T23:25:04
+V4,2020-08-19,reported,deduplicated_candidates,union,22294800.0,22293247.0,6.966235111466715e-05,,,results/m6_candidates.csv,5325fd2a5c07c8ef8f1ecadefac5146817b69e8e,2026-11-22T23:25:04
+V4,2020-08-19,reported,queries,,72035.0,72035.0,0.0,,,results/v_phase_metrics.csv,5325fd2a5c07c8ef8f1ecadefac5146817b69e8e,2026-11-22T23:25:04
+V4,2020-08-19,structural,feature_rows_minus_deduplicated_candidates,,0.0,0.0,0.0,,True,the feature step of the same tick (weeks/{anchor}/features/step.json),5325fd2a5c07c8ef8f1ecadefac5146817b69e8e,2026-11-22T23:25:04
+V4,2020-08-19,structural,duplicate_keys,,0.0,0.0,0.0,,True,the feature step of the same tick (weeks/{anchor}/features/step.json),5325fd2a5c07c8ef8f1ecadefac5146817b69e8e,2026-11-22T23:25:04
+T1,2020-08-26,acceptance,recall,r1_popularity,0.12218736392741447,0.12218736392741447,0.0,0.01,True,results/t_phase_recall.csv,5325fd2a5c07c8ef8f1ecadefac5146817b69e8e,2026-11-22T23:55:51
+T1,2020-08-26,acceptance,recall,r2_repurchase,0.03743114887163799,0.03743114887163799,0.0,0.01,True,results/t_phase_recall.csv,5325fd2a5c07c8ef8f1ecadefac5146817b69e8e,2026-11-22T23:55:51
+T1,2020-08-26,acceptance,recall,r3_sibling,0.029858944906772895,0.029858944906772895,0.0,0.01,True,results/t_phase_recall.csv,5325fd2a5c07c8ef8f1ecadefac5146817b69e8e,2026-11-22T23:55:51
+T1,2020-08-26,acceptance,recall,r4_itemcf,0.08034400162612385,0.08034400162612385,0.0,0.01,True,results/t_phase_recall.csv,5325fd2a5c07c8ef8f1ecadefac5146817b69e8e,2026-11-22T23:55:51
+T1,2020-08-26,acceptance,recall,r5_wals,0.08407168226679902,0.0840654519701123,7.411245096192133e-05,0.01,True,results/t_phase_recall.csv,5325fd2a5c07c8ef8f1ecadefac5146817b69e8e,2026-11-22T23:55:51
+T1,2020-08-26,acceptance,recall,r6_twotower,0.17331374807297642,0.17326230234379905,0.0002969239614240279,0.01,True,results/t_phase_recall.csv,5325fd2a5c07c8ef8f1ecadefac5146817b69e8e,2026-11-22T23:55:51
+T1,2020-08-26,acceptance,recall,union,0.27873423754202065,0.2787729510835005,0.000138871225954175,0.01,True,results/t_phase_recall.csv,5325fd2a5c07c8ef8f1ecadefac5146817b69e8e,2026-11-22T23:55:51
+T1,2020-08-26,acceptance,map@12,,0.03496797125786336,0.03495997634509058,0.00022868759102887419,0.01,True,results/t_phase_metrics.csv,5325fd2a5c07c8ef8f1ecadefac5146817b69e8e,2026-11-22T23:55:51
+T1,2020-08-26,reported,rrf_baseline_map@12,,0.019150671238545136,0.019150532851010756,7.22630202806623e-06,,,results/t_phase_metrics.csv,5325fd2a5c07c8ef8f1ecadefac5146817b69e8e,2026-11-22T23:55:51
+T1,2020-08-26,reported,deduplicated_candidates,union,24593091.0,24592808.0,1.1507429326492526e-05,,,results/t_phase_recall.csv,5325fd2a5c07c8ef8f1ecadefac5146817b69e8e,2026-11-22T23:55:51
+T1,2020-08-26,reported,queries,,80253.0,80253.0,0.0,,,results/t_phase_metrics.csv,5325fd2a5c07c8ef8f1ecadefac5146817b69e8e,2026-11-22T23:55:51
+T1,2020-08-26,structural,feature_rows_minus_deduplicated_candidates,,0.0,0.0,0.0,,True,the feature step of the same tick (weeks/{anchor}/features/step.json),5325fd2a5c07c8ef8f1ecadefac5146817b69e8e,2026-11-22T23:55:51
+T1,2020-08-26,structural,duplicate_keys,,0.0,0.0,0.0,,True,the feature step of the same tick (weeks/{anchor}/features/step.json),5325fd2a5c07c8ef8f1ecadefac5146817b69e8e,2026-11-22T23:55:51
+T2,2020-09-02,acceptance,recall,r1_popularity,0.12471719023815464,0.12471719023815464,0.0,0.01,True,results/t_phase_recall.csv,5325fd2a5c07c8ef8f1ecadefac5146817b69e8e,2026-11-23T00:28:16
+T2,2020-09-02,acceptance,recall,r2_repurchase,0.042448610846944866,0.042448610846944866,0.0,0.01,True,results/t_phase_recall.csv,5325fd2a5c07c8ef8f1ecadefac5146817b69e8e,2026-11-23T00:28:16
+T2,2020-09-02,acceptance,recall,r3_sibling,0.029861735823442332,0.029861735823442332,0.0,0.01,True,results/t_phase_recall.csv,5325fd2a5c07c8ef8f1ecadefac5146817b69e8e,2026-11-23T00:28:16
+T2,2020-09-02,acceptance,recall,r4_itemcf,0.08580134646417162,0.08580134646417162,0.0,0.01,True,results/t_phase_recall.csv,5325fd2a5c07c8ef8f1ecadefac5146817b69e8e,2026-11-23T00:28:16
+T2,2020-09-02,acceptance,recall,r5_wals,0.09059844142100379,0.09058767058052654,0.00011889962958784711,0.01,True,results/t_phase_recall.csv,5325fd2a5c07c8ef8f1ecadefac5146817b69e8e,2026-11-23T00:28:16
+T2,2020-09-02,acceptance,recall,r6_twotower,0.18989192969513372,0.18999096528977955,0.0005212647585361653,0.01,True,results/t_phase_recall.csv,5325fd2a5c07c8ef8f1ecadefac5146817b69e8e,2026-11-23T00:28:16
+T2,2020-09-02,acceptance,recall,union,0.290757937719419,0.29076697919488065,3.109526221544432e-05,0.01,True,results/t_phase_recall.csv,5325fd2a5c07c8ef8f1ecadefac5146817b69e8e,2026-11-23T00:28:16
+T2,2020-09-02,acceptance,map@12,,0.04039873987575794,0.040270233134750935,0.0031911099341541222,0.01,True,results/t_phase_metrics.csv,5325fd2a5c07c8ef8f1ecadefac5146817b69e8e,2026-11-23T00:28:16
+T2,2020-09-02,reported,rrf_baseline_map@12,,0.021466463933415145,0.021470979686395476,0.0002103189070218453,,,results/t_phase_metrics.csv,5325fd2a5c07c8ef8f1ecadefac5146817b69e8e,2026-11-23T00:28:16
+T2,2020-09-02,reported,deduplicated_candidates,union,23186275.0,23186146.0,5.563667200232415e-06,,,results/t_phase_recall.csv,5325fd2a5c07c8ef8f1ecadefac5146817b69e8e,2026-11-23T00:28:16
+T2,2020-09-02,reported,queries,,75822.0,75822.0,0.0,,,results/t_phase_metrics.csv,5325fd2a5c07c8ef8f1ecadefac5146817b69e8e,2026-11-23T00:28:16
+T2,2020-09-02,structural,feature_rows_minus_deduplicated_candidates,,0.0,0.0,0.0,,True,the feature step of the same tick (weeks/{anchor}/features/step.json),5325fd2a5c07c8ef8f1ecadefac5146817b69e8e,2026-11-23T00:28:16
+T2,2020-09-02,structural,duplicate_keys,,0.0,0.0,0.0,,True,the feature step of the same tick (weeks/{anchor}/features/step.json),5325fd2a5c07c8ef8f1ecadefac5146817b69e8e,2026-11-23T00:28:16
+T3,2020-09-09,acceptance,recall,r1_popularity,0.11216570945156434,0.11216570945156434,0.0,0.01,True,results/t_phase_recall.csv,5325fd2a5c07c8ef8f1ecadefac5146817b69e8e,2026-11-23T01:01:08
+T3,2020-09-09,acceptance,recall,r2_repurchase,0.04388493305914449,0.04388493305914449,0.0,0.01,True,results/t_phase_recall.csv,5325fd2a5c07c8ef8f1ecadefac5146817b69e8e,2026-11-23T01:01:08
+T3,2020-09-09,acceptance,recall,r3_sibling,0.03162752758086454,0.03162752758086454,0.0,0.01,True,results/t_phase_recall.csv,5325fd2a5c07c8ef8f1ecadefac5146817b69e8e,2026-11-23T01:01:08
+T3,2020-09-09,acceptance,recall,r4_itemcf,0.08710922670255437,0.08710922670255437,0.0,0.01,True,results/t_phase_recall.csv,5325fd2a5c07c8ef8f1ecadefac5146817b69e8e,2026-11-23T01:01:08
+T3,2020-09-09,acceptance,recall,r5_wals,0.09478926147109061,0.09478926147109061,0.0,0.01,True,results/t_phase_recall.csv,5325fd2a5c07c8ef8f1ecadefac5146817b69e8e,2026-11-23T01:01:08
+T3,2020-09-09,acceptance,recall,r6_twotower,0.18891939076151454,0.18896321365561877,0.0002319123032279725,0.01,True,results/t_phase_recall.csv,5325fd2a5c07c8ef8f1ecadefac5146817b69e8e,2026-11-23T01:01:08
+T3,2020-09-09,acceptance,recall,union,0.2908894442185253,0.29092641687169074,0.0001270859262730374,0.01,True,results/t_phase_recall.csv,5325fd2a5c07c8ef8f1ecadefac5146817b69e8e,2026-11-23T01:01:08
+T3,2020-09-09,acceptance,map@12,,0.03961737340418822,0.03967282733592872,0.0013977811883924057,0.01,True,results/t_phase_metrics.csv,5325fd2a5c07c8ef8f1ecadefac5146817b69e8e,2026-11-23T01:01:08
+T3,2020-09-09,reported,rrf_baseline_map@12,,0.02185318032255467,0.021847923011671197,0.000240632067435648,,,results/t_phase_metrics.csv,5325fd2a5c07c8ef8f1ecadefac5146817b69e8e,2026-11-23T01:01:08
+T3,2020-09-09,reported,deduplicated_candidates,union,22205435.0,22204166.0,5.715143725731469e-05,,,results/t_phase_recall.csv,5325fd2a5c07c8ef8f1ecadefac5146817b69e8e,2026-11-23T01:01:08
+T3,2020-09-09,reported,queries,,72019.0,72019.0,0.0,,,results/t_phase_metrics.csv,5325fd2a5c07c8ef8f1ecadefac5146817b69e8e,2026-11-23T01:01:08
+T3,2020-09-09,structural,feature_rows_minus_deduplicated_candidates,,0.0,0.0,0.0,,True,the feature step of the same tick (weeks/{anchor}/features/step.json),5325fd2a5c07c8ef8f1ecadefac5146817b69e8e,2026-11-23T01:01:08
+T3,2020-09-09,structural,duplicate_keys,,0.0,0.0,0.0,,True,the feature step of the same tick (weeks/{anchor}/features/step.json),5325fd2a5c07c8ef8f1ecadefac5146817b69e8e,2026-11-23T01:01:08
+T4,2020-09-16,acceptance,recall,r1_popularity,0.1278859381692775,0.1278859381692775,0.0,0.01,True,results/t_phase_recall.csv,5325fd2a5c07c8ef8f1ecadefac5146817b69e8e,2026-11-23T03:47:06
+T4,2020-09-16,acceptance,recall,r2_repurchase,0.044763714287788275,0.044763714287788275,0.0,0.01,True,results/t_phase_recall.csv,5325fd2a5c07c8ef8f1ecadefac5146817b69e8e,2026-11-23T03:47:06
+T4,2020-09-16,acceptance,recall,r3_sibling,0.03057273501163986,0.03057273501163986,0.0,0.01,True,results/t_phase_recall.csv,5325fd2a5c07c8ef8f1ecadefac5146817b69e8e,2026-11-23T03:47:06
+T4,2020-09-16,acceptance,recall,r4_itemcf,0.08911564641224012,0.08911564641224012,0.0,0.01,True,results/t_phase_recall.csv,5325fd2a5c07c8ef8f1ecadefac5146817b69e8e,2026-11-23T03:47:06
+T4,2020-09-16,acceptance,recall,r5_wals,0.09784359432144829,0.09782728619202698,0.0001667032793826256,0.01,True,results/t_phase_recall.csv,5325fd2a5c07c8ef8f1ecadefac5146817b69e8e,2026-11-23T03:47:06
+T4,2020-09-16,acceptance,recall,r6_twotower,0.20459785389789514,0.20458231632037419,7.594780331172866e-05,0.01,True,results/t_phase_recall.csv,5325fd2a5c07c8ef8f1ecadefac5146817b69e8e,2026-11-23T03:47:06
+T4,2020-09-16,acceptance,recall,union,0.30691865856156275,0.3069442706920793,8.344228240130212e-05,0.01,True,results/t_phase_recall.csv,5325fd2a5c07c8ef8f1ecadefac5146817b69e8e,2026-11-23T03:47:06
+T4,2020-09-16,acceptance,map@12,,0.0420945831094715,0.04243513587830168,0.008025254586360723,0.01,True,results/t_phase_metrics.csv,5325fd2a5c07c8ef8f1ecadefac5146817b69e8e,2026-11-23T03:47:06
+T4,2020-09-16,reported,rrf_baseline_map@12,,0.02240978313693741,0.022410704438654883,4.110989549644733e-05,,,results/t_phase_metrics.csv,5325fd2a5c07c8ef8f1ecadefac5146817b69e8e,2026-11-23T03:47:06
+T4,2020-09-16,reported,deduplicated_candidates,union,20984130.0,20984180.0,2.382747383981647e-06,,,results/t_phase_recall.csv,5325fd2a5c07c8ef8f1ecadefac5146817b69e8e,2026-11-23T03:47:06
+T4,2020-09-16,reported,queries,,68984.0,68984.0,0.0,,,results/t_phase_metrics.csv,5325fd2a5c07c8ef8f1ecadefac5146817b69e8e,2026-11-23T03:47:06
+T4,2020-09-16,structural,feature_rows_minus_deduplicated_candidates,,0.0,0.0,0.0,,True,the feature step of the same tick (weeks/{anchor}/features/step.json),5325fd2a5c07c8ef8f1ecadefac5146817b69e8e,2026-11-23T03:47:06
+T4,2020-09-16,structural,duplicate_keys,,0.0,0.0,0.0,,True,the feature step of the same tick (weeks/{anchor}/features/step.json),5325fd2a5c07c8ef8f1ecadefac5146817b69e8e,2026-11-23T03:47:06
+pooled,,acceptance,pooled_map@12,V1 V2 V3 V4 T1 T2 T3 T4,0.03589297495428881,0.035933141677958684,0.001117818309065734,0.01,True,results/t_phase_metrics.csv + results/v_phase_metrics.csv,5325fd2a5c07c8ef8f1ecadefac5146817b69e8e,2026-11-23T03:47:06
