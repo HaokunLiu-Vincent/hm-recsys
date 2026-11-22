@@ -100,7 +100,21 @@ alerts. It changes how the system runs, not what it computes. Design:
   registry mirrors the weekly models, and the check reports 0 differences. T1–T4 labels were
   read by the replay only, to verify the pipeline; nothing was selected or tuned, and these
   numbers are not a new evaluation. Measurements: `docs/mlops.md` §8.5.
-- **M13–M15** (cloud, serving and monitoring, close): not started.
+- **M13, the pipeline on Cloud Run: done (2026-11-23).** The same image, built for x86-64 by
+  GitHub Actions (Workload Identity Federation, no stored key), runs as one Cloud Run job with
+  6 vCPU and 24 GiB. Its inputs and its state are three prefixes of one bucket, mounted as
+  volumes; the pipeline still reads and writes files and has no cloud dependency. A paused
+  weekly Cloud Scheduler job starts it with the same arguments every week (`--next`: the anchor
+  comes from the state). x86-64 was calibrated first (week V1: recall and MAP@12 within 0.013%
+  of the stage-1 record) and got its platform record; then the nine ticks were replayed in the
+  cloud, one of them started by the scheduler. Against the stage-1 records every week is inside
+  1.0%: recall within 0.08%, MAP@12 of a week within 0.80% (T4), the pooled MAP@12 0.035893
+  against 0.035933 (−0.11%), and the structural checks pass in every tick. An `eval` tick takes
+  25 to 29 minutes and about 0.25 USD at list prices, the `serve` tick 2 h 39 min and 1.49 USD;
+  the whole milestone used 4.04 USD of compute. At rest the project costs under 1 USD a month
+  (objects in the bucket). The T numbers verify the pipeline; they are not a new evaluation.
+  Measurements: `docs/mlops.md` §8.6; set-up, roles and operation: [`infra/README.md`](infra/README.md).
+- **M14–M15** (serving and monitoring, close): not started.
 
 **Three things to know when reading these numbers:**
 
@@ -230,6 +244,32 @@ make image-replay-compare                                   # the closed weeks a
 - The monitoring rules are `configs/m12_monitoring.yaml`, fixed before the first replay tick. A flag
   or an alert is a row of `results/m12_replay/monitoring.csv`; it changes nothing.
 
+**The pipeline on Cloud Run (stage 3, `docs/mlops.md` §5, §8.6; [`infra/README.md`](infra/README.md)).**
+The names of the cloud project are only in `infra/.env` (ignored by git; `infra/env.example`
+shows the keys). The owner of the project runs `infra/setup.sh` once; everything else is done as
+an operator service account, by impersonation:
+
+```bash
+git tag image-<name> <commit> && git push origin image-<name>   # GitHub Actions builds and pushes; the digest is a notice of the run
+bash infra/operate.sh upload-inputs                             # data/processed, data/bootstrap, the category code table
+bash infra/operate.sh create-job sha256:<digest>                # or update-job: the job runs an image by its digest
+bash infra/operate.sh execute scripts/m13_volume_check.py --megabytes 1024 --hash-inputs   # smoke test
+bash infra/operate.sh execute scripts/weekly.py --anchor 2020-07-29 --mode eval            # one tick
+bash infra/operate.sh run-scheduler                             # the next tick, started through Cloud Scheduler
+bash infra/operate.sh download-records                          # manifests and small tables to artifacts/m13_cloud/
+```
+
+- A tick takes its inputs and its state from `HMREC_PIPELINE_INPUTS_ROOT` and
+  `HMREC_PIPELINE_STATE_ROOT` (the mount points in the job; not set on the laptop), and
+  `--next` takes the anchor from the state. `--calibration` runs a tick into a separate state to
+  measure a platform that has no platform record yet.
+- Compared on the laptop from the downloaded records:
+  `HMREC_PIPELINE_STATE_ROOT=$PWD/artifacts/m13_cloud/pipeline uv run python scripts/m12_replay_compare.py --platform linux-amd64 --without-candidates`.
+  The tables of the cloud replay are `results/m13_cloud/`, with one row per execution (run time,
+  billed vCPU-seconds and GiB-seconds, cost at list prices) in `executions.csv`.
+- One execution at a time, no automatic retry, the scheduler job stays paused. `infra/teardown.sh`
+  (owner) removes everything except the bucket and the DVC data.
+
 **Versioning and run tracking (stage 3, `docs/mlops.md` §7).** DVC and MLflow are not runtime
 dependencies. They are in dependency groups of their own and in a second environment,
 `.venv-tools`, so that `.venv` stays exactly the set of packages every result was computed with.
@@ -334,5 +374,6 @@ The main entry point of each milestone. See proposal §11 for the milestones and
 | M10 | Container image, CI, calibration of V4 in the container | `make image-build`, `scripts/m10_calibrate.py` |
 | M11 | Data versioning, bootstrap state, run manifests, MLflow view | `make dvc ARGS="..."`, `scripts/m11_mlflow.py` |
 | M12 | The weekly pipeline and its replay | `scripts/weekly.py --anchor DATE --mode eval\|serve`, `scripts/m12_replay_compare.py` |
+| M13 | The pipeline on Cloud Run: image workflow, job, scheduler, calibration of x86-64, replay | `infra/setup.sh`, `infra/operate.sh`, `scripts/m13_volume_check.py`, `scripts/m13_record_execution.py` |
 
 Copyright (c) 2026 Haokun Liu. All rights reserved.

@@ -99,8 +99,14 @@ bash infra/operate.sh execute scripts/weekly.py --anchor 2020-07-29 --mode eval
 bash infra/operate.sh wait <execution>
 bash infra/operate.sh create-scheduler               # weekly, and paused at once
 bash infra/operate.sh run-scheduler                  # the job's own arguments: --next --mode eval
+bash infra/operate.sh download-records               # manifests and small tables to artifacts/m13_cloud/
+bash infra/operate.sh memory <start> <end>           # highest memory use of the instance (Cloud Monitoring)
+bash infra/operate.sh state-size
 bash infra/operate.sh status
 ```
+
+`run-scheduler` resumes the scheduler job, runs it and pauses it again: Cloud Scheduler
+refuses to run a paused job by hand. The job is enabled for a few seconds.
 
 **The bucket** (`docs/mlops.md` §7.2):
 
@@ -141,5 +147,22 @@ leaves the APIs enabled.
 | Images in Artifact Registry | storage, about 0.10 USD per GB and month above the first 0.5 GB |
 | Objects in the bucket | storage, about 0.02 USD per GB and month (Standard, `us-central1`) |
 
-These are approximate list prices and have not been checked against the pricing pages yet;
-M13 measures the sizes and writes the resulting monthly cost into `docs/mlops.md` §12.
+Prices as read from the pricing pages on 2026-11-22 (Cloud Storage Standard in the job's
+region: 0.020 USD per GiB-month; Artifact Registry: the first 0.5 GiB of a billing account
+free, then about 0.10 USD per GiB-month; Cloud Scheduler: three jobs of a billing account
+free, and a paused job counts as a job).
+
+**After M13** (`docs/mlops.md` §12): the bucket holds 40.5 GiB (state 27.2, DVC remote 5.6,
+calibration state 5.4, inputs 2.3), about 0.81 USD a month; the two images of 635 MB cost at
+most 0.07 USD a month; the job, the paused scheduler job and the accounts cost nothing.
+
+## What M13 found out about this set-up
+
+- **The mounted bucket is enough**: the state lies directly on it, and no step needed an
+  in-memory working copy. It refuses to rename a folder, so the pipeline commits a step file by
+  file with the step's record last (`hmrec.weekly.storage.MountedStateStore`).
+- The image's user is not root (uid 1000); the volumes are mounted with `uid=1000;gid=1000`.
+- An execution takes between one and two minutes to start (image pull and three mounts).
+- A paused scheduler job cannot be run by hand; see `run-scheduler` above.
+- The memory metric of Cloud Monitoring is sampled once a minute and misses short peaks; the
+  true peak of every step is in its step record and in the run manifest.

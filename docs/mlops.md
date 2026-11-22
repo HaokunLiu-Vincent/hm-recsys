@@ -4,6 +4,7 @@
 > **M10 (container and CI) was closed on 2026-11-22.** The acceptance of container and cloud results was simplified by the user on that day (§8.3); the calibration it rests on is described there as it was carried out, and the sections that referred to the earlier, tiered tolerance were aligned with it.
 > **M11 (versioning) was closed on 2026-11-22**: §7 describes DVC, the bootstrap state, the run manifest and the MLflow view as they were built, and S2 states the verification that was used.
 > **M12 (the weekly pipeline, local) was closed on 2026-11-22**: §6 and §7 describe the pipeline as it was built, §8.5 holds what the replay of eight weeks and one `serve` tick measured, and §10 the monitoring rules that were fixed before the first tick.
+> **M13 (the pipeline on Cloud Run) was closed on 2026-11-23**: the job, its storage and its trigger are described as they were built (§5, §6.4, §7.2, §11), §8.6 holds the calibration of x86-64 and what the replay on Cloud Run measured, and §12 the measured cost and what is left in the project.
 > Cloud limits and prices quoted below were read from the Cloud Run quota and pricing pages on 2026-11-21. Everything marked "estimate" has to be measured before it is relied on.
 
 ---
@@ -23,10 +24,10 @@ The data end on 2020-09-22, so there is no live traffic. "Every week" is therefo
 | S1 | A reproducible runtime environment | One container image builds from the repository alone; `make lint` and `make test` pass inside it; the calibration week of §8.3 inside the container meets the acceptance of §8.3. **Met on 2026-11-22 for the arm64 container** (§8.3) |
 | S2 | Versioned data and recorded runs | On a clean clone, `dvc pull` restores every pipeline input and the sha256 values match the records; every pipeline run is visible in MLflow with the same metrics as the result tables. **Met on 2026-11-22 for what exists before the pipeline** (§7.4): the remote holds every tracked file; a clean clone pulled `data/processed` and the category code table and their sha256 equal the data manifest; every metric of the MLflow view equals its source table. The view held imported records only at that time. **The rest was met in M12** (§8.5): the nine ticks of the replay are nine pipeline runs in the view, the model registry mirrors 17 model versions, and `make mlflow-check` reports 0 differences over 54 runs and 1,659 metric values |
 | S3 | A weekly pipeline that is one command | `weekly --anchor DATE` runs a whole week, stops at the first failed check with the reason, and can be resumed; each of the eight replayed weeks, and their pooled MAP@12, meets the acceptance of §8.3 (relative difference at most 1.0% on the four quantities; the two structural checks pass). **Met on 2026-11-22 in the arm64 container** (§8.5): the largest difference of a weekly quantity is 0.74% (MAP@12 of T4), the pooled MAP@12 differs by +0.042%, and both structural checks pass in all nine ticks; stopping and resuming are shown by the tests and by the first tick of the replay, which was resumed |
-| S4 | The pipeline runs on GCP on a schedule | A run triggered by Cloud Scheduler completes on Cloud Run Jobs, reads and writes only Cloud Storage, and meets the acceptance of §8.3; its run time and cost are recorded |
+| S4 | The pipeline runs on GCP on a schedule | A run triggered by Cloud Scheduler completes on Cloud Run Jobs, reads and writes only Cloud Storage, and meets the acceptance of §8.3; its run time and cost are recorded. **Met on 2026-11-22** (§8.6): the tick of V2 was started by Cloud Scheduler and completed on Cloud Run Jobs; every tick read its inputs from the bucket and wrote only into it; all eight weeks and the pooled MAP@12 are inside §8.3 (largest weekly difference 0.80%, MAP@12 of T4; pooled −0.11%); run time and cost of every execution are in `results/m13_cloud/executions.csv` |
 | S5 | A serving endpoint | The endpoint returns the Top-12 of a customer from the latest published prediction set, falls back for unknown customers, and has measured cold-start and p95 latency |
 | S6 | Monitoring and alerts | A failed step, a failed data check, a quality flag and a budget threshold each produce an alert; this is shown by provoking each one once |
-| S7 | CI and CD | Every push runs lint, tests and an image build; a version tag builds, pushes and deploys without stored keys |
+| S7 | CI and CD | Every push runs lint, tests and an image build; a version tag builds, pushes and deploys without stored keys. From M13 a tag `image-*` builds and pushes the image without a stored key (§11); deploying on a tag is M14 |
 | S8 | It stays cheap and leaves nothing behind | Total spend stays under the budget of §12; at the end no billable resource remains |
 
 ## 3. Non-goals
@@ -98,15 +99,24 @@ flowchart LR
 
 | Component | Choice | Why this one |
 |---|---|---|
-| Batch compute | Cloud Run Jobs | Runs a container to completion and bills per second; nothing to keep running. A job instance can have up to 8 vCPU and 32 GiB and a task can run for days, which covers the measured peak of about 8 GB with room to spare |
+| Batch compute | Cloud Run Jobs | Runs a container to completion and bills per second; nothing to keep running. A job instance can have up to 8 vCPU and 32 GiB and a task can run for days, which covers the measured peak of about 8 GB with room to spare. Measured in M13: 6 vCPU and 24 GiB are enough (highest true peak of a process 7.53 GB); an `eval` tick takes 25 to 29 minutes, the `serve` tick 2 h 39 min |
 | Fallback for batch | Compute Engine Spot VM | Only if a step does not fit Cloud Run Jobs, most likely because of local file space (§8.4) |
 | Trigger | Cloud Scheduler | A cron entry that starts the job; also used to drive the replay |
-| Storage | Cloud Storage | One place for inputs, state, predictions and run records; DVC and MLflow both work with it |
+| Storage | Cloud Storage | One place for inputs, state, predictions and run records; DVC and MLflow both work with it. As built in M13: three prefixes of one bucket, mounted into the job as volumes (§7.2) |
 | Images | Artifact Registry | The registry Cloud Run pulls from |
 | Serving | Cloud Run service, minimum instances 0 | Scales to zero, so an idle endpoint costs nothing |
 | Observability | Cloud Logging and Cloud Monitoring | Already collects job and service logs; alert policies and budget alerts need no extra service |
 | CI/CD | GitHub Actions with Workload Identity Federation | No long-lived key stored in GitHub |
 | Run tracking | MLflow, viewed locally | No server to host or pay for (§7.3) |
+
+**As built in M13** (`infra/`, `infra/README.md`):
+
+- **One Cloud Run job** runs the pipeline's image, 6 vCPU and 24 GiB, one task, no automatic retry, a time limit of 6 hours. It is created from an image **digest**. Its own arguments are `scripts/weekly.py --next --mode eval`; the operator overrides them for one execution to run a given anchor, the `serve` tick, a calibration tick or the smoke test.
+- **One bucket, three prefixes mounted as volumes** (Cloud Storage FUSE, each limited to its prefix): `inputs/` read-only, `pipeline/` (the state) and `pipeline-calibration/`. The pipeline reads and writes files; it has no Cloud Storage client and no new dependency. The DVC remote (`dvc/`) is not mounted.
+- **One Cloud Scheduler job**, weekly (Wednesday 06:00 UTC), **paused**: it calls the Cloud Run API "run this job" as an account that may do nothing else. The job takes its anchor from the state (`--next`), so the request is the same every week.
+- **Images** come from GitHub Actions through Workload Identity Federation (§11) into one Artifact Registry repository.
+- **Five identities**: the job's runtime account (objects of the bucket, writing logs), the scheduler account (start a job), the deployer account (push images), the operator account (create and run the job and the scheduler job, read logs and metrics; used by impersonation, without a key), and the owner, who alone changes IAM (`infra/setup.sh`). No key file exists and nothing is public.
+- **Not built in M13**: the serving endpoint, alert policies and deployment on a tag (M14).
 
 ## 6. The weekly pipeline
 
@@ -172,12 +182,21 @@ Every check in the right-hand column already exists in the code as a stop condit
 
 **As built in M12** (`hmrec.weekly.storage`, `hmrec.weekly.state`, `hmrec.weekly.driver`):
 
-- **In M12 the state is a local folder**, `artifacts/pipeline/`, behind a small interface (`StateStore`: exists, read, write once, replace, commit a folder, set a folder aside, discard a folder). M13 adds an implementation that keeps the same keys in Cloud Storage.
+- **In M12 the state is a local folder**, `artifacts/pipeline/`, behind a small interface (`StateStore`: exists, read, write once, replace, commit a folder, set a folder aside, discard a folder). M13 keeps the same keys in Cloud Storage (below).
 - **Staging**: a step writes into `weeks/{anchor}/.staging/{step}/`. The driver renames the folder to `weeks/{anchor}/{step}/` when the step's process ended without an error; a rename is the only way an output appears, and it refuses an existing target.
 - **A failed attempt is kept**: its staging folder is moved to `weeks/{anchor}/.failed/{step}.{n}/`. It is never deleted and never reused; the next run of the tick starts that step again.
 - **Every run of a tick has its own id and manifest** (`{anchor}-{mode}-a{n}`; no clock is asked). A failed run writes a manifest too, with the step that stopped it and the reason the step's process gave.
 - **"The previous week is not closed"** is checked as "the tick before this one has finished": the previous week must have published predictions. A tick closes the week before its anchor itself, so this is the condition that can be checked before it starts. The first tick starts from the bootstrap state.
 - **A week keeps the mode of its first run**, and **a week opened in `serve` mode cannot be closed**: closing needs the features of the customers who bought, and a `serve` tick removes a shard's features after scoring (§8.4). The replay ends with its `serve` tick, so it does not meet this; a pipeline that serves every week has to decide whether to keep the buyers' features or to build them again at closing.
+
+**As built in M13** (`hmrec.paths.tick_root_paths`, `hmrec.weekly.storage.MountedStateStore`, `hmrec.weekly.state.next_tick_anchor`):
+
+- **Where a tick reads and writes comes from two environment variables**: `HMREC_PIPELINE_INPUTS_ROOT` (a folder with `data/processed/`, `data/bootstrap/` and `artifacts/features/category_codes.json` in their plain layout) and `HMREC_PIPELINE_STATE_ROOT` (the state and, inside it, the result tables). On Cloud Run they are the mount points of two prefixes of the bucket. Neither is set on the laptop, where a tick is the tick of M12. Code names no bucket.
+- **The state root lies directly on the mounted bucket**; no in-memory working copy is used (the smoke test of §8.6 decided this).
+- **A bucket has no folders, so no folder is renamed there** (the mount refuses it). A finished step is committed by moving its files one by one and its record (`step.json`, which the step writes last) **last**; an output is complete if and only if its record is there. A commit that began and did not end is completed by the next run of the tick, and the step is not computed again. On a local disk the rename of M12 is unchanged.
+- **`--next`** takes the anchor from `state/current.json`: one week after the current prediction set, or the first tick if nothing is published. A tick that stopped did not move the pointer, so the same request resumes it. This is what the scheduler runs.
+- **A calibration tick** (`--calibration`) writes everything under a state of its own next to the state (`pipeline-calibration/`) and gets the Ranker configuration in calibration mode (§8.3). Its run manifest carries the metric `tick/calibration`.
+- **A run manifest names a file by its key in the bucket** (`inputs/data/processed/...`, `pipeline/weeks/...`) and holds the image digest of the job.
 
 ## 7. Data, state and run versioning
 
@@ -226,6 +245,21 @@ gs://<bucket>/
 ```
 
 On the laptop the same layout lies under `artifacts/pipeline/` (`artifacts/pipeline/runs/<run-id>/manifest.json`); the DVC remote is the only prefix that exists in the bucket before M13.
+
+**The bucket as built in M13.** The state has a prefix of its own, so that the job can be given exactly the prefixes it needs:
+
+```
+gs://<bucket>/
+  dvc/                     DVC remote (M11); never mounted
+  inputs/                  the pipeline's inputs in their plain layout: data/processed/,
+                           data/bootstrap/, artifacts/features/category_codes.json
+                           (35 objects, 2.43 GB; size and md5 equal configs/data_manifest.json)
+  pipeline/                the state: state/current.json, weeks/<anchor>/, predictions/<anchor>/,
+                           runs/<run-id>/, and results/ (the pipeline's tables)
+  pipeline-calibration/    the same layout, written only by calibration ticks
+```
+
+The small records of a state (manifests, step records, markers, tables) are copied to the laptop with `bash infra/operate.sh download-records` (`artifacts/m13_cloud/`, not in git); the tables are committed under `results/m13_cloud/`. Candidates, features, samples, models and vectors stay in the bucket.
 
 **The folder of a week, as built in M12** (a week is named by its anchor; `hmrec.paths.StateLayout`):
 
@@ -282,6 +316,7 @@ runs/2020-08-05-eval-a1/         manifest.json, logs/{step}.log, failures/{step}
 - The MLflow model registry records each weekly ranker and each R6 chain model by storage path and sha256, with one alias for "the model behind the current prediction set". **The registry is a mirror.** The pipeline and the endpoint never read MLflow; what is deployed is decided by `state/current.json`. Reports and interviews describe it that way. **The registry is set up in M12**, when the pipeline produces models; M11 registers nothing.
 - **The registry as built in M12** (`hmrec.tracking.registry`): two registered models, `hmrec-ranker` and `hmrec-twotower-chain`. A version is created for every model file a succeeded tick recorded in its run manifest (output roles `ranker_model` and `r6_chain_model`); its source is the file's path and its tags hold the sha256, the size, the run id and the tick's anchor. No file is copied. The alias `current` is set on the two versions `state/current.json` names, matched by sha256. `make mlflow-check` compares the registry with the manifests, hashes every mirrored file again, and compares the alias with the state.
 - **Flags and alerts in a run manifest** (M12) are metric entries: `monitor/flag/{rule}/{subject}` and `monitor/alert/{rule}/{subject}` with the value 1 and the week they describe, and the two counts `monitor/flags_raised` and `monitor/alerts_raised`. The manifest schema stays at version 1. A metric two steps measure is recorded once; two steps that report different values for one metric stop the tick.
+- **The replay on Cloud Run in the view** (M13, `hmrec.tracking.cloud`): the run manifests copied from the bucket are logged as pipeline runs in experiments of their own (`weekly-pipeline (cloud run)`, and `weekly-pipeline calibration (cloud run)` for the two calibration ticks), with the platform, the commit and the image digest as tags. The laptop's replay and the cloud's have the same run ids, so their records and their registered models are kept apart (`hmrec-ranker-cloud-run`, `hmrec-twotower-chain-cloud-run`). A cloud model version points to the object's key and carries the sha256 the manifest recorded; **its file is in the bucket and is not hashed again on the laptop**, which `make mlflow-check` says in its result.
 - Neither tool reports usage from this repository: DVC's analytics and MLflow's telemetry are switched off.
 
 ### 7.4 What M11 verified
@@ -333,9 +368,9 @@ Measured on 2026-11-22 on the laptop. No label was read and no model was trained
 |---|---|---|
 | Laptop, native | Apple silicon, macOS, libomp | Where the stage-1 records were made; they are the reference of §8.3 |
 | Container on the laptop | arm64 Linux | Development and the acceptance of S1 and S3 |
-| Cloud Run | x86-64 Linux | The acceptance of S4 |
+| Cloud Run | x86-64 Linux | The acceptance of S4. Accepted platform since 2026-11-22 (`configs/platforms/linux-amd64.yaml`, §8.6) |
 
-The cloud image is built for x86-64 by CI, not on the laptop (emulation is too slow to be useful). CI also runs lint and both test suites inside that image, so x86-64 problems show up from M10 on, long before M13.
+The cloud image is built for x86-64 by CI, not on the laptop (emulation is too slow to be useful). CI also runs lint and both test suites inside that image, so x86-64 problems show up from M10 on, long before M13. The image that runs on Cloud Run is built the same way by a second workflow, from a tagged commit, and pushed to the registry (§11).
 
 ### 8.3 Acceptance across environments
 
@@ -360,7 +395,7 @@ Different operating systems, CPU architectures, OpenMP runtimes and BLAS librari
 **Reported, not an acceptance criterion**: the pair overlap of the candidates of every channel with the record, the deduplicated candidate count, and bit-equality of scores. **Bit-identical repetition on the same platform is not required**, and no extra run is made to verify it.
 
 - These are engineering thresholds, not statistical tests. For scale: LambdaMART varies by 0.07% across seeds on V, and one week differs from another by up to 41%.
-- **The thresholds are fixed for the arm64 container** (platform record `configs/platforms/linux-arm64.yaml`) **and are not changed after a replay result is seen.**
+- **The thresholds are fixed for the arm64 container** (platform record `configs/platforms/linux-arm64.yaml`) **and are not changed after a replay result is seen.** The same thresholds hold for x86-64 on Cloud Run (`configs/platforms/linux-amd64.yaml`, M13).
 - A difference above 1.0% on an acceptance quantity, or a failed structural check, stops the milestone and is investigated step by step, starting from the first step that differs; it is not explained away.
 - Calibration and replay outputs go to new locations and new tables. They never overwrite a stage-1 artifact or result.
 
@@ -392,7 +427,7 @@ Reported in the same calibration, for information:
 **Procedure.**
 
 1. M10 measured the items above in the arm64 container; the user fixed the criteria on 2026-11-22 and the platform record was written. Done.
-2. M13 starts with a calibration on Cloud Run (x86-64), declared in advance as calibration, and a platform record for that platform. Until then x86-64 is covered only by CI (lint, tests, and the synthetic R6 reproducer).
+2. M13 starts with a calibration on Cloud Run (x86-64), declared in advance as calibration, and a platform record for that platform. Until then x86-64 is covered only by CI (lint, tests, and the synthetic R6 reproducer). **Done on 2026-11-22** (§8.6): two ticks in calibration mode; every quantity of V1 inside 1.0% (largest 0.013%); platform record `configs/platforms/linux-amd64.yaml`, with the thresholds of the arm64 record.
 3. Thresholds are not changed after any replay result is seen.
 
 **What the calibration does not show**: one week and one R6 update, not the eight chained updates of the replay (measured in M12, §8.5); one platform for the full-data items; and nothing about whether the results are good (§16).
@@ -404,6 +439,13 @@ On Cloud Run the writable filesystem is in memory, so every file a step writes l
 - `eval` mode: files of one week plus the process peak fit in 24 GiB by estimate. Measured in the arm64 container for V4: the highest true peak of any process was 6.02 GB (the feature build; 5.67 GB when the fused table of the six channels is built in one piece), with files on a mounted disk. **Measured over the eight `eval` ticks of the replay (M12)**: the highest true peak of any process was 7.25 GB (the feature build of T1; 5.24 to 7.25 GB over the weeks), and the files one tick writes are about 2.6 GB (features 1.3 GB, Ranker Dataset 0.6 GB, sample 0.2 GB, the ingested transactions 0.16 GB, candidates 0.25 GB). With in-memory files on Cloud Run it is to be measured in M13.
 - `serve` mode: features are produced and scored shard by shard and each shard's features are deleted after scoring, so local files stay near one shard (about 1.5 GB). This needed a change to the sharded driver, but no change to any computation. **Measured in the `serve` tick of the replay (M12)**: 20 shards of 70,000 customers; the highest true peak of any process was 6.15 GB (the feature build of a shard; the R6 recall step 6.11 GB); the files the tick keeps are 5.3 GB (the candidates of the six channels 4.2 GB, the Ranker Dataset 0.6 GB, the scores of the Top-12 0.15 GB), and the features of a shard exist only between its two steps.
 - If this is still not enough: mount the bucket as a volume, or run that step on a Spot VM with a disk. The choice is made on measurements in M13, not now.
+
+**Measured in M13** (§8.6). The bucket is mounted as a volume and the state lies directly on it, so a step's output files are written through the mount and are not kept on the instance's in-memory file system. This was the first design tried and it was enough:
+
+- **Memory.** The highest true peak of a process on Cloud Run was 7.53 GB in an `eval` tick (the feature build of T1) and 6.35 GB in the `serve` tick, as in the arm64 container. Cloud Monitoring, which samples the instance once a minute, saw at most 4.3 GiB of the 24 GiB (18%) in any tick. 24 GiB is far more than is used; a smaller shape was not tried, because the shape is decision D10 and nothing required a change.
+- **What the mount can and cannot do** (the smoke test, one execution): sequential writes at 52 MB/s and reads at 210 MB/s for a 1 GB file; parquet, npy, a write at an offset, appending, renaming and replacing a file, listing and existence all behave as on a disk. **Renaming a folder is refused**; the pipeline does not need it (§6.4). The mount logs `fallocate: function not implemented` once per tick, from a library that asks for space in advance and then writes normally.
+- **What it costs in time**: the steps that mostly move bytes are the ones that got slower. Copying the transactions (C1) takes 61 to 80 s on the mount against 2 s on a local disk; the driver's closing work (hashing a tick's outputs for the run manifest, the monitoring) takes one to three minutes at the end of a tick.
+- The Spot VM fallback and an in-memory working copy were not needed and were not built.
 
 ### 8.5 What the replay of M12 measured
 
@@ -494,7 +536,110 @@ The whole replay took 3 hours 20 minutes of run time: 11 minutes for V1, 102 min
 - **The first tick ran twice as a run, once as a computation.** The first run of V1 (`2020-07-29-eval-a1`, image of commit `b32037b`) finished every step and published, then the driver stopped while writing the run manifest: two steps had reported the same metric (`output/candidates_per_query`), which the manifest refuses. Nothing of the state was touched; the driver was corrected (a quantity two steps measure is recorded once, and two steps that disagree stop the tick), the image was built again from commit `c6a9887`, and the same command resumed the tick as run `2020-07-29-eval-a2`: every step was skipped because its output existed, and the manifest was written. **So V1's step outputs were computed by the image of `b32037b` and its manifest was written by the image of `c6a9887`**; the manifest names the second commit, the monitoring rows of the first run name the first, and the step times of V1 are in the step records of the state, not in `steps.csv`. Every other tick ran once, from `c6a9887`. The change between the two commits is in the driver and the feature step's metric list and touches no computation.
 - The image digest of a run manifest is empty in M12: a locally built image has no registry digest. The manifest holds the commit and the code-tree hash instead (§8.1). M13 fills it.
 
-**What the replay does not show**: another platform (x86-64 is M13); a second run of the same replay (not required, §8.3); the behaviour of the monitoring rules on a real incident (the four provoked alerts are M14); and nothing about whether the results are good (§16).
+**What the replay does not show**: another platform (x86-64 is M13, §8.6); a second run of the same replay (not required, §8.3); the behaviour of the monitoring rules on a real incident (the four provoked alerts are M14); and nothing about whether the results are good (§16).
+
+### 8.6 What M13 measured on Cloud Run
+
+Everything below ran on 2026-11-22 as executions of one Cloud Run job (x86-64, 6 vCPU, 24 GiB, state on the mounted bucket), one execution at a time. The tables are `results/m13_cloud/` (`comparison.csv`, `metrics.csv`, `steps.csv`, `monitoring.csv`, `label_access.csv`, `twotower_chain.csv`, `executions.csv`, and `calibration/`); the records are in `docs/decisions.md`. Nothing was tuned or selected, no tick was repeated with other settings, and no threshold was changed.
+
+**Smoke test** (one execution of `scripts/m13_volume_check.py`, 188 s): the platform report of both sides (Linux x86-64, 9 logical CPUs visible, 23.47 GiB; LightGBM 4.7.0 on `libgomp1 14.2.0-19`, the package version of the arm64 image; torch 2.15.0+cpu), every file operation the pipeline uses on the mounted state (§8.4), and the 35 input files read through the mount with the sha256 of `configs/data_manifest.json`.
+
+**Calibration of x86-64** (§8.3, procedure step 2; declared in `docs/decisions.md` before it ran). Two ticks in calibration mode, V1 and then V2, which closes and scores V1; image of commit `99abd62`:
+
+| Quantity of V1 | Cloud Run | Stage-1 record | Difference |
+|---|---|---|---|
+| Recall R1, R2, R3, R4, R6 | equal to the record | | 0% |
+| Recall R5 | 0.101489 | 0.101477 | +0.0113% |
+| Union recall | 0.254391 | 0.254379 | +0.0047% |
+| MAP@12 | 0.030108 | 0.030112 | −0.0134% |
+| Feature rows − deduplicated candidates; duplicate keys | 0; 0 | | |
+
+Every quantity is inside 1.0%, so the platform record `configs/platforms/linux-amd64.yaml` was written with the fields and thresholds of the arm64 record, a new image was built from the commit that holds the record (`07220a7`), and the replay ran with it in mode `accepted`.
+
+**Replay: acceptance (§8.3).** Eight `eval` ticks V1 … T4, then the `serve` tick at 2020-09-23, from the bootstrap state. Differences are signed, (run − record) / record. The last but one column repeats the arm64 container of M12 (§8.5) for the same week.
+
+| Week | Recall R1–R4 | Recall R5 | Recall R6 | Union recall, run / record | Difference | MAP@12, run / record | Difference | arm64 (M12): R5, R6, union, MAP@12 | Structural checks |
+|---|---|---|---|---|---|---|---|---|---|
+| V1 | 0% | +0.0113% | 0% | 0.254391 / 0.254379 | +0.0047% | 0.030108 / 0.030112 | −0.0134% | +0.0116%, 0%, +0.0047%, −0.0039% | 0, 0 |
+| V2 | 0% | −0.0159% | −0.0299% | 0.275405 / 0.275415 | −0.0038% | 0.031275 / 0.031332 | −0.1841% | −0.0222%, +0.0359%, +0.0106%, −0.5291% | 0, 0 |
+| V3 | 0% | +0.0124% | −0.0085% | 0.263875 / 0.263840 | +0.0132% | 0.035155 / 0.035029 | +0.3588% | +0.0125%, +0.0361%, +0.0216%, +0.3533% | 0, 0 |
+| V4 | 0% | −0.0024% | −0.0749% | 0.276085 / 0.276163 | −0.0281% | 0.034694 / 0.034850 | −0.4459% | −0.0036%, −0.0307%, −0.0039%, +0.1757% | 0, 0 |
+| T1 | 0% | +0.0074% | +0.0297% | 0.278734 / 0.278773 | −0.0139% | 0.034968 / 0.034960 | +0.0229% | +0.0074%, +0.0170%, −0.0266%, +0.5801% | 0, 0 |
+| T2 | 0% | +0.0119% | −0.0521% | 0.290758 / 0.290767 | −0.0031% | 0.040399 / 0.040270 | +0.3191% | +0.0010%, −0.0274%, −0.0056%, +0.2915% | 0, 0 |
+| T3 | 0% | 0% | −0.0232% | 0.290889 / 0.290926 | −0.0127% | 0.039617 / 0.039673 | −0.1398% | +0.0073%, −0.0397%, −0.0147%, +0.1621% | 0, 0 |
+| T4 | 0% | +0.0167% | +0.0076% | 0.306919 / 0.306944 | −0.0083% | 0.042095 / 0.042435 | −0.8025% | +0.0074%, +0.0050%, −0.0084%, −0.7358% | 0, 0 |
+| **Pooled, 8 weeks** | | | | | | **0.035893 / 0.035933** | **−0.1118%** | +0.0418% | |
+
+- **Every acceptance quantity is inside 1.0%**: the 64 weekly quantities and the pooled MAP@12. The largest is MAP@12 of T4 (−0.80%; −0.74% in the arm64 container); the largest recall difference is 0.075% (R6 of V4). Both structural checks pass in all nine ticks.
+- The recall of R1–R4 equals the record in every week, as on arm64.
+- As on arm64, MAP@12 differs more than recall and its sign changes from week to week (three weeks above the record, five below). The two platforms have the same sign in six of the eight weeks and another one in V4 and T3; T4 is the largest on both and negative on both.
+- **T numbers of this replay verify the pipeline; they are not a new evaluation** (invariant 3). T labels were read by the closing steps and the `eval` query lists only; every read is in `label_access.csv`.
+
+**Reported, not an acceptance criterion.**
+
+| Week | Queries | Deduplicated candidates, run / record | RRF baseline MAP@12, run / record | Hit value |
+|---|---|---|---|---|
+| V1 | 82,802 | 25,226,168 / 25,226,147 | 0.018511 / 0.018511 | 415 |
+| V2 | 74,833 | 22,935,908 / 22,935,793 | 0.019071 / 0.019064 | 397 |
+| V3 | 71,094 | 21,965,348 / 21,965,434 | 0.020600 / 0.020604 | 423 |
+| V4 | 72,035 | 22,294,800 / 22,293,247 | 0.019651 / 0.019662 | 480 |
+| T1 | 80,253 | 24,593,091 / 24,592,808 | 0.019151 / 0.019151 | 600 |
+| T2 | 75,822 | 23,186,275 / 23,186,146 | 0.021466 / 0.021471 | 656 |
+| T3 | 72,019 | 22,205,435 / 22,204,166 | 0.021853 / 0.021848 | 639 |
+| T4 | 68,984 | 20,984,130 / 20,984,180 | 0.022410 / 0.022411 | 670 |
+
+- The deduplicated candidate count is within 0.007% of the record in every week, the RRF baseline within 0.06%.
+- **The pair overlap of the candidates and the `serve` tick's overlap with the Kaggle set were not measured in the cloud.** Both need large files of the two sides on one machine (the pipeline's candidates and the stage-1 ones; the prediction set and the Kaggle set), and only manifests and small tables are downloaded from the bucket (§12, guardrail 5). They were measured for the arm64 container (§8.5).
+- **Two executions of the same tick are not always bit-identical on Cloud Run** (not required, §8.3; seen because the calibration and the replay both ran V1 and V2). For V1 every data file was the same in both: the candidates of all six channels, the Ranker model, the Top-12. For V2 the R6 fine-tune gave other weights and the R5 candidates differed, and what follows from them differed too. The deterministic setting of §8.1 makes an R6 fine-tune repeatable on one machine; two executions of a Cloud Run job need not run on the same CPU.
+
+**Monitoring (§10), the rules of M12 unchanged.** 1,323 findings, **5 flags, no alert**, and they are the five flags of the arm64 replay: the recall of R2 for V1 (0.0387 against a mean of 0.0448 over F1–F4), the share of recommendations among the 100 most popular articles at the tick of 2020-08-26 (0.517 against 0.371), and the recalls of R3, R4 and R5 for T1. None repeated in the following week. No flag changed anything.
+
+**The tick the scheduler started.** The tick of V2 was started by Cloud Scheduler: the scheduler job (weekly, paused) was resumed, run by hand and paused again, its request started the job with the job's own arguments, and the pipeline took the anchor from the state (`anchor 2020-08-05 (from the state)`). A paused scheduler job cannot be run by hand (`Job.state must be ENABLED`), which is why it is resumed for the few seconds of the request. The other eight ticks were started by the operator with their anchor.
+
+**Run time, memory and cost of every execution.** The run time is from the start of the execution to its completion; the cost is run time × (6 vCPU × 0.000018 + 24 GiB × 0.000002) USD, list prices, without the free tier.
+
+| Execution | Started by | Run time | vCPU-seconds | GiB-seconds | Cost (list price) | Highest true peak of a process | Instance memory seen by Cloud Monitoring | State in the bucket afterwards |
+|---|---|---|---|---|---|---|---|---|
+| smoke test | operator | 188 s (3 min) | 1,130 | 4,519 | 0.029 USD | | 0.2 GiB | |
+| V1 (calibration) | operator | 1,564 s (26 min) | 9,384 | 37,534 | 0.244 USD | 7.32 GB | 3.6 GiB | 2.7 GiB |
+| V2 (calibration; it closes V1) | operator | 1,754 s (29 min) | 10,523 | 42,093 | 0.274 USD | 7.38 GB | 2.9 GiB | 5.4 GiB |
+| V1 | operator | 1,540 s (26 min) | 9,240 | 36,960 | 0.240 USD | 6.78 GB | 4.3 GiB | 2.7 GiB |
+| V2 | **scheduler** | 1,579 s (26 min) | 9,477 | 37,906 | 0.246 USD | 6.85 GB | 3.8 GiB | 5.4 GiB |
+| V3 | operator | 1,658 s (28 min) | 9,950 | 39,801 | 0.259 USD | 5.15 GB | 4.1 GiB | 8.1 GiB |
+| V4 | operator | 1,559 s (26 min) | 9,353 | 37,413 | 0.243 USD | 6.96 GB | 3.4 GiB | 10.8 GiB |
+| T1 | operator | 1,767 s (29 min) | 10,605 | 42,418 | 0.276 USD | 7.53 GB | 3.6 GiB | 13.6 GiB |
+| T2 | operator | 1,522 s (25 min) | 9,132 | 36,527 | 0.237 USD | 7.06 GB | 3.6 GiB | 16.4 GiB |
+| T3 | operator | 1,602 s (27 min) | 9,613 | 38,453 | 0.250 USD | 6.78 GB | 3.8 GiB | 19.0 GiB |
+| T4 | operator | 1,599 s (27 min) | 9,596 | 38,384 | 0.249 USD | 5.23 GB | 2.6 GiB | 21.6 GiB |
+| `serve` | operator | 9,543 s (159 min) | 57,258 | 229,033 | 1.489 USD | 6.35 GB | 3.8 GiB | 27.2 GiB |
+| **Total** | | **25,877 s (7.2 h)** | **155,260** | **621,042** | **4.04 USD** | | | |
+
+- **An `eval` tick takes 25 to 29 minutes on Cloud Run and costs 0.24 to 0.28 USD**; the eight ticks of the replay took 3.6 hours and 2.00 USD. The `serve` tick took 2 h 39 min and 1.49 USD; the calibration 0.52 USD; the smoke test 0.03 USD.
+- **Cloud Monitoring sees less than a process's true peak**, because it samples the instance once a minute and the peak of the feature build lasts seconds. The true peak is the one each step records (`ru_maxrss`).
+- The state grows by about 2.7 GiB with every `eval` week; the `serve` tick added 5.6 GiB.
+
+**Where the time goes** (seven `eval` ticks V2 … T4; seconds, median and range; the arm64 container of M12 for comparison):
+
+| Step | Cloud Run | arm64 container on the laptop | Highest true peak, Cloud Run |
+|---|---|---|---|
+| C1 ingest | 73 (61–77) | 1.4 | 1.10 GB |
+| C2 evaluate | 63 (54–67) | 5.6 | 2.31 GB |
+| C3 sample | 24 (18–27) | 11.6 | 3.79 GB |
+| C4 fine-tune R6 | 170 (137–196) | 218 | 2.70 GB |
+| O1 queries and R1, R2, R3 | 14 together | 6.6 | 2.22 GB |
+| O1 R4 | 51 (47–55) | 31 | 3.15 GB |
+| O1 R5 | 91 (85–94) | 118 | 2.47 GB |
+| O1 R6 | 34 (24–36) | 34 | 2.89 GB |
+| O2 features | 216 (171–228) | 134 | 7.53 GB |
+| O3 Dataset | 41 (34–46) | 14 | 1.55 GB |
+| O3 train | 409 (396–633) | 184 | 1.99 GB |
+| O4 score | 204 (142–212) | 102 | 2.32 GB |
+| O5 publish | 1.8 | 0.4 | 0.18 GB |
+| **A tick, in the pipeline** | **1,473 to 1,615** | 840 to 906 | **7.53 GB** |
+
+Ranker training is the largest difference (2.2 times the laptop's container), then scoring and the feature build; the R6 fine-tune and R5 are faster on Cloud Run. The steps that mostly read and write files (C1, C2, the Dataset) pay for the mount. The `serve` tick: recall 17 min (R6 8.0, R5 5.5, R4 2.5), features 68 min (20 shards, 205 s each), scoring 53 min (159 s a shard), Ranker training 6.6 min; 9,434 s in the pipeline against 5,186 s in the arm64 container; 1,371,980 customers × 12 articles, 20,480 distinct articles.
+
+**What M13 does not show**: a second run of the replay in the cloud (not required); the pair overlap of the candidates and the `serve` overlap (above); the bill itself (the cost is computed from run times and list prices; storage, operations on the bucket and the free tier are not in it, §12); a tick that the scheduler starts at its own time (it stays paused: the replay's weeks are simulated, not calendar weeks); and nothing about whether the results are good (§16).
 
 ## 9. Serving
 
@@ -564,10 +709,12 @@ Monitoring has two layers. Same-week signals need no labels and can alert as soo
 | Trigger | What runs |
 |---|---|
 | Every push and pull request | Build the x86-64 image (not pushed to a registry); run `make lint` and the torch-side and LightGBM-side tests, in two processes, inside it |
+| A tag `image-*`, or a manual run (M13) | Build the x86-64 image as above, push it to Artifact Registry under the commit hash, publish its digest as a notice. The operator deploys the job from the digest |
 | A version tag (from M14) | Build the x86-64 image, push it to Artifact Registry, update the Cloud Run job and service to that digest |
 
 - GitHub authenticates to GCP with Workload Identity Federation, restricted to this repository; no service-account key exists.
 - Workflows use the minimum permissions and pin third-party actions by commit hash. The M10 workflow needs no secret at all.
+- **The image workflow as built in M13** (`.github/workflows/image.yml`): the permissions are `contents: read` and `id-token: write`; a provider of a workload identity pool accepts tokens of this one repository; they may act as a deployer account whose only role is writing to the one image repository. **The names of the project come from three repository secrets, not from the file and not from repository variables**: the log of a public repository is public, a secret is masked in it, and a variable would be printed in the head of every step. They are names, not credentials. Two images were built this way in M13 (the calibration image and the image with the platform record).
 - Rollback: redeploy the previous image digest; for data, point `current` back to the previous prediction set. Both are one command and are written in the runbook.
 - Infrastructure is created by scripts of `gcloud` commands kept in `infra/`, with a matching teardown script (decision D7).
 
@@ -586,15 +733,30 @@ Monitoring has two layers. Same-week signals need no labels and can alert as soo
 
 | Item | Assumption | Estimate |
 |---|---|---|
-| One `eval` tick | 30 minutes at 6 vCPU and 24 GiB. **Measured in the arm64 container on the laptop (M12, §8.5): 14 to 15 minutes for a whole tick**, all sixteen steps, peak 7.25 GB. Cloud Run is another CPU, so 30 minutes stays the assumption until M13 | about 0.3 USD |
-| x86 calibration (§8.3) | about one tick | about 0.3 USD |
-| Replay of 8 weeks, run twice | 16 ticks | about 4.6 USD |
-| One `serve` tick | 2 hours at 6 vCPU and 24 GiB. Measured in the arm64 container on the laptop (M12, §8.5): 86 minutes, peak 6.15 GB; 2 hours stays the assumption until M13 | about 1.1 USD |
-| Storage | 20 GB for two months | under 1 USD |
-| Images, scheduler, logs, endpoint tests | small | a few USD at most, to be checked |
-| **Total** | | **about 10 USD, under 15 USD**, before the monthly free tier of Cloud Run |
+| One `eval` tick | 30 minutes at 6 vCPU and 24 GiB. **Measured in the arm64 container on the laptop (M12, §8.5): 14 to 15 minutes for a whole tick**, all sixteen steps, peak 7.25 GB. **Measured on Cloud Run (M13, §8.6): 25 to 29 minutes** per execution | estimate about 0.3 USD; **measured 0.24 to 0.28 USD** |
+| x86 calibration (§8.3) | about one tick. Measured: two ticks (the second one closes and scores the first) and a smoke test | estimate about 0.3 USD; **measured 0.55 USD** |
+| Replay of 8 weeks, run twice | 16 ticks. Measured: run once, 8 ticks, 3.6 hours | estimate about 4.6 USD for two runs; **measured 2.00 USD for one** |
+| One `serve` tick | 2 hours at 6 vCPU and 24 GiB. Measured in the arm64 container on the laptop (M12, §8.5): 86 minutes, peak 6.15 GB; **measured on Cloud Run (M13): 2 h 39 min** | estimate about 1.1 USD; **measured 1.49 USD** |
+| Storage | 20 GB for two months. Measured: 43.4 GB in the bucket after the replay (40.5 GiB: state 27.2, DVC remote 5.6, calibration state 5.4, inputs 2.3), about 0.81 USD a month at 0.020 USD per GiB-month | under 1 USD; at the measured size about 0.8 USD a month while it is kept |
+| Images, scheduler, logs, endpoint tests | small. Measured: two images of 635 MB each (the first 0.5 GiB of a billing account is free, then about 0.10 USD per GiB-month: at most 0.07 USD a month); one scheduler job (the first three of a billing account are free) | a few USD at most; the part measured in M13 is under 0.1 USD a month |
+| **Total** | | **about 10 USD, under 15 USD**, before the monthly free tier of Cloud Run. **M13 used 4.04 USD of compute at list prices** (7.2 hours of the job), of the 10 USD approved for the milestone |
 
 The free tier of Cloud Run (240,000 vCPU-seconds and 450,000 GiB-seconds per month for this billing type) covers roughly 11 hours of CPU but only about 5 hours of memory at 6 vCPU and 24 GiB, so part of the compute above may cost nothing. The estimate is deliberately stated without it.
+
+**What the measured cost is and is not** (M13). It is computed from the run time of every execution and the list prices above (`hmrec.cloud_costs`, `results/m13_cloud/executions.csv`): 155,260 vCPU-seconds and 621,042 GiB-seconds. The bill itself was not read. Not in it: storage (cents for the days of the milestone), operations on the bucket through the mount (0.005 USD per 1,000 writes and listings, 0.0004 USD per 1,000 reads; not counted), and the monthly free tier, which would cover all of the vCPU-seconds and most of the GiB-seconds of M13 if nothing else used it.
+
+**What exists in the project after M13, and what it costs at rest** (listed on 2026-11-22 after the last execution; prices read from the pricing pages on 2026-11-22):
+
+| Resource | State | Cost at rest |
+|---|---|---|
+| Cloud Run job (12 executions, none running) | idle | nothing |
+| Cloud Scheduler job, weekly | **paused** | nothing (within the three free jobs of a billing account; a paused job counts as a job) |
+| Artifact Registry repository, two images of 635 MB | kept | at most 0.07 USD a month |
+| Bucket: `inputs/` 2.3 GiB, `pipeline/` 27.2 GiB, `pipeline-calibration/` 5.4 GiB, `dvc/` 5.6 GiB | kept | about 0.81 USD a month |
+| Three service accounts, one custom role, a workload identity pool and provider | kept | nothing |
+| Logs of the executions | kept by Cloud Logging for its default period | nothing (far below the free allowance) |
+
+Nothing runs and nothing is billed by the hour. `infra/teardown.sh` removes all of it except the bucket and the DVC data; with `--delete-objects` also the three pipeline prefixes.
 
 ## 13. Milestones
 
@@ -605,7 +767,7 @@ Local work first; nothing billable before M13 except a few cents of storage in M
 | **M10 Container and CI** | Dockerfile with CPU-only torch on Linux; `make` targets to build and run; GitHub Actions for image build, lint and tests; container measurement of the calibration items of §8.3 | S1; acceptance criteria fixed and recorded. **Closed on 2026-11-22** | Approval of the dependency change (D6); enough memory for the container runtime on the laptop |
 | **M11 Versioning** | DVC set-up with a Cloud Storage remote; bootstrap state created and tracked; data manifest; run manifests (schema, writer, reader); local MLflow sync and check commands | S2 for what exists before the pipeline (§7.4). **Closed on 2026-11-22** | A GCP project, the budget alert, one bucket |
 | **M12 Weekly pipeline, local** | The `weekly` driver with both modes, the simulated clock, resume and checks; the sharded `serve` path brought into main; monitoring signals and thresholds of §10 fixed and recorded; replay of V1–T4 in `eval` mode and the `serve` tick inside the container; every tick writes a run manifest and is visible in MLflow (the rest of S2); the model registry mirror of §7.3 | S3, and the rest of S2. **Closed on 2026-11-22** (§8.5) | Nothing |
-| **M13 Cloud** | Image in Artifact Registry; Cloud Run job; Cloud Scheduler entry; x86 calibration first; then replay of V1–T4 in `eval` mode and the `serve` tick in the cloud; measured run time, memory and cost | S4 | Enabling APIs; approving the spend |
+| **M13 Cloud** | Image in Artifact Registry; Cloud Run job; Cloud Scheduler entry; x86 calibration first; then replay of V1–T4 in `eval` mode and the `serve` tick in the cloud; measured run time, memory and cost | S4. **Closed on 2026-11-23** (§8.6) | Enabling APIs; approving the spend. Done by the user with `infra/setup.sh` and three repository secrets |
 | **M14 Serving, monitoring, deployment** | The API service; rollback command; alert policies; deployment on tag with Workload Identity Federation; the four provoked alerts; latency measured with synthetic requests | S5, S6, S7 | An email address for alerts |
 | **M15 Close** | Report section on stage 3 (architecture, runbook, measured cost, limits); the online-experiment design and the re-selection rule (below); teardown; tag `v0.3` | S8 | Confirming the teardown |
 
@@ -643,11 +805,12 @@ All approved by the user on 2026-11-21.
 | An acceptance quantity of §8.3 differs by more than 1.0% in the container or the cloud, or a structural check fails | The milestone stops. The most likely cause is the Two-Tower fine-tuning chain (eight chained updates in the replay; one update was measured in M10: Recall@100 within 0.05%); the investigation compares step by step, starting from the first step that differs |
 | The chained R6 differences grow over eight weeks | Each tick's R6 recall is compared with the record of that week and the pair overlap is reported, so growth is visible week by week; if the recall leaves the 1.0% band the cause is investigated rather than the threshold widened. **Measured in M12 (§8.5)**: the share of recorded pairs present falls from 99.77% to 99.44% over the chain, and the recall stays within 0.04% in every week |
 | A test or a run-time check assumes macOS (for example the Homebrew libomp) or a bit-exact number | It is made platform-aware explicitly, or reported for a decision. No assertion is loosened silently, and no lock file is changed |
-| A step does not fit Cloud Run Jobs because of in-memory files | The measures of §8.4, in that order |
+| A step does not fit Cloud Run Jobs because of in-memory files | The measures of §8.4, in that order. **Did not happen in M13**: the state is on the mounted bucket, the instance used at most 4.3 GiB of 24 GiB as Cloud Monitoring saw it, and the highest true peak of a process was 7.53 GB |
 | The container on the laptop is much slower than native | Acceptance runs become longer; they are not skipped. Measured for V4 (arm64 container against the laptop's records): the R6 fine-tune takes 3.5 times as long (199 s against 56 s), the feature build 2.4 times (120 s against 50 s), R6 prediction 1.7 times, R4 1.3 times; LightGBM about the same (278 s against 268 s); R5 is faster (116 s against 179 s, because the Linux build of `implicit` is multi-threaded) |
 | The CPU-only torch index changes macOS resolution in `uv.lock` | Detected by the lock comparison of §8.1; the change is reworked before it is committed |
 | GitHub Actions runner disk is too small for the image | Cache the dependency layer; if needed, build the image with Cloud Build instead |
-| Cost grows unexpectedly | The budget alerts; every cloud milestone ends by listing what is deployed |
+| Cost grows unexpectedly | The budget alerts; every cloud milestone ends by listing what is deployed. M13: 4.04 USD of compute, and the list of §12 |
+| A mounted bucket is not a file system: no atomic folder rename, slower small reads and writes, and two executions may run on different CPUs | Found and handled in M13: a step is committed file by file with its record last (§6.4); the time is paid in the file-heavy steps (§8.6); bit-identical repetition is not required (§8.3) |
 | The file-based use of MLflow does not fit the pinned MLflow version | Keep the manifests as the record and adapt the sync command; the acceptance of S2 does not depend on a particular MLflow backend. **Happened in M11**: MLflow 3.18 refuses a folder of files as a store, so the local store is a SQLite file (§7.3) |
 
 Open question that does not block M10: which email address receives alerts.
