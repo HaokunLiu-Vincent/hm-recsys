@@ -573,10 +573,10 @@ def serve_overlap(ours: pl.DataFrame, reference: pl.DataFrame) -> dict[str, floa
     return {
         "n_customers": float(ours["query_id"].n_unique()),
         "n_customers_in_reference": float(n),
-        "identical_list_share": both["identical"].sum() / n,
+        "identical_list_share": both.filter(pl.col("identical")).height / n,
         "same_articles_share": both.filter(pl.col("common") == pl.col("k")).height / n,
-        "mean_overlap": float((both["common"] / both["k"]).mean()),  # type: ignore[arg-type]  # not empty
-        "first_article_identical_share": both["first"].sum() / n,
+        "mean_overlap": float((both["common"] / both["k"]).to_numpy().mean()),
+        "first_article_identical_share": both.filter(pl.col("first")).height / n,
     }
 
 
