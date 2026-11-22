@@ -1,0 +1,14 @@
+week,anchor,kind,quantity,subject,value,record,relative_difference,threshold,inside,record_source,git_commit,recorded_at
+V1,2020-07-29,acceptance,recall,r1_popularity,0.07813545685962682,0.07813545685962682,0.0,0.01,True,results/m6_candidates.csv,1b3f1e51fb8e444cb1fd74386ba123ef517c0e67,2026-11-22T20:30:53
+V1,2020-07-29,acceptance,recall,r2_repurchase,0.03872368805281572,0.03872368805281572,0.0,0.01,True,results/m6_candidates.csv,1b3f1e51fb8e444cb1fd74386ba123ef517c0e67,2026-11-22T20:30:53
+V1,2020-07-29,acceptance,recall,r3_sibling,0.03408442021770993,0.03408442021770993,0.0,0.01,True,results/m6_candidates.csv,1b3f1e51fb8e444cb1fd74386ba123ef517c0e67,2026-11-22T20:30:53
+V1,2020-07-29,acceptance,recall,r4_itemcf,0.09065414366332576,0.09065414366332576,0.0,0.01,True,results/m6_candidates.csv,1b3f1e51fb8e444cb1fd74386ba123ef517c0e67,2026-11-22T20:30:53
+V1,2020-07-29,acceptance,recall,r5_wals,0.10148852293741242,0.10147702102982104,0.00011334494720738762,0.01,True,results/m6_candidates.csv,1b3f1e51fb8e444cb1fd74386ba123ef517c0e67,2026-11-22T20:30:53
+V1,2020-07-29,acceptance,recall,r6_twotower,0.15527738046802192,0.15527738046802192,0.0,0.01,True,results/m6_candidates.csv,1b3f1e51fb8e444cb1fd74386ba123ef517c0e67,2026-11-22T20:30:53
+V1,2020-07-29,acceptance,recall,union,0.2543905967171144,0.2543785197141435,4.747650463754564e-05,0.01,True,results/m6_candidates.csv,1b3f1e51fb8e444cb1fd74386ba123ef517c0e67,2026-11-22T20:30:53
+V1,2020-07-29,acceptance,map@12,,0.030108223383130718,0.030112271332103004,0.00013442854999684754,0.01,True,results/v_phase_metrics.csv,1b3f1e51fb8e444cb1fd74386ba123ef517c0e67,2026-11-22T20:30:53
+V1,2020-07-29,reported,rrf_baseline_map@12,,0.018510511085857956,0.018510960720404597,2.429017885305562e-05,,,results/v_phase_metrics.csv,1b3f1e51fb8e444cb1fd74386ba123ef517c0e67,2026-11-22T20:30:53
+V1,2020-07-29,reported,deduplicated_candidates,union,25226168.0,25226147.0,8.324695800749913e-07,,,results/m6_candidates.csv,1b3f1e51fb8e444cb1fd74386ba123ef517c0e67,2026-11-22T20:30:53
+V1,2020-07-29,reported,queries,,82802.0,82802.0,0.0,,,results/v_phase_metrics.csv,1b3f1e51fb8e444cb1fd74386ba123ef517c0e67,2026-11-22T20:30:53
+V1,2020-07-29,structural,feature_rows_minus_deduplicated_candidates,,0.0,0.0,0.0,,True,the feature step of the same tick (weeks/{anchor}/features/step.json),1b3f1e51fb8e444cb1fd74386ba123ef517c0e67,2026-11-22T20:30:53
+V1,2020-07-29,structural,duplicate_keys,,0.0,0.0,0.0,,True,the feature step of the same tick (weeks/{anchor}/features/step.json),1b3f1e51fb8e444cb1fd74386ba123ef517c0e67,2026-11-22T20:30:53

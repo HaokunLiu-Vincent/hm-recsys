@@ -1,0 +1,5 @@
+recorded_at,run_id,tick_anchor,mode,week,phase,step,purpose,git_commit
+2026-11-22T08:34:26,2020-07-29-eval-a1,2020-07-29,eval,V1,V,O1_queries,eval-mode query list: WHO buys in the week the tick opens (docs/mlops.md 6.2),99abd62a714f177bc00295b584c62e0804df86d4
+2026-11-22T09:01:22,2020-08-05-eval-a1,2020-08-05,eval,V1,V,C2_evaluate,"closing: label sets of the closed week, evaluation of its predictions",99abd62a714f177bc00295b584c62e0804df86d4
+2026-11-22T09:02:38,2020-08-05-eval-a1,2020-08-05,eval,V1,V,C3_sample,closing: Ranker training sample of the closed week (labels as training labels),99abd62a714f177bc00295b584c62e0804df86d4
+2026-11-22T09:05:57,2020-08-05-eval-a1,2020-08-05,eval,V2,V,O1_queries,eval-mode query list: WHO buys in the week the tick opens (docs/mlops.md 6.2),99abd62a714f177bc00295b584c62e0804df86d4
