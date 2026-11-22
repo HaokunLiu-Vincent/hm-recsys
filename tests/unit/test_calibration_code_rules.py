@@ -3,8 +3,9 @@
 The source files are read as text; nothing is imported, so the test itself
 loads neither torch nor LightGBM.
 
-    1. Only the calibration code uses the tolerance-accepted entry
-       (hmrec.ranker.platform_entry), and no other code imports hmrec.calibration.
+    1. Only the calibration code and the Ranker steps of the weekly pipeline
+       (hmrec.weekly.ranker_steps, M12: mode "accepted") use the tolerance-accepted
+       entry (hmrec.ranker.platform_entry), and no other code imports hmrec.calibration.
     2. The two sides stay apart: the recall items never import a LightGBM
        module, the Ranker items never import torch or the recall code, and the
        shared modules import neither.
@@ -94,8 +95,11 @@ def test_the_module_lists_are_complete() -> None:
     assert files == sorted(SHARED_MODULES + TORCH_SIDE_MODULES + LIGHTGBM_SIDE_MODULES)
 
 
-def test_only_the_calibration_code_uses_the_tolerance_accepted_entry() -> None:
+def test_only_the_calibration_and_the_weekly_ranker_use_the_tolerance_accepted_entry() -> None:
+    # The calibration measures a platform (mode "calibration"); the weekly pipeline runs
+    # on an accepted one (mode "accepted", docs/mlops.md 6.1). Nothing else may use it.
     allowed = {CALIBRATION / name for name in LIGHTGBM_SIDE_MODULES}
+    allowed.add(SRC / "weekly" / "ranker_steps.py")
     files = [*SRC.rglob("*.py"), *(REPO / "scripts").glob("*.py")]
     for path in files:
         if path in allowed:

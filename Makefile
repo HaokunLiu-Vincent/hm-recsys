@@ -10,6 +10,7 @@ export OMP_NUM_THREADS := 6
 .PHONY: image-test-torch-side image-test-lightgbm-side image-calibrate image-r6-repeatability
 .PHONY: setup-tools dvc data-manifest data-verify bootstrap-verify
 .PHONY: mlflow-sync mlflow-check mlflow-ui test-tools
+.PHONY: weekly image-weekly
 
 ## setup: create / update .venv from uv.lock (includes the dev group)
 setup:
@@ -154,6 +155,41 @@ image-calibrate:
 #   make image-r6-repeatability ARGS="--setting implemented --rows 8192"
 image-r6-repeatability:
 	$(IMAGE_RUN) python scripts/m10_r6_repeatability.py $(ARGS)
+
+# ---------------------------------------------------------------- M12 weekly pipeline
+# docs/mlops.md §6. One tick: close the week before the anchor, open the week of the anchor.
+#
+#   make image-weekly ARGS="--anchor 2020-07-29 --mode eval"     one tick in the container
+#
+# A tick runs in the container, from an image built with `make image-build`. The mounts
+# are fixed here on purpose, and they are what makes the tick self-contained:
+#   read-only   data/processed (the source tables), data/bootstrap (the state at the end
+#               of F4), artifacts/features/category_codes.json. These are exactly the
+#               DVC-tracked inputs; NO other stage-1 artifact is visible in the container,
+#               so a tick cannot read a stage-1 candidate, feature, label or model.
+#   writable    artifacts/pipeline (the pipeline's state) and results/m12_replay (its
+#               result tables). Nothing else can be written.
+# 6 CPUs = num_threads of configs/base.yaml; 12 GiB = the project's memory budget.
+# Keep the laptop awake for a long run: caffeinate -i make image-weekly ARGS="..."
+PIPELINE_STATE = $(CURDIR)/artifacts/pipeline
+REPLAY_RESULTS = $(CURDIR)/results/m12_replay
+CATEGORY_CODES = artifacts/features/category_codes.json
+
+## image-weekly: one tick of the weekly pipeline in a container (ARGS = arguments of scripts/weekly.py)
+image-weekly:
+	@mkdir -p "$(PIPELINE_STATE)" "$(REPLAY_RESULTS)"
+	docker run --rm $(IMAGE_PLATFORM_FLAG) \
+		--cpus $(CALIBRATION_CPUS) --memory $(CALIBRATION_MEMORY) \
+		--mount "type=bind,src=$(CURDIR)/data/processed,dst=/app/data/processed,readonly" \
+		--mount "type=bind,src=$(CURDIR)/data/bootstrap,dst=/app/data/bootstrap,readonly" \
+		--mount "type=bind,src=$(CURDIR)/$(CATEGORY_CODES),dst=/app/$(CATEGORY_CODES),readonly" \
+		--mount "type=bind,src=$(PIPELINE_STATE),dst=/app/artifacts/pipeline" \
+		--mount "type=bind,src=$(REPLAY_RESULTS),dst=/app/results/m12_replay" \
+		$(IMAGE) python scripts/weekly.py $(ARGS)
+
+## weekly: one tick on this machine, without a container (ARGS as above; the laptop's strict Ranker entry)
+weekly:
+	uv run python scripts/weekly.py $(ARGS)
 
 # ---------------------------------------------------------------- M11 versioning
 # docs/mlops.md §7. DVC and MLflow are in dependency groups of their own ("versioning",
