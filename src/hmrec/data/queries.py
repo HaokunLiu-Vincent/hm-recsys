@@ -215,6 +215,51 @@ def build_fold_queries(
     )
 
 
+PRICE = "price"
+N_LINES = "n_lines"
+PURCHASE_VALUE = "purchase_value"
+
+
+def label_week_purchase_values(
+    transactions: pl.LazyFrame, catalog: pl.DataFrame, fold: Fold, day_zero: date
+) -> pl.DataFrame:
+    """What every customer paid for every catalog article bought in a fold's label week.
+
+    For the hit value of the weekly pipeline (docs/mlops.md §10). Like the label
+    sets, this reads the answers of the week [anchor, label_end], through
+    asof.label_week_transactions.
+
+    Unlike G_q, purchase lines are NOT de-duplicated: a customer who bought the
+    same article twice paid twice.
+
+    Args:
+        transactions: Processed transactions (one row per purchase line, int16
+            t_dat_day, float32 price).
+        catalog: Catalog C; column article_idx (int32).
+        fold: The week.
+        day_zero: Day 0 of t_dat_day.
+
+    Returns:
+        One row per (customer_idx, article_idx) bought in the week, sorted by
+        both. Columns: customer_idx (int32), article_idx (int32), n_lines
+        (int32, purchase lines), purchase_value (float64, the sum of their
+        prices in the dataset's normalised price units).
+    """
+    label_week = label_week_transactions(
+        transactions, fold, day_zero, columns=[CUSTOMER_IDX, ARTICLE_IDX, PRICE]
+    )
+    in_catalog = label_week.join(catalog.select(ARTICLE_IDX), on=ARTICLE_IDX, how="semi")
+    return (
+        in_catalog.group_by(CUSTOMER_IDX, ARTICLE_IDX)
+        .agg(
+            pl.len().cast(pl.Int32).alias(N_LINES),
+            # float64 on purpose: a sum of float32 prices would lose digits.
+            pl.col(PRICE).cast(pl.Float64).sum().alias(PURCHASE_VALUE),
+        )
+        .sort(CUSTOMER_IDX, ARTICLE_IDX)
+    )
+
+
 # ---------------------------------------------------------------- checks
 
 
