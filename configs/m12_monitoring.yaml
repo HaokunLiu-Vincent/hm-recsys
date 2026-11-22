@@ -1,0 +1,42 @@
+# M12: the monitoring rules of the weekly pipeline (docs/mlops.md §10). Read by
+# hmrec.config.load_monitoring_config; applied by hmrec.weekly.monitoring.
+#
+# THE USER'S DECISION of 2026-11-22, recorded in docs/decisions.md BEFORE the first replay
+# tick (docs/mlops.md invariant 3). These values are not changed afterwards, whatever a
+# replay result shows. No rule changes a configuration: a flag or an alert is a row in the
+# monitoring table and a line in the run manifest, nothing else.
+
+# Every "previous weeks" comparison uses the mean over this many weeks right before the
+# week that is judged. A rule with FEWER weeks of history records its value and raises
+# nothing. The bootstrap history of F1-F4 supplies the previous weeks of V1 where stage 1
+# recorded the quantity (recall of a channel, feature statistics, candidates per query).
+history_weeks: 4
+
+# One week late: these need the purchases of the predicted week (step C2).
+labelled:
+  # Flag: a channel's recall is more than this share below its mean of the previous weeks.
+  channel_recall_max_relative_drop: 0.10
+  # Flag: the union recall of the six channels is below this value.
+  union_recall_min: 0.24
+  # Flag: the Ranker's MAP@12 is not above the MAP@12 of the RRF baseline.
+  ranker_must_beat_rrf: true
+  # Alert: the same flag (same rule, same subject) is raised in this many consecutive weeks.
+  consecutive_weeks_for_alert: 3
+  # The hit value is recorded only: no threshold, no flag.
+
+# Same week: these need no labels.
+same_week:
+  # Alert (and the tick stops): the new week's transaction row count is below
+  # `min_ratio` or above `max_ratio` times the mean of the previous weeks, or the date
+  # range of the new week is wrong.
+  transactions_min_ratio: 0.50
+  transactions_max_ratio: 2.00
+  # Flag a feature: its missing rate moves by more than this (absolute, 0.05 = 5
+  # percentage points) against the mean of the previous weeks ...
+  feature_missing_rate_max_change: 0.05
+  # ... or its mean changes by more than this share (relative) against that mean.
+  feature_mean_max_relative_change: 0.50
+  # Flag an output signal (candidates per query, share of recommended items among the 100
+  # most popular articles of the week, number of distinct articles recommended): it is
+  # more than this share away from its mean of the previous weeks.
+  output_signal_max_relative_change: 0.25

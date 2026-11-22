@@ -13,7 +13,8 @@ Usage:
 The layout follows docs/proposal.md §14 and §14.2.
 """
 
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
+from datetime import date
 from pathlib import Path
 
 from hmrec.config import BaseConfig, load_base_config
@@ -26,6 +27,25 @@ BASE_CONFIG_FILE = CONFIGS_DIR / "base.yaml"
 # the tree of a calibration run that holds its channels (see EndToEndInputPaths).
 R6_CHANNEL_NAME = "r6_twotower"
 CALIBRATION_MAIN_TREE = "main"
+
+# The step folders of a week in the state of the weekly pipeline (StateLayout, M12).
+INGEST_DIR = "ingest"
+QUERIES_DIR = "queries"
+RECALL_DIR_PREFIX = "recall_"
+FEATURES_DIR = "features"
+FEATURES_SHARED_DIR = "features_shared"
+SHARDS_DIR = "shards"
+SHARD_TOP_DIR = "top"
+DATASET_DIR = "ranker_dataset"
+MODEL_DIR = "ranker_model"
+SCORES_DIR = "scores"
+EVALUATION_DIR = "evaluation"
+SAMPLE_DIR = "sample"
+TWOTOWER_DIR = "twotower"
+STAGING_DIR = ".staging"
+FAILED_DIR = ".failed"
+R1_CHANNEL_NAME = "r1_popularity"
+R5_CHANNEL_NAME = "r5_wals"
 
 
 def resolve_root(root: str, project_root: Path) -> Path:
@@ -894,6 +914,47 @@ class ProjectPaths:
         """artifacts/pipeline/runs/{run_id}/manifest.json: the record of one tick."""
         return self.pipeline_runs_dir / run_id / "manifest.json"
 
+    def bootstrap_monitoring_file(self, table: str) -> Path:
+        """data/bootstrap/monitoring/{table}: the F1-F4 rows of a stage-1 result table."""
+        return self.bootstrap_dir / "monitoring" / table
+
+    # ------------------------------------------------------------ stage 3: M12 weekly pipeline
+    # docs/mlops.md §6 and §7.2. The state of the pipeline lies under artifacts/pipeline/
+    # (StateLayout); its result tables under results/m12_replay/.
+
+    @property
+    def pipeline_config_file(self) -> Path:
+        """configs/m12_pipeline.yaml: shard size, metrics, output signals, the replay's ticks."""
+        return self.configs_dir / "m12_pipeline.yaml"
+
+    @property
+    def monitoring_config_file(self) -> Path:
+        """configs/m12_monitoring.yaml: the monitoring rules, fixed before the first replay tick."""
+        return self.configs_dir / "m12_monitoring.yaml"
+
+    @property
+    def pipeline_state_dir(self) -> Path:
+        """artifacts/pipeline/: the local state of the weekly pipeline (layout of mlops §7.2)."""
+        return self.artifacts_root / "pipeline"
+
+    @property
+    def replay_results_dir(self) -> Path:
+        """results/m12_replay/: the result tables of the weekly pipeline and its replay."""
+        return self.results_root / "m12_replay"
+
+    def replay_table_file(self, table: str) -> Path:
+        """results/m12_replay/{table}.csv, e.g. "monitoring" or "comparison"."""
+        return self.replay_results_dir / f"{table}.csv"
+
+    @property
+    def kaggle_reference_dir(self) -> Path:
+        """artifacts/kaggle/submission/: the saved prediction set of the Kaggle late submission.
+
+        Read only by the `serve` tick's diagnostic (docs/mlops.md §6.3); the files
+        were written on branch kaggle-late-submission and are never written here.
+        """
+        return self.artifacts_root / "kaggle" / "submission"
+
     @property
     def mlflow_dir(self) -> Path:
         """artifacts/mlflow/: the local MLflow store (not in git; rebuilt by `make mlflow-sync`)."""
@@ -1022,6 +1083,331 @@ def end_to_end_input_paths(
         statistical_artifacts_root=paths.calibration_tree_dir(
             platform, statistical_run, CALIBRATION_MAIN_TREE
         ),
+    )
+
+
+# ---------------------------------------------------------------- stage 3: M12 weekly pipeline
+
+
+@dataclass(frozen=True)
+class StateLayout:
+    """Where everything of the weekly pipeline's state lies (docs/mlops.md §7.2).
+
+        {root}/state/current.json           pointer to the current prediction set
+        {root}/weeks/{anchor}/{step}/       the outputs of one step for one week
+        {root}/weeks/{anchor}/.staging/     a step's outputs until its checks passed
+        {root}/weeks/{anchor}/.failed/      staging folders of failed attempts (kept)
+        {root}/predictions/{anchor}/        one prediction set
+        {root}/runs/{run_id}/               manifest.json, logs/, failures/
+
+    A week is named by its anchor (ISO date). On the laptop the root is
+    artifacts/pipeline/; in the cloud the same keys lie in a bucket (M13).
+
+    Attributes:
+        root: The folder that holds the state.
+    """
+
+    root: Path
+
+    @property
+    def current_file(self) -> Path:
+        """state/current.json: replaced only by step O5."""
+        return self.root / "state" / "current.json"
+
+    def week_dir(self, anchor: date) -> Path:
+        """weeks/{anchor}/: everything of the week that starts at `anchor`."""
+        return self.root / "weeks" / anchor.isoformat()
+
+    def step_dir(self, anchor: date, step_dir: str) -> Path:
+        """weeks/{anchor}/{step_dir}/: the finished outputs of one step."""
+        return self.week_dir(anchor) / step_dir
+
+    def staging_dir(self, anchor: date, step_dir: str) -> Path:
+        """weeks/{anchor}/.staging/{step_dir}/: where a running step writes."""
+        return self.week_dir(anchor) / STAGING_DIR / step_dir
+
+    def failed_dir(self, anchor: date) -> Path:
+        """weeks/{anchor}/.failed/: staging folders of failed attempts, moved here."""
+        return self.week_dir(anchor) / FAILED_DIR
+
+    def published_file(self, anchor: date) -> Path:
+        """weeks/{anchor}/published.json: written by O5; the week's predictions are out."""
+        return self.week_dir(anchor) / "published.json"
+
+    def closed_file(self, anchor: date) -> Path:
+        """weeks/{anchor}/closed.json: written when C2-C4 of the week are done."""
+        return self.week_dir(anchor) / "closed.json"
+
+    def monitoring_file(self, anchor: date) -> Path:
+        """weeks/{anchor}/monitoring.json: the findings of the tick at `anchor`."""
+        return self.week_dir(anchor) / "monitoring.json"
+
+    def prediction_set_dir(self, anchor: date) -> Path:
+        """predictions/{anchor}/: the prediction set of the week (Top-K, manifest)."""
+        return self.root / "predictions" / anchor.isoformat()
+
+    def prediction_staging_dir(self, anchor: date) -> Path:
+        """predictions/.staging/{anchor}/: the prediction set until it is complete."""
+        return self.root / "predictions" / STAGING_DIR / anchor.isoformat()
+
+    @property
+    def runs_dir(self) -> Path:
+        """runs/: one folder per run of a tick."""
+        return self.root / "runs"
+
+    def run_manifest_file(self, run_id: str) -> Path:
+        """runs/{run_id}/manifest.json: the record of one run of a tick."""
+        return self.runs_dir / run_id / "manifest.json"
+
+    def step_log_file(self, run_id: str, step: str) -> Path:
+        """runs/{run_id}/logs/{step}.log: the log of one step's process."""
+        return self.runs_dir / run_id / "logs" / f"{step}.log"
+
+    def step_failure_file(self, run_id: str, step: str) -> Path:
+        """runs/{run_id}/failures/{step}.txt: why a step's process stopped."""
+        return self.runs_dir / run_id / "failures" / f"{step}.txt"
+
+
+def shard_name(shard: int) -> str:
+    """The folder name of a shard, e.g. 7 -> "007"."""
+    if shard < 0:
+        raise ValueError(f"a shard number must be >= 0, got {shard}")
+    return f"{shard:03d}"
+
+
+def recall_step_dir(channel: str) -> str:
+    """The step folder of one recall channel, e.g. "recall_r4_itemcf"."""
+    return f"{RECALL_DIR_PREFIX}{channel}"
+
+
+def shard_step_dir(shard: int, part: str) -> str:
+    """The step folder of one part of a shard, e.g. (7, "features") -> "shards/007/features"."""
+    return f"{SHARDS_DIR}/{shard_name(shard)}/{part}"
+
+
+@dataclass(frozen=True)
+class PipelinePaths(ProjectPaths):
+    """The ProjectPaths one step of a tick of the weekly pipeline works with (M12).
+
+    The stage-1 functions read and write where a ProjectPaths tells them. Given
+    this one they work inside the pipeline's state, unchanged:
+
+        artifacts_root     the READ-ONLY bootstrap state (data/bootstrap/). Its
+                           layout is the one of artifacts/, so the locked base
+                           model, the chain model after F4, the alarm users and the
+                           samples of F1-F4 are found where the stage-1 code looks.
+        week-keyed paths   a week the pipeline opened (week_anchors) is answered
+                           from the state: weeks/{anchor}/{step folder}/...
+                           A fold before the first tick keeps the bootstrap path.
+        transactions_file  the table step C1 of THIS tick wrote: every purchase
+                           line before the tick's anchor and nothing later. This
+                           is how the simulated clock is enforced by construction
+                           (docs/mlops.md §6.3): a step cannot read a later row,
+                           because its input does not hold one.
+        staging            the outputs of the step that is running go to
+                           weeks/{anchor}/.staging/{step folder}/; the driver
+                           renames the folder when the step's checks passed.
+        shard              in `serve` mode a week's candidates, vectors and
+                           features are cut into shards of customers; with a shard
+                           number the same methods answer that shard's files.
+
+    Attributes:
+        layout: The state's layout.
+        tick_anchor: The anchor of the tick this process belongs to.
+        week_anchors: (week name, anchor) of every week the pipeline has opened
+            up to this tick, e.g. (("V1", 2020-07-29), ...).
+        category_codes: The category code table shared by all weeks
+            (artifacts/features/category_codes.json, DVC-tracked; only compared).
+        staging: (anchor of the week, step folder) of the running step, or None.
+        shard: The shard the paths are answered for, or None (a whole week).
+    """
+
+    layout: StateLayout
+    tick_anchor: date
+    week_anchors: tuple[tuple[str, date], ...]
+    category_codes: Path
+    staging: tuple[date, str] | None
+    shard: int | None
+
+    def for_shard(self, shard: int) -> "PipelinePaths":
+        """The same paths, answered for one shard of customers."""
+        return replace(self, shard=shard)
+
+    def anchor_of(self, week: str) -> date | None:
+        """The anchor of a week the pipeline opened; None for a fold of the bootstrap state."""
+        for name, anchor in self.week_anchors:
+            if name == week:
+                return anchor
+        return None
+
+    def require_anchor(self, week: str) -> date:
+        """The anchor of a pipeline week; fails for a fold the pipeline never opened."""
+        anchor = self.anchor_of(week)
+        if anchor is None:
+            known = [name for name, _ in self.week_anchors]
+            raise ValueError(f"{week!r} is not a week of the pipeline; its weeks are {known}")
+        return anchor
+
+    def step_dir(self, anchor: date, step_dir: str) -> Path:
+        """The folder of a step: the staging folder for the running step, else the finished one."""
+        if self.staging == (anchor, step_dir):
+            return self.layout.staging_dir(anchor, step_dir)
+        return self.layout.step_dir(anchor, step_dir)
+
+    def week_step_dir(self, week: str, step_dir: str) -> Path:
+        """step_dir for a week given by name."""
+        return self.step_dir(self.require_anchor(week), step_dir)
+
+    def _recall_dir(self, week: str, channel: str) -> Path:
+        """The folder of a channel's candidates and vectors (of the shard, if one is set)."""
+        folder = self.week_step_dir(week, recall_step_dir(channel))
+        if self.shard is None:
+            return folder
+        return folder / SHARDS_DIR / shard_name(self.shard)
+
+    # ------------------------------------------------------------ inputs of a tick
+
+    @property
+    def transactions_file(self) -> Path:
+        """The table C1 of this tick wrote: purchase lines with t_dat before the tick's anchor."""
+        return self.step_dir(self.tick_anchor, INGEST_DIR) / "transactions.parquet"
+
+    @property
+    def ingest_record_file(self) -> Path:
+        """weeks/{tick}/ingest/ingest.json: row counts per week and the checked date range."""
+        return self.step_dir(self.tick_anchor, INGEST_DIR) / "ingest.json"
+
+    @property
+    def category_codes_file(self) -> Path:
+        """The category code table shared by all weeks (compared, never written here)."""
+        return self.category_codes
+
+    # ------------------------------------------------------------ week-keyed stage-1 paths
+
+    def queries_file(self, fold: str) -> Path:
+        """weeks/{anchor}/queries/queries.parquet."""
+        return self.week_step_dir(fold, QUERIES_DIR) / "queries.parquet"
+
+    def labels_file(self, fold: str) -> Path:
+        """weeks/{anchor}/evaluation/labels.parquet: written by C2 when the week is closed."""
+        return self.week_step_dir(fold, EVALUATION_DIR) / "labels.parquet"
+
+    def candidates_file(self, fold: str, channel: str) -> Path:
+        """weeks/{anchor}/recall_{channel}/[shards/{k}/]candidates.parquet."""
+        return self._recall_dir(fold, channel) / "candidates.parquet"
+
+    def r1_bucket_scores_file(self, fold: str) -> Path:
+        """R1's S(g, i) table: one per week, also in `serve` mode (the same for every shard)."""
+        folder = self.week_step_dir(fold, recall_step_dir(R1_CHANNEL_NAME))
+        return folder / "r1_bucket_scores.parquet"
+
+    def wals_vectors_dir(self, fold: str) -> Path:
+        """weeks/{anchor}/recall_r5_wals/[shards/{k}/]vectors/."""
+        return self._recall_dir(fold, R5_CHANNEL_NAME) / "vectors"
+
+    def twotower_vectors_dir(self, fold: str) -> Path:
+        """weeks/{anchor}/recall_r6_twotower/[shards/{k}/]vectors/."""
+        return self._recall_dir(fold, R6_CHANNEL_NAME) / "vectors"
+
+    def features_dir(self, fold: str) -> Path:
+        """weeks/{anchor}/features/, or weeks/{anchor}/shards/{k}/features/ for a shard."""
+        if self.shard is None:
+            return self.week_step_dir(fold, FEATURES_DIR)
+        return self.week_step_dir(fold, shard_step_dir(self.shard, FEATURES_DIR))
+
+    def twotower_locked_chain_checkpoint_file(self, fold: str) -> Path:
+        """The chain model after the fine-tune on a week.
+
+        A pipeline week: weeks/{anchor}/twotower/{fold}.pt (written by step C4 of the
+        next tick). A fold before the first tick: the bootstrap state's file.
+        """
+        if self.anchor_of(fold) is None:
+            return super().twotower_locked_chain_checkpoint_file(fold)
+        return self.week_step_dir(fold, TWOTOWER_DIR) / f"{fold}.pt"
+
+    def chain_record_file(self, fold: str) -> Path:
+        """weeks/{anchor}/twotower/chain_record.csv: the row of the week's fine-tune."""
+        return self.week_step_dir(fold, TWOTOWER_DIR) / "chain_record.csv"
+
+    def ranker_sample_file(self, experiment: str, fold: str, ratio: int) -> Path:
+        """The training sample of a week: the state's for a pipeline week, else the bootstrap's."""
+        if self.anchor_of(fold) is None:
+            return super().ranker_sample_file(experiment, fold, ratio)
+        return self.week_step_dir(fold, SAMPLE_DIR) / f"r{ratio}.parquet"
+
+    def ranker_dataset_dir(self, experiment: str, target_fold: str, ratio: int) -> Path:
+        """weeks/{anchor}/ranker_dataset/: the Dataset of the model that predicts the week."""
+        return self.week_step_dir(target_fold, DATASET_DIR)
+
+    def ranker_model_file(self, area: str, experiment: str, config_id: str, fold: str) -> Path:
+        """weeks/{anchor}/ranker_model/model.txt: the Ranker that predicts the week."""
+        return self.week_step_dir(fold, MODEL_DIR) / "model.txt"
+
+    # ------------------------------------------------------------ files only the pipeline has
+
+    def feature_stats_file(self, fold: str) -> Path:
+        """The per-feature statistics next to a week's (or a shard's) features."""
+        return self.features_dir(fold) / "feature_stats.csv"
+
+    def item_table_file(self, fold: str) -> Path:
+        """`serve` mode: the article table of the week, computed once for all shards."""
+        return self.week_step_dir(fold, FEATURES_SHARED_DIR) / "item_table.parquet"
+
+    def type_share_file(self, fold: str) -> Path:
+        """`serve` mode: the global product-type shares of the week, computed once."""
+        return self.week_step_dir(fold, FEATURES_SHARED_DIR) / "global_type_share.parquet"
+
+    def top_file(self, fold: str) -> Path:
+        """The Top-K of a week (scores/top.parquet) or of one shard (shards/{k}/top/top.parquet)."""
+        if self.shard is None:
+            return self.week_step_dir(fold, SCORES_DIR) / "top.parquet"
+        return self.week_step_dir(fold, shard_step_dir(self.shard, SHARD_TOP_DIR)) / "top.parquet"
+
+    def signals_file(self, fold: str) -> Path:
+        """weeks/{anchor}/scores/signals.json: the output signals of the week (mlops §10)."""
+        return self.week_step_dir(fold, SCORES_DIR) / "signals.json"
+
+    def evaluation_file(self, fold: str) -> Path:
+        """weeks/{anchor}/evaluation/metrics.json: what C2 measured for the closed week."""
+        return self.week_step_dir(fold, EVALUATION_DIR) / "metrics.json"
+
+    def model_record_file(self, fold: str) -> Path:
+        """weeks/{anchor}/ranker_model/model.json: sha256 and training facts of the Ranker."""
+        return self.week_step_dir(fold, MODEL_DIR) / "model.json"
+
+
+def pipeline_paths(
+    paths: ProjectPaths,
+    layout: StateLayout,
+    tick_anchor: date,
+    week_anchors: tuple[tuple[str, date], ...],
+    staging: tuple[date, str] | None,
+) -> PipelinePaths:
+    """The paths of one step of a tick (see PipelinePaths).
+
+    Args:
+        paths: The project paths (data/processed/, data/bootstrap/, configs/).
+        layout: The state's layout.
+        tick_anchor: The anchor of the tick.
+        week_anchors: (name, anchor) of every week the pipeline opened up to this tick.
+        staging: (anchor of the week, step folder) of the running step, or None
+            for a process that only reads the state.
+
+    Returns:
+        A PipelinePaths whose artifacts root is the bootstrap state and whose
+        result tables go to results/m12_replay/.
+    """
+    return PipelinePaths(
+        project_root=paths.project_root,
+        data_root=paths.data_root,
+        artifacts_root=paths.bootstrap_dir,
+        results_root=paths.replay_results_dir,
+        layout=layout,
+        tick_anchor=tick_anchor,
+        week_anchors=week_anchors,
+        category_codes=paths.category_codes_file,
+        staging=staging,
+        shard=None,
     )
 
 

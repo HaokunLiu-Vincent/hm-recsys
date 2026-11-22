@@ -3457,3 +3457,177 @@ def parse_versioning_config(raw: Mapping[str, Any]) -> VersioningConfig:
 def load_versioning_config(path: Path) -> VersioningConfig:
     """Read and validate configs/m11_versioning.yaml."""
     return parse_versioning_config(load_yaml(path))
+
+
+# ---------------------------------------------------------------- m12_pipeline.yaml
+
+
+@dataclass(frozen=True)
+class PipelineConfig:
+    """Settings from configs/m12_pipeline.yaml (the weekly pipeline). Nothing here changes a result.
+
+    Attributes:
+        shard_customers: Customers per shard in `serve` mode (> 0).
+        metrics: The metrics step C2 computes, the acceptance metric first.
+        popular_articles: How many of the most popular articles the output signal
+            "share of recommended items among the most popular" counts (> 0).
+        popular_window_days: Days before the anchor whose purchase lines define
+            "most popular" (> 0).
+        replay_eval_folds: The folds the replay runs in `eval` mode, in order.
+        replay_serve_anchor: The anchor of the replay's one `serve` tick.
+    """
+
+    shard_customers: int
+    metrics: tuple[str, ...]
+    popular_articles: int
+    popular_window_days: int
+    replay_eval_folds: tuple[str, ...]
+    replay_serve_anchor: date
+
+
+def parse_pipeline_config(raw: Mapping[str, Any]) -> PipelineConfig:
+    """Build a PipelineConfig from the parsed content of configs/m12_pipeline.yaml.
+
+    Raises:
+        ValueError: If a key is missing or unknown, a number is not positive, or a
+            list is empty.
+    """
+    where = "m12_pipeline"
+    check_keys(raw, {"serve", "evaluation", "output_signals", "replay"}, where)
+    serve = get_mapping(raw, "serve", where)
+    check_keys(serve, {"shard_customers"}, f"{where}.serve")
+    evaluation = get_mapping(raw, "evaluation", where)
+    check_keys(evaluation, {"metrics"}, f"{where}.evaluation")
+    signals = get_mapping(raw, "output_signals", where)
+    check_keys(signals, {"popular_articles", "popular_window_days"}, f"{where}.output_signals")
+    replay = get_mapping(raw, "replay", where)
+    check_keys(replay, {"eval_folds", "serve_anchor"}, f"{where}.replay")
+    config = PipelineConfig(
+        shard_customers=get_int(serve, "shard_customers", f"{where}.serve"),
+        metrics=get_str_list(evaluation, "metrics", f"{where}.evaluation"),
+        popular_articles=get_int(signals, "popular_articles", f"{where}.output_signals"),
+        popular_window_days=get_int(signals, "popular_window_days", f"{where}.output_signals"),
+        replay_eval_folds=get_str_list(replay, "eval_folds", f"{where}.replay"),
+        replay_serve_anchor=get_date(replay, "serve_anchor", f"{where}.replay"),
+    )
+    for name in ("shard_customers", "popular_articles", "popular_window_days"):
+        require_positive(getattr(config, name), f"{where}.{name}")
+    if not config.metrics or not config.replay_eval_folds:
+        raise ValueError(f"{where}: evaluation.metrics and replay.eval_folds must not be empty")
+    return config
+
+
+def load_pipeline_config(path: Path) -> PipelineConfig:
+    """Read and validate configs/m12_pipeline.yaml."""
+    return parse_pipeline_config(load_yaml(path))
+
+
+# ---------------------------------------------------------------- m12_monitoring.yaml
+
+
+@dataclass(frozen=True)
+class MonitoringConfig:
+    """The monitoring rules of the weekly pipeline (configs/m12_monitoring.yaml, mlops §10).
+
+    Fixed by the user before the first replay tick; never changed after a result.
+
+    Attributes:
+        history_weeks: Weeks right before the judged week whose mean a rule
+            compares with; with fewer weeks of history a rule raises nothing.
+        channel_recall_max_relative_drop: A channel's recall is flagged when it
+            is more than this share below the mean of the previous weeks.
+        union_recall_min: The union recall is flagged below this value.
+        ranker_must_beat_rrf: Flag when the Ranker's MAP@12 is not above the
+            RRF baseline's.
+        consecutive_weeks_for_alert: A labelled flag raised in this many
+            consecutive weeks becomes an alert.
+        transactions_min_ratio: Alert when the new week's row count is below
+            this many times the mean of the previous weeks.
+        transactions_max_ratio: Alert when it is above this many times that mean.
+        feature_missing_rate_max_change: A feature is flagged when its missing
+            rate moves by more than this (absolute) against that mean.
+        feature_mean_max_relative_change: ... or its mean by more than this share.
+        output_signal_max_relative_change: An output signal is flagged when it
+            is more than this share away from its mean of the previous weeks.
+    """
+
+    history_weeks: int
+    channel_recall_max_relative_drop: float
+    union_recall_min: float
+    ranker_must_beat_rrf: bool
+    consecutive_weeks_for_alert: int
+    transactions_min_ratio: float
+    transactions_max_ratio: float
+    feature_missing_rate_max_change: float
+    feature_mean_max_relative_change: float
+    output_signal_max_relative_change: float
+
+
+def parse_monitoring_config(raw: Mapping[str, Any]) -> MonitoringConfig:
+    """Build a MonitoringConfig from the parsed content of configs/m12_monitoring.yaml.
+
+    Raises:
+        ValueError: If a key is missing or unknown, a threshold is not positive,
+            or the transaction band is empty (min_ratio >= max_ratio).
+    """
+    where = "m12_monitoring"
+    check_keys(raw, {"history_weeks", "labelled", "same_week"}, where)
+    labelled = get_mapping(raw, "labelled", where)
+    labelled_keys = {
+        "channel_recall_max_relative_drop",
+        "union_recall_min",
+        "ranker_must_beat_rrf",
+        "consecutive_weeks_for_alert",
+    }
+    check_keys(labelled, labelled_keys, f"{where}.labelled")
+    same_week = get_mapping(raw, "same_week", where)
+    same_week_keys = {
+        "transactions_min_ratio",
+        "transactions_max_ratio",
+        "feature_missing_rate_max_change",
+        "feature_mean_max_relative_change",
+        "output_signal_max_relative_change",
+    }
+    same_where = f"{where}.same_week"
+    check_keys(same_week, same_week_keys, same_where)
+    config = MonitoringConfig(
+        history_weeks=get_int(raw, "history_weeks", where),
+        channel_recall_max_relative_drop=get_float(
+            labelled, "channel_recall_max_relative_drop", f"{where}.labelled"
+        ),
+        union_recall_min=get_float(labelled, "union_recall_min", f"{where}.labelled"),
+        ranker_must_beat_rrf=get_bool(labelled, "ranker_must_beat_rrf", f"{where}.labelled"),
+        consecutive_weeks_for_alert=get_int(
+            labelled, "consecutive_weeks_for_alert", f"{where}.labelled"
+        ),
+        transactions_min_ratio=get_float(same_week, "transactions_min_ratio", same_where),
+        transactions_max_ratio=get_float(same_week, "transactions_max_ratio", same_where),
+        feature_missing_rate_max_change=get_float(
+            same_week, "feature_missing_rate_max_change", same_where
+        ),
+        feature_mean_max_relative_change=get_float(
+            same_week, "feature_mean_max_relative_change", same_where
+        ),
+        output_signal_max_relative_change=get_float(
+            same_week, "output_signal_max_relative_change", same_where
+        ),
+    )
+    positive = (
+        "history_weeks",
+        "channel_recall_max_relative_drop",
+        "union_recall_min",
+        "consecutive_weeks_for_alert",
+        *sorted(same_week_keys),
+    )
+    for name in positive:
+        require_positive(getattr(config, name), f"{where}.{name}")
+    if config.transactions_min_ratio >= config.transactions_max_ratio:
+        raise ValueError(
+            f"{where}.same_week: transactions_min_ratio must be below transactions_max_ratio"
+        )
+    return config
+
+
+def load_monitoring_config(path: Path) -> MonitoringConfig:
+    """Read and validate configs/m12_monitoring.yaml."""
+    return parse_monitoring_config(load_yaml(path))

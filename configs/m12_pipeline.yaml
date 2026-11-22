@@ -1,0 +1,32 @@
+# M12 (docs/mlops.md §6): the weekly pipeline and its replay. Read by
+# hmrec.config.load_pipeline_config; used by hmrec.weekly and the scripts scripts/weekly.py,
+# scripts/m12_step.py and scripts/m12_replay_compare.py.
+#
+# NOTHING here changes a result of the system. The recall, feature and Ranker
+# configurations come only from configs/locks/. The first tick and the Ranker experiment
+# come from configs/m11_versioning.yaml (the bootstrap state was built from them).
+
+serve:
+  # Customers per shard in `serve` mode. A week of stage 1 has 69,000-86,000 queries;
+  # 70,000 keeps a shard inside the memory profile measured there (the value the sharded
+  # path was run with on branch kaggle-late-submission).
+  shard_customers: 70000
+
+evaluation:
+  # The metrics C2 computes for the Ranker and for the RRF baseline. The first one is the
+  # metric of the acceptance (docs/mlops.md §8.3).
+  metrics: [map@12, recall@12, ndcg@12]
+
+output_signals:
+  # "Share of recommended items among the 100 most popular articles of the week"
+  # (docs/mlops.md §10): the most popular articles are the ones with the most purchase
+  # lines in the `popular_window_days` days before the anchor (ties: smaller article_idx
+  # first). These are the newest purchases a tick knows.
+  popular_articles: 100
+  popular_window_days: 7
+
+replay:
+  # docs/mlops.md §6.3, decision D1: eight ticks in `eval` mode, in this order, then one
+  # `serve` tick at `serve_anchor` (the week after the data end; it closes T4).
+  eval_folds: [V1, V2, V3, V4, T1, T2, T3, T4]
+  serve_anchor: 2020-09-23
