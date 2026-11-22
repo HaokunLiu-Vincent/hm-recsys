@@ -1,0 +1,128 @@
+# The image of the weekly pipeline, built for Cloud Run and pushed to Artifact Registry
+# (docs/mlops.md §11; M13).
+#
+# Trigger: a tag "image-<anything>" on a commit, or a manual run. The image is built from
+# that commit exactly as the CI workflow builds it (same context, same platform, same
+# build argument, same cache), then pushed under the commit hash. A Cloud Run job is
+# deployed from the DIGEST this workflow reports, never from a tag.
+#
+# Authentication: Workload Identity Federation. GitHub signs a short-lived token for this
+# run; the cloud project accepts tokens of this one repository and lets them act as a
+# service account that may only push to one image repository (infra/setup.sh). No key is
+# stored anywhere.
+#
+# The repository is public and so is this log. The names of the cloud project are
+# therefore NOT in this file: they come from three repository secrets, which GitHub masks
+# in the log (a repository variable would be printed in the head of every step).
+#   GCP_WORKLOAD_IDENTITY_PROVIDER   projects/<number>/locations/global/workloadIdentityPools/<pool>/providers/<provider>
+#   GCP_DEPLOYER_SERVICE_ACCOUNT     the address of the deployer service account
+#   GCP_IMAGE_REPOSITORY             <region>-docker.pkg.dev/<project>/<repository>/<image>
+# They are names, not credentials: knowing them gives no access.
+#
+# Third-party actions are pinned by commit hash; the comment gives the release.
+
+name: image
+
+on:
+  push:
+    tags:
+      - "image-*"
+  workflow_dispatch:
+
+# contents: read   -> check out the repository.
+# id-token: write  -> ask GitHub for the signed token of this run (nothing is written to
+#                     the repository; the name of the permission is GitHub's).
+permissions:
+  contents: read
+  id-token: write
+
+# Two pushes of an image at once are never needed; the second waits.
+concurrency:
+  group: image
+  cancel-in-progress: false
+
+defaults:
+  run:
+    shell: bash
+
+jobs:
+  image:
+    name: build and push (linux/amd64)
+    runs-on: ubuntu-24.04
+    timeout-minutes: 45
+    steps:
+      - name: Check out the repository
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      # The image carries the commit it was built from (docs/mlops.md §8.1). A fresh
+      # checkout of a tag is a clean, committed tree by construction.
+      - name: Read the commit of the checkout
+        id: commit
+        run: echo "sha=$(git rev-parse HEAD)" >> "$GITHUB_OUTPUT"
+
+      # The three secrets are masked by GitHub as whole strings. The project id and the
+      # project number are PARTS of them and could appear on their own in a message of a
+      # tool, so they are masked too. The secrets are read from the environment, not
+      # written into the script, so this step's own head shows only "***".
+      - name: Mask the names of the cloud project in the log
+        env:
+          IMAGE_REPOSITORY: ${{ secrets.GCP_IMAGE_REPOSITORY }}
+          PROVIDER: ${{ secrets.GCP_WORKLOAD_IDENTITY_PROVIDER }}
+        run: |
+          test -n "$IMAGE_REPOSITORY" || { echo "::error::the secret GCP_IMAGE_REPOSITORY is not set"; exit 1; }
+          test -n "$PROVIDER" || { echo "::error::the secret GCP_WORKLOAD_IDENTITY_PROVIDER is not set"; exit 1; }
+          echo "::add-mask::$(echo "$IMAGE_REPOSITORY" | cut -d/ -f2)"
+          echo "::add-mask::$(echo "$PROVIDER" | cut -d/ -f2)"
+
+      - name: Authenticate to Google Cloud (Workload Identity Federation, no key)
+        id: auth
+        uses: google-github-actions/auth@7c6bc770dae815cd3e89ee6cdf493a5fab2cc093 # v3.0.0
+        with:
+          workload_identity_provider: ${{ secrets.GCP_WORKLOAD_IDENTITY_PROVIDER }}
+          service_account: ${{ secrets.GCP_DEPLOYER_SERVICE_ACCOUNT }}
+          # A short-lived access token of the deployer account, used only to log Docker in.
+          token_format: access_token
+          access_token_lifetime: 1800s
+          # No credentials file is written into the checkout (it would enter the build context).
+          create_credentials_file: false
+
+      - name: Log Docker in to Artifact Registry
+        env:
+          ACCESS_TOKEN: ${{ steps.auth.outputs.access_token }}
+          IMAGE_REPOSITORY: ${{ secrets.GCP_IMAGE_REPOSITORY }}
+        run: |
+          echo "$ACCESS_TOKEN" | docker login --username oauth2accesstoken --password-stdin "https://$(echo "$IMAGE_REPOSITORY" | cut -d/ -f1)"
+
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@f87e5991a6d7451dcb8d9637bfbc97413f497069 # v4.4.1
+
+      # The same build as in the CI workflow (.github/workflows/ci.yml), with push instead
+      # of load. provenance: false -> the pushed object is ONE image manifest, so the digest
+      # below is the digest Cloud Run runs and the pipeline records.
+      - name: Build the image (linux/amd64) and push it
+        id: build
+        uses: docker/build-push-action@c3c9e263c25d99ce0380d002d59b67737d91b0dc # v7.4.0
+        with:
+          context: .
+          platforms: linux/amd64
+          push: true
+          provenance: false
+          tags: ${{ secrets.GCP_IMAGE_REPOSITORY }}:${{ steps.commit.outputs.sha }}
+          build-args: |
+            GIT_COMMIT=${{ steps.commit.outputs.sha }}
+          cache-from: type=gha
+          cache-to: type=gha,mode=max
+
+      # The digest and the commit are not names of the project: they are published as a
+      # notice (readable without signing in) and in the run summary.
+      - name: Publish the image digest
+        env:
+          DIGEST: ${{ steps.build.outputs.digest }}
+          COMMIT: ${{ steps.commit.outputs.sha }}
+        run: |
+          test -n "$DIGEST"
+          echo "::notice title=image digest::$DIGEST"
+          echo "::notice title=image commit::$COMMIT"
+          { echo '### Image pushed (linux/amd64)'; echo "- commit: \`$COMMIT\`"; echo "- digest: \`$DIGEST\`"; } >> "$GITHUB_STEP_SUMMARY"
