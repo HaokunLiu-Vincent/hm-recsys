@@ -278,4 +278,4 @@ mlflow-ui:
 
 ## test-tools: the tracking tests where MLflow is installed (sync into a real SQLite store)
 test-tools:
-	$(TOOLS_RUN) pytest tests/unit/test_tracking_store.py tests/unit/test_tracking_check.py tests/unit/test_tracking_records.py tests/unit/test_tracking_registry.py -q
+	$(TOOLS_RUN) pytest tests/unit/test_tracking_store.py tests/unit/test_tracking_check.py tests/unit/test_tracking_records.py tests/unit/test_tracking_registry.py tests/unit/test_tracking_cloud.py -q

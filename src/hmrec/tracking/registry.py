@@ -25,7 +25,7 @@ and current_models read files and need none. Neither torch nor lightgbm.
 """
 
 import json
-from collections.abc import Sequence
+from collections.abc import Mapping, Sequence
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
@@ -49,6 +49,10 @@ SIZE_TAG = "hmrec.size_bytes"
 MIRROR_TAG = "hmrec.mirror"
 MIRROR_NOTE = "pointer to pipeline state; nothing reads the registry to deploy"
 SEARCH_PAGE_SIZE = 200
+# The source of a version whose file is not on this machine (a state in a bucket): the
+# path the run manifest recorded, which is the object's key, behind this scheme. No
+# bucket is named: the repository is public and the store may be shown to others.
+REMOTE_SOURCE_SCHEME = "pipeline-state:"
 
 
 @dataclass(frozen=True)
@@ -87,7 +91,9 @@ class RegistrySummary:
     aliases: dict[str, str]
 
 
-def mirrored_models(manifests: Sequence[RunManifest]) -> list[MirroredModel]:
+def mirrored_models(
+    manifests: Sequence[RunManifest], names: Mapping[str, str] = ROLE_TO_MODEL
+) -> list[MirroredModel]:
     """The models the registry should hold: every model file a succeeded tick recorded.
 
     A resumed tick lists the outputs of its skipped steps again, so the same file
@@ -96,6 +102,8 @@ def mirrored_models(manifests: Sequence[RunManifest]) -> list[MirroredModel]:
 
     Args:
         manifests: The run manifests of the pipeline, in the order of their run ids.
+        names: Output role of a run manifest -> registered model. Another state
+            (the replay in the cloud) is mirrored under registered models of its own.
 
     Returns:
         The models in the order they were first recorded.
@@ -105,7 +113,7 @@ def mirrored_models(manifests: Sequence[RunManifest]) -> list[MirroredModel]:
         if manifest.status != SUCCEEDED:
             continue
         for output in manifest.outputs:
-            name = ROLE_TO_MODEL.get(output.role)
+            name = names.get(output.role)
             if name is None or (name, output.sha256) in models:
                 continue
             models[(name, output.sha256)] = MirroredModel(
@@ -119,20 +127,29 @@ def mirrored_models(manifests: Sequence[RunManifest]) -> list[MirroredModel]:
     return list(models.values())
 
 
-def current_models(paths: ProjectPaths) -> dict[str, str]:
-    """Registered model -> sha256 of the model behind the current prediction set.
+def current_models_of(
+    state_dir: Path, names: Mapping[str, str] = CURRENT_ROLE_TO_MODEL
+) -> dict[str, str]:
+    """Registered model -> sha256 of the model behind the current prediction set of a state.
 
-    Read from state/current.json; empty if no tick has published yet.
+    Read from {state_dir}/state/current.json; empty if no tick has published yet.
+
+    Args:
+        state_dir: The state, or a copy of its small records.
+        names: Role of a model in state/current.json -> registered model.
     """
-    current_file = StateLayout(paths.pipeline_state_dir).current_file
+    current_file = StateLayout(state_dir).current_file
     if not current_file.is_file():
         return {}
     raw = json.loads(current_file.read_text(encoding="utf-8"))
     return {
-        CURRENT_ROLE_TO_MODEL[model["role"]]: model["sha256"]
-        for model in raw["models"]
-        if model["role"] in CURRENT_ROLE_TO_MODEL
+        names[model["role"]]: model["sha256"] for model in raw["models"] if model["role"] in names
     }
+
+
+def current_models(paths: ProjectPaths) -> dict[str, str]:
+    """The same for the pipeline's state on this machine (artifacts/pipeline/)."""
+    return current_models_of(paths.pipeline_state_dir)
 
 
 def version_tags(model: MirroredModel) -> dict[str, str]:
@@ -174,7 +191,11 @@ def ensure_registered_model(client: Any, name: str) -> None:
 
 
 def sync_registry(
-    client: Any, models: Sequence[MirroredModel], current: dict[str, str], repo_root: Path
+    client: Any,
+    models: Sequence[MirroredModel],
+    current: dict[str, str],
+    repo_root: Path,
+    files_on_disk: bool = True,
 ) -> RegistrySummary:
     """Create the missing model versions and point the alias "current" (see the module docstring).
 
@@ -186,6 +207,9 @@ def sync_registry(
         models: The models the registry should hold (mirrored_models).
         current: Registered model -> sha256 of the current model (current_models).
         repo_root: The repository root; a version's source is the file's URI under it.
+        files_on_disk: False for a state whose files are not on this machine (a
+            bucket): a version's source is then the recorded path behind
+            REMOTE_SOURCE_SCHEME.
     """
     registered: list[tuple[str, str]] = []
     present: list[tuple[str, str]] = []
@@ -196,7 +220,9 @@ def sync_registry(
             if model.sha256 in existing:
                 present.append((name, model.sha256))
                 continue
-            source = (repo_root / model.path).resolve().as_uri()
+            source = f"{REMOTE_SOURCE_SCHEME}{model.path}"
+            if files_on_disk:
+                source = (repo_root / model.path).resolve().as_uri()
             client.create_model_version(name, source, tags=version_tags(model))
             registered.append((name, model.sha256))
     aliases: dict[str, str] = {}
@@ -223,7 +249,11 @@ def read_alias(client: Any, name: str) -> str | None:
 
 
 def check_registry(
-    client: Any, models: Sequence[MirroredModel], current: dict[str, str], repo_root: Path
+    client: Any,
+    models: Sequence[MirroredModel],
+    current: dict[str, str],
+    repo_root: Path,
+    files_on_disk: bool = True,
 ) -> list[str]:
     """Compare the registry with the manifests, the files on disk and state/current.json.
 
@@ -231,6 +261,16 @@ def check_registry(
     version's path tag is the recorded path, and the file on disk still has that
     sha256 (it is hashed again here). For the alias: it points to the model
     state/current.json names.
+
+    Args:
+        client: An MlflowClient.
+        models: The models the registry should hold.
+        current: Registered model -> sha256 of the current model.
+        repo_root: The repository root.
+        files_on_disk: False for a state whose model files are not on this
+            machine (a bucket): the registry is compared with the manifests and
+            the state pointer, and no file is hashed again. That a file still
+            has its sha256 is then NOT checked here.
 
     Returns:
         One line per difference; empty if the registry mirrors the state.
@@ -248,6 +288,8 @@ def check_registry(
                 continue
             if version.get(PATH_TAG) != model.path:
                 problems.append(f"{name}: version {version['version']} names another path")
+            if not files_on_disk:
+                continue
             file = repo_root / model.path
             if not file.is_file():
                 problems.append(f"{name}: {model.path} is not on disk")

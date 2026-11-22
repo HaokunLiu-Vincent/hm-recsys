@@ -21,6 +21,7 @@ from hmrec.locks import RankerLock
 from hmrec.paths import ProjectPaths
 from hmrec.run_manifest import find_run_manifests, read_run_manifest
 from hmrec.tracking.check import CheckResult, check_logged_runs
+from hmrec.tracking.cloud import CLOUD_EXPERIMENTS, cloud_models, cloud_runs
 from hmrec.tracking.records import (
     TrackedRun,
     WeeklyTables,
@@ -63,8 +64,9 @@ def view_runs(
 
     Returns:
         The stage-1 weekly records of V1-V4 and T1-T4, the M10 calibration
-        records, and one run per run manifest under artifacts/pipeline/runs/
-        (none before M12).
+        records, one run per run manifest under artifacts/pipeline/runs/
+        (none before M12), and one per run manifest of the replay on Cloud Run
+        whose records were copied to this machine (hmrec.tracking.cloud, M13).
     """
     root = paths.project_root
     weekly_tables = {
@@ -88,6 +90,7 @@ def view_runs(
     for manifest_file in find_run_manifests(paths.pipeline_runs_dir):
         tick = read_run_manifest(manifest_file)
         runs.append(pipeline_run(tick, manifest_file, config.experiment_pipeline, root))
+    runs.extend(cloud_runs(paths))
     return runs
 
 
@@ -102,7 +105,8 @@ def check_view(
 ) -> CheckResult:
     """Compare every metric of the local store with its source (hmrec.tracking.check)."""
     client = open_client(paths.mlflow_store_file)
-    logged = [run for name in config.experiments for run in read_experiment_runs(client, name)]
+    experiments = (*config.experiments, *CLOUD_EXPERIMENTS)
+    logged = [run for name in experiments for run in read_experiment_runs(client, name)]
     return check_logged_runs(logged, runs, paths.project_root)
 
 
@@ -117,20 +121,35 @@ def view_models(paths: ProjectPaths) -> tuple[list[MirroredModel], dict[str, str
     return mirrored_models(manifests), current_models(paths)
 
 
+def view_cloud_models(paths: ProjectPaths) -> tuple[list[MirroredModel], dict[str, str]]:
+    """The same for the replay on Cloud Run (registered models of its own; files in the bucket)."""
+    return cloud_models(paths)
+
+
 def sync_models(
-    paths: ProjectPaths, models: list[MirroredModel], current: dict[str, str]
+    paths: ProjectPaths,
+    models: list[MirroredModel],
+    current: dict[str, str],
+    files_on_disk: bool = True,
 ) -> RegistrySummary:
     """Create the model versions that are missing and point the alias "current"."""
     client = open_client(paths.mlflow_store_file)
-    return sync_registry(client, models, current, paths.project_root)
+    return sync_registry(client, models, current, paths.project_root, files_on_disk)
 
 
 def check_models(
-    paths: ProjectPaths, models: list[MirroredModel], current: dict[str, str]
+    paths: ProjectPaths,
+    models: list[MirroredModel],
+    current: dict[str, str],
+    files_on_disk: bool = True,
 ) -> list[str]:
-    """Compare the registry with the manifests, the files on disk and state/current.json."""
+    """Compare the registry with the manifests, the files on disk and state/current.json.
+
+    With `files_on_disk=False` (the cloud replay) no file is hashed again: the
+    model files are in the bucket.
+    """
     client = open_client(paths.mlflow_store_file)
-    return check_registry(client, models, current, paths.project_root)
+    return check_registry(client, models, current, paths.project_root, files_on_disk)
 
 
 def ui_command(paths: ProjectPaths, config: MlflowViewConfig) -> list[str]:

@@ -987,6 +987,21 @@ class ProjectPaths:
         return self.cloud_results_dir / f"{table}.csv"
 
     @property
+    def cloud_state_records_dir(self) -> Path:
+        """artifacts/m13_cloud/pipeline/: the SMALL records of the state in the bucket.
+
+        A copy made by `bash infra/operate.sh download-records`: run manifests,
+        step records, markers, the tables. It has the layout of the state
+        (StateLayout) without the large files, which stay in the bucket.
+        """
+        return self.artifacts_root / "m13_cloud" / "pipeline"
+
+    @property
+    def cloud_calibration_records_dir(self) -> Path:
+        """artifacts/m13_cloud/pipeline-calibration/: the same copy of the calibration state."""
+        return calibration_state_dir(self.cloud_state_records_dir)
+
+    @property
     def mlflow_dir(self) -> Path:
         """artifacts/mlflow/: the local MLflow store (not in git; rebuilt by `make mlflow-sync`)."""
         return self.artifacts_root / "mlflow"

@@ -31,6 +31,7 @@ from hmrec.tracking.view import (
     sync_models,
     sync_view,
     ui_command,
+    view_cloud_models,
     view_models,
     view_runs,
 )
@@ -61,6 +62,7 @@ def main() -> None:
     lock = load_ranker_lock(paths.ranker_lock_file)
     runs = view_runs(paths, config, manifest, lock)
     models, current = view_models(paths)
+    cloud, cloud_current = view_cloud_models(paths)
     if args.action == "sync":
         summary = sync_view(paths, runs)
         LOGGER.info(
@@ -77,18 +79,32 @@ def main() -> None:
             len(registry.present),
             registry.aliases or "no registered model",
         )
+        cloud_registry = sync_models(paths, cloud, cloud_current, files_on_disk=False)
+        LOGGER.info(
+            "model registry, the replay on Cloud Run (files in the bucket, mirrored by key and "
+            "sha256): %d version(s) created, %d already there; alias 'current' -> %s",
+            len(cloud_registry.registered),
+            len(cloud_registry.present),
+            cloud_registry.aliases or "no registered model",
+        )
         return
     result = check_view(paths, config, runs)
-    registry_problems = check_models(paths, models, current)
+    registry_problems = [
+        *check_models(paths, models, current),
+        *check_models(paths, cloud, cloud_current, files_on_disk=False),
+    ]
     for problem in (*result.problems, *registry_problems):
         LOGGER.error("%s", problem)
     LOGGER.info(
         "checked %d run(s), %d metric value(s): %d difference(s); %d registered model "
-        "version(s) against the manifests, the files and state/current.json: %d difference(s)",
+        "version(s) against the manifests, the files and state/current.json, and %d of the "
+        "replay on Cloud Run against the manifests and its state pointer (their files are in "
+        "the bucket and are not hashed here): %d difference(s)",
         result.n_runs,
         result.n_metrics,
         len(result.problems),
         len(models),
+        len(cloud),
         len(registry_problems),
     )
     if not result.passed or registry_problems:

@@ -474,7 +474,11 @@ def _week_prefix(manifest: RunManifest, week: date) -> str:
 
 
 def pipeline_run(
-    manifest: RunManifest, manifest_file: Path, experiment: str, repo_root: Path
+    manifest: RunManifest,
+    manifest_file: Path,
+    experiment: str,
+    repo_root: Path,
+    record_prefix: str = "pipeline",
 ) -> TrackedRun:
     """The run of the view for one tick of the weekly pipeline.
 
@@ -483,6 +487,10 @@ def pipeline_run(
         manifest_file: The file it was read from.
         experiment: Name of the MLflow experiment.
         repo_root: The repository root.
+        record_prefix: First part of the record id. Two states can hold a run
+            of the same id (the replay on the laptop and the replay in the
+            cloud both have "2020-07-29-eval-a1"); the prefix keeps their
+            records apart.
     """
     file = _relative(repo_root, manifest_file)
     metrics = [
@@ -512,7 +520,7 @@ def pipeline_run(
     code = manifest.code
     run = TrackedRun(
         experiment=experiment,
-        record_id=f"pipeline/{manifest.run_id}",
+        record_id=f"{record_prefix}/{manifest.run_id}",
         run_name=manifest.run_id,
         record_kind=PIPELINE_RUN,
         params={
