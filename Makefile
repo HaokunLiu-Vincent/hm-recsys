@@ -10,7 +10,7 @@ export OMP_NUM_THREADS := 6
 .PHONY: image-test-torch-side image-test-lightgbm-side image-calibrate image-r6-repeatability
 .PHONY: setup-tools dvc data-manifest data-verify bootstrap-verify
 .PHONY: mlflow-sync mlflow-check mlflow-ui test-tools
-.PHONY: weekly image-weekly
+.PHONY: weekly image-weekly replay-compare image-replay-compare
 
 ## setup: create / update .venv from uv.lock (includes the dev group)
 setup:
@@ -160,6 +160,8 @@ image-r6-repeatability:
 # docs/mlops.md §6. One tick: close the week before the anchor, open the week of the anchor.
 #
 #   make image-weekly ARGS="--anchor 2020-07-29 --mode eval"     one tick in the container
+#   make image-replay-compare                                    the closed weeks against
+#                                                                their stage-1 records
 #
 # A tick runs in the container, from an image built with `make image-build`. The mounts
 # are fixed here on purpose, and they are what makes the tick self-contained:
@@ -190,6 +192,25 @@ image-weekly:
 ## weekly: one tick on this machine, without a container (ARGS as above; the laptop's strict Ranker entry)
 weekly:
 	uv run python scripts/weekly.py $(ARGS)
+
+## image-replay-compare: compare every closed week of the replay with its stage-1 record (reads no label)
+# A container of its own, NOT a tick's: the pair overlap needs the stage-1 candidate files
+# and the serve diagnostic the saved Kaggle prediction set, which a tick cannot see. Here
+# they are mounted read-only, the pipeline's state is read-only too, and only the replay's
+# result tables can be written. The stage-1 result tables (the records) are in the image.
+image-replay-compare:
+	@mkdir -p "$(REPLAY_RESULTS)"
+	docker run --rm $(IMAGE_PLATFORM_FLAG) \
+		--cpus $(CALIBRATION_CPUS) --memory $(CALIBRATION_MEMORY) \
+		--mount "type=bind,src=$(CURDIR)/artifacts/candidates,dst=/app/artifacts/candidates,readonly" \
+		--mount "type=bind,src=$(CURDIR)/artifacts/kaggle/submission,dst=/app/artifacts/kaggle/submission,readonly" \
+		--mount "type=bind,src=$(PIPELINE_STATE),dst=/app/artifacts/pipeline,readonly" \
+		--mount "type=bind,src=$(REPLAY_RESULTS),dst=/app/results/m12_replay" \
+		$(IMAGE) python scripts/m12_replay_compare.py
+
+## replay-compare: the same comparison on this machine, without a container (needs a clean working tree)
+replay-compare:
+	uv run python scripts/m12_replay_compare.py
 
 # ---------------------------------------------------------------- M11 versioning
 # docs/mlops.md §7. DVC and MLflow are in dependency groups of their own ("versioning",

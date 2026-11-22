@@ -24,7 +24,11 @@ from pathlib import Path
 REPO = Path(__file__).resolve().parents[2]
 SRC = REPO / "src" / "hmrec"
 WEEKLY = SRC / "weekly"
-SCRIPTS = (REPO / "scripts" / "weekly.py", REPO / "scripts" / "m12_step.py")
+SCRIPTS = (
+    REPO / "scripts" / "weekly.py",
+    REPO / "scripts" / "m12_step.py",
+    REPO / "scripts" / "m12_replay_compare.py",
+)
 
 PLAIN_MODULES = (
     "calendar.py",
@@ -35,6 +39,7 @@ PLAIN_MODULES = (
     "history.py",
     "monitoring.py",
     "outputs.py",
+    "replay_compare.py",
     "run_step.py",
     "shard_features.py",
     "shards.py",
@@ -175,6 +180,15 @@ def test_no_other_code_imports_the_weekly_pipeline() -> None:
 def test_the_pipeline_writes_no_stage_1_result_table() -> None:
     for path in sorted(WEEKLY.glob("*.py")):
         text = path.read_text(encoding="utf-8")
+        if path.name == "replay_compare.py":
+            # The comparison READS four stage-1 tables (the records). Everything it
+            # appends goes to a table of results/m12_replay/.
+            assert set(STAGE1_TABLE.findall(text)) == {"m6", "v_phase", "t_phase"}
+            targets = re.findall(r"append_row\(\s*(\w+)", text)
+            assert targets and set(targets) <= {"table", "overlap_table"}
+            for name in ("table", "overlap_table", "chain_table"):
+                assert re.search(rf"{name} = paths\.replay_table_file\(", text), name
+            continue
         used = set(STAGE1_TABLE.findall(text))
         # m6_config_file is the stop limit of the R6 fine-tune (configs/, read only).
         assert STAGE1_TABLE.search(text.replace("paths.m6_config_file", "")) is None, (path, used)
