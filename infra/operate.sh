@@ -83,7 +83,7 @@ require_digest() {
 require_idle() {
   local running
   running="$(g run jobs executions list --job "$JOB_NAME" --region "$REGION" \
-    --filter 'status.completionTime=null' --format 'value(metadata.name)' 2>/dev/null || true)"
+    --filter '-status.completionTime:*' --format 'value(metadata.name)' 2>/dev/null || true)"
   if [ -n "$running" ]; then
     echo "an execution is still running: ${running}. One execution at a time."
     exit 1
@@ -118,7 +118,8 @@ job_flags() {
     --add-volume-mount "volume=calibration,mount-path=${CALIBRATION_MOUNT}"
     --set-env-vars "HMREC_PIPELINE_INPUTS_ROOT=${INPUTS_MOUNT},HMREC_PIPELINE_STATE_ROOT=${STATE_MOUNT},HMREC_IMAGE_DIGEST=${digest}"
     --command python
-    --args "scripts/weekly.py,--next,--mode,eval"
+    # "--args=..." in one word: the list starts with a script, but holds words with "--".
+    "--args=scripts/weekly.py,--next,--mode,eval"
   )
 }
 
@@ -158,7 +159,7 @@ case "$command" in
     require_idle
     # The arguments replace the job's own for this one execution only.
     arguments="$(IFS=,; printf '%s' "$*")"
-    g run jobs execute "$JOB_NAME" --region "$REGION" --args "$arguments" --async \
+    g run jobs execute "$JOB_NAME" --region "$REGION" "--args=${arguments}" --async \
       --format 'value(metadata.name)'
     ;;
   wait)
@@ -185,16 +186,19 @@ case "$command" in
     if [ -n "${2:-}" ]; then
       filter="${filter} AND textPayload:\"${2}\""
     fi
-    g logging read "$filter" --order asc --limit 5000 --format 'value(textPayload)'
+    # --freshness: without it only the last day is searched.
+    g logging read "$filter" --freshness 60d --order asc --limit 5000 \
+      --format 'value(textPayload)'
     ;;
   create-scheduler)
     # The scheduler calls the Cloud Run API "run this job" as the scheduler account, which
-    # holds the single permission to do that. No body: the job runs with its own
-    # arguments (scripts/weekly.py --next --mode eval), the same every week.
+    # holds the single permission to do that. An empty request ("{}"): the job runs with
+    # its own arguments (scripts/weekly.py --next --mode eval), the same every week.
     g scheduler jobs create http "$SCHEDULER_JOB_NAME" --location "$REGION" \
       --schedule "$SCHEDULE" --time-zone "Etc/UTC" \
       --uri "https://run.googleapis.com/v2/projects/${PROJECT_ID}/locations/${REGION}/jobs/${JOB_NAME}:run" \
       --http-method POST \
+      --headers "Content-Type=application/json" --message-body "{}" \
       --oauth-service-account-email "$SCHEDULER_SA" \
       --max-retry-attempts 0 \
       --description "Weekly tick of the pipeline: the job's own arguments, the anchor from the state"
