@@ -239,10 +239,37 @@ def test_accepted_mode_accepts_the_platform_its_record_describes(tmp_path: Path)
 
 
 def test_accepted_mode_refuses_a_platform_without_a_record(tmp_path: Path) -> None:
-    # x86-64 has no record yet: its calibration is the first step of M13.
+    # Until M13 this test used x86-64, which had no record then. It was calibrated on
+    # Cloud Run and has one now (next test), so a platform that has none stands in.
     paths, base, _ = _workspace(tmp_path)
+    with pytest.raises(PlatformNotAccepted, match="no platform record .*linux-riscv64.yaml"):
+        _accepted(paths, base, machine="riscv64")
+    # A platform whose record is missing is refused as before: without its record, x86-64
+    # is not accepted.
+    paths.platform_record_file("linux-amd64").unlink()
     with pytest.raises(PlatformNotAccepted, match="no platform record .*linux-amd64.yaml"):
         _accepted(paths, base, machine="x86_64")
+
+
+def test_accepted_mode_accepts_x86_64_by_its_own_record(tmp_path: Path) -> None:
+    # configs/platforms/linux-amd64.yaml (M13): the same LightGBM and the same libgomp1
+    # package version as on arm64, in the x86-64 library folder.
+    paths, base, _ = _workspace(tmp_path)
+    runtime = replace(CONTAINER_RUNTIME, libomp_path="/usr/lib/x86_64-linux-gnu/libgomp.so.1.0.0")
+    result = _accepted(paths, base, runtime=runtime, machine="x86_64")
+    assert result.mode == MODE_ACCEPTED
+    assert result.record is not None and result.record.platform == "linux-amd64"
+    assert result.record.architecture == "x86_64"
+    # An arm64 process is not accepted by the x86-64 record, and the other way round:
+    # each record is looked up by the architecture of the process.
+    assert _accepted(paths, base).record.platform == "linux-arm64"
+    with pytest.raises(PlatformNotAccepted, match="OpenMP runtime: 'libgomp1 14.2.0-20' here"):
+        _accepted(
+            paths,
+            base,
+            runtime=replace(runtime, libomp_version="libgomp1 14.2.0-20"),
+            machine="x86_64",
+        )
 
 
 def test_accepted_mode_refuses_a_process_that_is_not_the_recorded_platform(tmp_path: Path) -> None:
@@ -314,8 +341,8 @@ def test_calibration_mode_accepts_the_calibration_state_of_a_tick(tmp_path: Path
     view = _tick_view(tick, tick.pipeline_state_dir)
     assert view.layout.root == Path("/mnt/pipeline-calibration")
     assert view.results_root == Path("/mnt/pipeline-calibration/results")
-    # x86-64 has no platform record: mode "accepted" refuses it, mode "calibration" is
-    # how it is measured first.
+    # Mode "calibration" is how a platform is measured before it has a record (x86-64
+    # in M13); it does not read a record and returns none.
     amd64_runtime = replace(
         CONTAINER_RUNTIME, libomp_path="/usr/lib/x86_64-linux-gnu/libgomp.so.1.0.0"
     )

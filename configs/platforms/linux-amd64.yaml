@@ -1,0 +1,112 @@
+# Platform record: the x86-64 Linux container on Cloud Run (stage 3; docs/mlops.md §8.3).
+#
+# What this file is: the statement that results computed on THIS platform are accepted
+# against the stage-1 records by the thresholds below, and the description of the runtime
+# that statement was made for. hmrec.ranker.platform_entry (mode "accepted") reads it and
+# refuses a process whose platform, LightGBM version, OpenMP runtime, thread count or
+# Ranker lock file is not the one recorded here.
+#
+# APPEND-ONLY, like the lock files (AGENTS.md §3.3): this file is never modified or
+# deleted. A changed runtime (another libgomp1 version, another base image) gets a NEW
+# record file after a calibration was run again on it.
+#
+# Written by hand on 2026-11-22 from the Dockerfile, uv.lock and results/m13_cloud/calibration/,
+# after the calibration of M13 (two ticks in calibration mode on Cloud Run) was inside the
+# acceptance of docs/mlops.md §8.3. The fields and the thresholds are those of
+# configs/platforms/linux-arm64.yaml. tests/unit/test_platform_record_linux_amd64.py
+# compares it with those files.
+
+platform: linux-amd64
+os: linux
+architecture: x86_64
+recorded_on: 2026-11-22
+decision_record: "docs/decisions.md 2026-11-22 M13: the calibration of linux-amd64 on Cloud Run is inside the acceptance; platform record for linux-amd64"
+
+# The base image of the Dockerfile (a multi-platform index; pinned by digest).
+base_image: "python:3.12.16-slim-trixie@sha256:5e2bdb1b0d542d5039cffb8181c65930093949194a65c365dfb1b0fe13a4fa5b"
+
+# The Ranker side: LightGBM processes (Dataset, training, scoring). This is what the
+# tolerance-accepted entry compares with the running process.
+ranker_runtime:
+  lightgbm_version: "4.7.0"
+  # The GNU OpenMP runtime of the Debian package, as hmrec.ranker.runtime records it
+  # (measured on Cloud Run: /usr/lib/x86_64-linux-gnu/libgomp.so.1.0.0).
+  openmp_version: "libgomp1 14.2.0-19"
+  num_threads: 6
+
+# The recall side: R1-R6. As on arm64, these processes run on the copy of libgomp INSIDE
+# the torch wheel (measured in every recall step of the calibration); it belongs to no
+# Debian package and is identified by the torch version (uv.lock). The feature build
+# loads no OpenMP runtime at all.
+recall_runtime:
+  torch_version: "2.15.0+cpu"
+  openmp: "the libgomp copy inside the torch wheel, identified by torch_version"
+  implicit_version: "0.7.3"
+  numpy_version: "2.5.4"
+  scipy_version: "1.18.1"
+  polars_version: "2.1.0"
+
+# Thread and determinism settings in force on this platform (docs/mlops.md §8.1).
+# Both apply on Linux only; the laptop runs exactly as in stage 1.
+settings:
+  num_threads: 6
+  # hmrec.recall.twotower.fine_tune_runtime: torch.use_deterministic_algorithms(True)
+  # for the duration of an R6 fine-tune, and nowhere else.
+  r6_fine_tune: deterministic
+  # hmrec.blas_threads: during an R5 fit the BLAS of scipy runs on one thread;
+  # implicit keeps num_threads OpenMP threads.
+  r5_fit_scipy_blas_threads: 1
+
+# Acceptance against the stage-1 record (the user's decision of 2026-11-22, the same as
+# for linux-arm64). Fixed for this platform; not changed after a replay result is seen.
+acceptance:
+  # |result - record| / record must be at most this, for each quantity listed.
+  max_relative_difference: 0.01
+  quantities:
+    - recall of a channel in a week
+    - union recall of a week
+    - MAP@12 of a single week
+    - pooled MAP@12 over the replayed weeks
+  # These detect bugs, not numeric differences.
+  structural_checks:
+    - feature rows equal the deduplicated candidates of the same run
+    - no duplicate (query, article) key
+  # Measured and written down for every week; never a reason to accept or reject.
+  reported_only:
+    - pair overlap of the candidates of every channel
+    - deduplicated candidate count
+    - bit-equality of scores
+  # Bit-identical repetition on this platform is not required and not verified by a run.
+  bit_identical_repetition_required: false
+
+# The measurement the acceptance rests on: the M13 calibration of week V1, a tick of the
+# weekly pipeline in calibration mode (V1), closed and scored by the next one (V2).
+calibration:
+  week: V1
+  # Where it ran: one Cloud Run job, 6 vCPU and 24 GiB, state on a mounted bucket.
+  environment: "Cloud Run job, x86-64, 6 vCPU, 24 GiB"
+  # The image both ticks ran in: the commit it was built from, the hash of its code tree,
+  # and its digest in the registry.
+  images:
+    - commit: 99abd62a714f177bc00295b584c62e0804df86d4
+      code_tree_sha256: f1ec754201a3ef478b51931120bf322fde9ab61fe236469ce45b3b3209fe792d
+      digest: "sha256:127065455310174dde41ef25887eaed36bb335ee5c785ac86336894517a6ccbb"
+  # The largest relative difference on an acceptance quantity in the calibration, which is
+  # MAP@12 of V1 end to end (-0.0134%, rounded up here); the largest on a recall is R5
+  # (+0.0113%).
+  largest_relative_difference: 0.000135
+  end_to_end_map_relative_difference: 0.000135
+  # sha256 of the result tables as they were at the commit below.
+  result_tables_commit: cc7eb2faace3ba2ac62af42da14b1f0d2e89dec5
+  result_tables:
+    results/m13_cloud/calibration/comparison.csv: a2085fef20c4c71c5a8c570b1150c30d6c532c5883d224a3c848d56c3af42f87
+    results/m13_cloud/calibration/metrics.csv: 856dd4e2f014db301b6f965ba6980fa12c1f7657f7a4239b20ccdb2c179f29e9
+    results/m13_cloud/calibration/steps.csv: cd531c9c107759db3c1feeab2c5c1beec303a770ea849abbda73fbf11567bc52
+    results/m13_cloud/calibration/monitoring.csv: a3e4f43063fe79cdff61e83e8e9f05fc3b19aa896d6a524124893a526b606a17
+    results/m13_cloud/calibration/label_access.csv: f7a6a078387b73066de7834d9e8d9301c087132d9fbac5ba139b7ce80bccc966
+    results/m13_cloud/calibration/twotower_chain.csv: 66967a4c18e88c5b0e245a4e114faf51941bf23540a87df4495335f59db56467
+
+# The Ranker lock this record was made for. Another lock file needs another record.
+ranker_lock:
+  path: configs/locks/ranker.lock.yaml
+  sha256: e5309f504e6af9750f585cd108e48fd42f585edc369e653258a6d760f091fb5c

@@ -1821,3 +1821,23 @@ The evaluation recorded in the entry above was run once. Code, rehearsal, formal
   - **Labels**: V1 and V2 are V folds. The ticks read the purchases of V1 (closing) and who buys in V1 and V2 (the `eval` query lists), as every `eval` tick does; each read gets its row in the calibration state's label-access table. No T label is read.
   - **Nothing is tuned or selected.** If every quantity is inside: the platform record `configs/platforms/linux-amd64.yaml` is written with the fields and thresholds of the arm64 record, a new image is built, and the replay starts in the pipeline's own state. If one is outside or a structural check fails: the milestone stops, the difference is diagnosed read-only from the first step that differs, and nothing is run again with other settings.
 - **Not changed**: no lock file, no platform record, no stage-1 or M12 result table, no earlier entry of this file.
+
+## 2026-11-22 M13: the calibration of linux-amd64 on Cloud Run is inside the acceptance; platform record for linux-amd64
+
+- **Context**: the calibration declared in the entry above, run as declared: two ticks of the weekly pipeline in calibration mode on Cloud Run (x86-64, 6 vCPU, 24 GiB), V1 and then V2, from the bootstrap state into the calibration state. Image of commit `99abd62` (digest `sha256:127065455310174dde41ef25887eaed36bb335ee5c785ac86336894517a6ccbb`). Nothing was tuned or selected, no tick was run twice, and no threshold was changed.
+- **Result: every acceptance quantity of V1 is inside 1.0%, and both structural checks pass.** Signed relative difference, (run − record) / record:
+
+  | Quantity | Cloud Run | Stage-1 record | Difference |
+  |---|---|---|---|
+  | Recall R1, R2, R3, R4, R6 | equal to the record | | 0% |
+  | Recall R5 | 0.101489 | 0.101477 | +0.0113% |
+  | Union recall | 0.254391 | 0.254379 | +0.0047% |
+  | MAP@12 | 0.030108 | 0.030112 | −0.0134% |
+  | Feature rows − deduplicated candidates | 0 | 0 | |
+  | Duplicate keys | 0 | 0 | |
+
+  Reported: 25,226,168 deduplicated candidates against 25,226,147; RRF baseline MAP@12 0.018511 against 0.018511. The arm64 container gave R5 +0.0116%, union +0.0047% and MAP@12 −0.0039% for the same week (M12). The pair overlap of the candidates was not measured: it needs the candidate files of both sides on one machine, and they are not downloaded from the bucket.
+- **The platform record `configs/platforms/linux-amd64.yaml` is written**, as the prompt of M13 asks for this case: the fields and the thresholds of `configs/platforms/linux-arm64.yaml` (1.0% on four quantities, two structural checks, three reported quantities, no bit-identical repetition), the platform `linux` / `x86_64`, and the calibration it rests on (week V1, the image, the six tables of `results/m13_cloud/calibration/` with their sha256). The runtime is the same as on arm64 in everything the record names: LightGBM 4.7.0 on `libgomp1 14.2.0-19`, torch 2.15.0+cpu, whose own copy of libgomp the recall steps run on (read from the step records of the calibration). **From now on a tick on x86-64 Linux gets the locked Ranker configuration in mode `accepted`.** The arm64 record is not touched.
+- **What was measured besides** (two executions, 1,564 s and 1,754 s from start to completion, about 0.24 and 0.27 USD at list prices): the V1 tick took 1,469 s in the pipeline and the V2 tick 1,666 s, against 11 and 15 minutes in the arm64 container on the laptop. Ranker training is the largest difference (530 s and 636 s against about 185 s), then scoring and the feature build; the step that only copies the transactions takes 70 to 80 s on the mounted bucket against 2 s on a local disk. The highest true peak of a process was 7.38 GB (feature build); Cloud Monitoring, which samples the instance once a minute, saw at most 15% of the 24 GiB.
+- **One flag, no alert**: the recall of R2 for V1 is more than 10% below its mean over F1–F4 (0.0387 against 0.0448), the flag the arm64 replay raised for the same week. It changes nothing.
+- **Not changed**: no lock file, the arm64 platform record, no stage-1 or M12 result table, no earlier entry of this file. The calibration state stays in the bucket (`pipeline-calibration/`); the replay starts from the bootstrap state in the pipeline's own state.

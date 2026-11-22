@@ -157,7 +157,7 @@ def test_the_locked_configuration_comes_through_this_platforms_entry(paths: Proj
         locked = load_locked_for_this_platform(context, runtime)
         assert locked.num_trees == load_ranker_lock(paths.ranker_lock_file).model.num_trees
     else:
-        # A platform without a record (x86-64 until M13): refused, nothing is trained.
+        # A platform without a record: refused, nothing is trained.
         with pytest.raises(PlatformNotAccepted, match="no platform record"):
             load_locked_for_this_platform(context, runtime)
 
