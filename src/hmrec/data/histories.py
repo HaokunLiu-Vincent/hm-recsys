@@ -175,6 +175,11 @@ def build_histories(
     history = np.full((n_queries, history_length), padding_idx, dtype=np.int32)
     history_day = np.full((n_queries, history_length), -1, dtype=np.int32)
     history_mask = np.zeros((n_queries, history_length), dtype=np.bool_)
+    if keys.size == 0:
+        # No purchase at all (e.g. a small group of customers who never bought):
+        # every history is empty. Without this return, the loop below would index
+        # into an empty array, even though every slot is masked out.
+        return history, history_mask
     for slot in range(history_length):
         # Slot k holds the (k+1)-th most recent event: position end - 1 - k.
         position = end - 1 - slot
