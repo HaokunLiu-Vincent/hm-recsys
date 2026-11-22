@@ -18,6 +18,7 @@
 #     bash infra/operate.sh logs <execution> [text]     its log lines (optionally those with a text)
 #     bash infra/operate.sh create-scheduler            the weekly trigger, paused at once
 #     bash infra/operate.sh run-scheduler               start the job through the scheduler now
+#                                                       (resume, run, pause again)
 #     bash infra/operate.sh pause-scheduler             pause the weekly trigger
 #     bash infra/operate.sh memory <start> <end>        highest memory use of the job's instance
 #                                                       between two UTC times, as a share of its limit
@@ -214,8 +215,14 @@ case "$command" in
     ;;
   run-scheduler)
     require_idle
-    # "Force run": the scheduler sends its request now, also while it is paused.
-    g scheduler jobs run "$SCHEDULER_JOB_NAME" --location "$REGION"
+    # Cloud Scheduler runs a job by hand only while it is ENABLED (a paused job answers
+    # "Job.state must be ENABLED for RunJob"). So: resume, send the request now, pause
+    # again. The job is enabled for a few seconds; its weekly time is days away.
+    g scheduler jobs resume "$SCHEDULER_JOB_NAME" --location "$REGION" --format none
+    status=0
+    g scheduler jobs run "$SCHEDULER_JOB_NAME" --location "$REGION" || status=$?
+    g scheduler jobs pause "$SCHEDULER_JOB_NAME" --location "$REGION" --format 'value(state)'
+    exit "$status"
     ;;
   pause-scheduler)
     g scheduler jobs pause "$SCHEDULER_JOB_NAME" --location "$REGION"
