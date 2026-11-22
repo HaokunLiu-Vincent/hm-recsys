@@ -1,8 +1,9 @@
 """CLI: the local MLflow view over run manifests and result tables (docs/mlops.md §7.3).
 
 Usage (the Makefile targets run these under the dependency group "tracking"):
-    python scripts/m11_mlflow.py sync     # write missing records to the local store
-    python scripts/m11_mlflow.py check    # every metric in the store against its source
+    python scripts/m11_mlflow.py sync     # write missing records and model versions
+    python scripts/m11_mlflow.py check    # every metric against its source; the registry
+                                          # against the manifests, the files and the state
     python scripts/m11_mlflow.py ui       # serve the UI on this machine
 
 The store is artifacts/mlflow/mlflow.db (SQLite, not in git). It is only a view:
@@ -24,7 +25,15 @@ from hmrec.locks import load_ranker_lock
 from hmrec.logging_utils import get_logger, setup_logging
 from hmrec.paths import get_paths
 from hmrec.tracking.store import TELEMETRY_OFF, store_uri
-from hmrec.tracking.view import check_view, sync_view, ui_command, view_runs
+from hmrec.tracking.view import (
+    check_models,
+    check_view,
+    sync_models,
+    sync_view,
+    ui_command,
+    view_models,
+    view_runs,
+)
 
 LOGGER = get_logger("scripts.m11_mlflow")
 
@@ -51,6 +60,7 @@ def main() -> None:
     manifest = load_fold_manifest(paths.fold_manifest_file)
     lock = load_ranker_lock(paths.ranker_lock_file)
     runs = view_runs(paths, config, manifest, lock)
+    models, current = view_models(paths)
     if args.action == "sync":
         summary = sync_view(paths, runs)
         LOGGER.info(
@@ -59,17 +69,29 @@ def main() -> None:
             len(summary.logged),
             len(summary.skipped),
         )
+        registry = sync_models(paths, models, current)
+        LOGGER.info(
+            "model registry (a mirror of the pipeline's state): %d version(s) created, %d "
+            "already there; alias 'current' -> %s",
+            len(registry.registered),
+            len(registry.present),
+            registry.aliases or "no registered model",
+        )
         return
     result = check_view(paths, config, runs)
-    for problem in result.problems:
+    registry_problems = check_models(paths, models, current)
+    for problem in (*result.problems, *registry_problems):
         LOGGER.error("%s", problem)
     LOGGER.info(
-        "checked %d run(s), %d metric value(s): %d difference(s)",
+        "checked %d run(s), %d metric value(s): %d difference(s); %d registered model "
+        "version(s) against the manifests, the files and state/current.json: %d difference(s)",
         result.n_runs,
         result.n_metrics,
         len(result.problems),
+        len(models),
+        len(registry_problems),
     )
-    if not result.passed:
+    if not result.passed or registry_problems:
         sys.exit(1)
 
 

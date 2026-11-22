@@ -6,6 +6,10 @@ The functions here put the pieces together for the scripts (scripts/m11_mlflow.p
                  result tables and from the run manifests that exist
     sync_view    write the runs that are missing to the local store
     check_view   compare the store with its sources
+    view_models  the pipeline's model files the registry mirrors, and which of
+                 them are behind the current prediction set
+    sync_models  create the missing model versions; point the alias "current"
+    check_models compare the registry with the manifests, the files and the state
     ui_command   the command that serves the local UI
 """
 
@@ -23,6 +27,14 @@ from hmrec.tracking.records import (
     calibration_runs,
     pipeline_run,
     stage1_weekly_run,
+)
+from hmrec.tracking.registry import (
+    MirroredModel,
+    RegistrySummary,
+    check_registry,
+    current_models,
+    mirrored_models,
+    sync_registry,
 )
 from hmrec.tracking.store import (
     SyncSummary,
@@ -92,6 +104,33 @@ def check_view(
     client = open_client(paths.mlflow_store_file)
     logged = [run for name in config.experiments for run in read_experiment_runs(client, name)]
     return check_logged_runs(logged, runs, paths.project_root)
+
+
+def view_models(paths: ProjectPaths) -> tuple[list[MirroredModel], dict[str, str]]:
+    """The models the registry should mirror now, and the ones behind the current prediction set.
+
+    Returns:
+        (every model file a succeeded tick recorded in its run manifest;
+        registered model -> sha256 of the model state/current.json names).
+    """
+    manifests = [read_run_manifest(file) for file in find_run_manifests(paths.pipeline_runs_dir)]
+    return mirrored_models(manifests), current_models(paths)
+
+
+def sync_models(
+    paths: ProjectPaths, models: list[MirroredModel], current: dict[str, str]
+) -> RegistrySummary:
+    """Create the model versions that are missing and point the alias "current"."""
+    client = open_client(paths.mlflow_store_file)
+    return sync_registry(client, models, current, paths.project_root)
+
+
+def check_models(
+    paths: ProjectPaths, models: list[MirroredModel], current: dict[str, str]
+) -> list[str]:
+    """Compare the registry with the manifests, the files on disk and state/current.json."""
+    client = open_client(paths.mlflow_store_file)
+    return check_registry(client, models, current, paths.project_root)
 
 
 def ui_command(paths: ProjectPaths, config: MlflowViewConfig) -> list[str]:
