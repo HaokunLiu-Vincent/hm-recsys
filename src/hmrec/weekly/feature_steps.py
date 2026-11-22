@@ -107,15 +107,18 @@ def require_structure(week: str, written: int, distinct: int, expected: int) -> 
 
 
 def structure_metrics(
-    context: TickContext, written: int, distinct: int, expected: int, n_queries: int
+    context: TickContext, written: int, distinct: int, expected: int
 ) -> list[MetricRecord]:
-    """The numbers of the structural checks and candidates per query, as manifest metrics."""
+    """The numbers of the two structural checks, as manifest metrics.
+
+    Candidates per query is not among them: it is an output signal, and the
+    scoring step reports it (hmrec.weekly.outputs.signal_metrics).
+    """
     anchor = context.tick.anchor
     return [
         MetricRecord("structure/feature_rows", anchor, float(written)),
         MetricRecord("structure/deduplicated_candidates", anchor, float(expected)),
         MetricRecord("structure/duplicate_keys", anchor, float(written - distinct)),
-        MetricRecord("output/candidates_per_query", anchor, written / n_queries),
     ]
 
 
@@ -158,7 +161,7 @@ def run_features(context: TickContext) -> StepOutcome:
         OutputFile("features_record", FEATURES_RECORD_FILE),
         OutputFile("feature_stats", FEATURE_STATS_FILE),
     ]
-    metrics = structure_metrics(context, written, distinct, expected, result.n_queries)
+    metrics = structure_metrics(context, written, distinct, expected)
     return detail, metrics, files
 
 

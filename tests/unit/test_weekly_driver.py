@@ -171,6 +171,27 @@ def test_label_reads_are_recorded_before_the_step(paths: ProjectPaths) -> None:
     ]
 
 
+def test_a_quantity_two_steps_measure_is_recorded_once(paths: ProjectPaths) -> None:
+    # The feature step and the scoring step both report the candidates per query (300).
+    # A run manifest holds a metric name once per week: an equal value is recorded once.
+    result = run_tick(paths, V1, EVAL_MODE, FakeSteps(paths), STAMP)
+    assert result.succeeded
+    values = [m.value for m in result.manifest.metrics if m.name == "output/candidates_per_query"]
+    assert values == [300.0]
+
+
+def test_two_steps_that_disagree_about_a_quantity_stop_the_tick(paths: ProjectPaths) -> None:
+    steps = FakeSteps(paths, candidates_per_query=299.0)
+    result = run_tick(paths, V1, EVAL_MODE, steps, STAMP)
+    assert result.manifest.status == FAILED
+    assert (
+        "O4_score" in result.manifest.failure
+        and "an earlier step recorded" in result.manifest.failure
+    )
+    # The tick stopped before O5: nothing was published.
+    assert steps.calls[-1] == "O4_score" and _current(paths) is None
+
+
 # ---------------------------------------------------------------- refusal
 
 

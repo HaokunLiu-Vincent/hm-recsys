@@ -152,6 +152,8 @@ class FakeSteps:
         fail: Names of steps that raise instead of writing.
         new_week_rows: Purchase lines the fake C1 reports for the new week.
         union_recall: Union recall the fake C2 reports.
+        candidates_per_query: What the fake feature step reports as candidates per
+            query (the fake scoring step always reports 300).
         calls: The names of the steps that were started, in order.
     """
 
@@ -159,6 +161,7 @@ class FakeSteps:
     fail: set[str] = field(default_factory=set)
     new_week_rows: int = WEEK_ROWS
     union_recall: float = 0.30
+    candidates_per_query: float = 300.0
     calls: list[str] = field(default_factory=list)
 
     def __call__(self, call: StepCall) -> None:
@@ -230,8 +233,13 @@ class FakeSteps:
                 list(STATS_COLUMNS),
                 [feature_row(tick.name, name) for name in FEATURES_OF_EXAMPLE],
             )
-            metric = MetricRecord("structure/duplicate_keys", tick.anchor, 0.0)
-            return [], ([metric] if kind == FEATURES else [])
+            # Like the real steps of the first replay tick: the feature step and the
+            # scoring step both report the candidates per query, with the same value.
+            metrics = [
+                MetricRecord("structure/duplicate_keys", tick.anchor, 0.0),
+                MetricRecord("output/candidates_per_query", tick.anchor, self.candidates_per_query),
+            ]
+            return [], (metrics if kind == FEATURES else [])
         if kind == FEATURES_SHARED:
             (folder / "item_table.parquet").write_bytes(b"articles")
             return [], []
@@ -252,8 +260,11 @@ class FakeSteps:
             (folder / "top.parquet").write_bytes(b"top of the week")
             signals = OutputSignals(N_CUSTOMERS, 300.0, 0.5, 40, 100, 7)
             (folder / "signals.json").write_text(json.dumps(asdict(signals)), encoding="utf-8")
-            metric = MetricRecord("output/distinct_articles", tick.anchor, 40.0)
-            return [OutputFile("top_k", "top.parquet")], [metric]
+            metrics = [
+                MetricRecord("output/distinct_articles", tick.anchor, 40.0),
+                MetricRecord("output/candidates_per_query", tick.anchor, 300.0),
+            ]
+            return [OutputFile("top_k", "top.parquet")], metrics
         if kind == PUBLISH:
             (folder / "top.parquet").write_bytes(b"prediction set")
             (folder / "manifest.json").write_text("{}", encoding="utf-8")

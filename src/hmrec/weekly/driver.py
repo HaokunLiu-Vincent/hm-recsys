@@ -304,10 +304,35 @@ def collect_step(run: TickRun, step: Step, folder: Path, status: str) -> None:
         detail = f"output exists, not run again ({output.detail})"
         record = StepRecord(step.name, status, 0.0, 0.0, None, detail)
     run.steps.append(record)
-    run.metrics.extend(output.metrics)
+    add_metrics(run, step, output.metrics)
     root = run.context.paths.project_root
     for file in output.files:
         run.outputs.append(file_record(file.role, root, relative(run.context, folder / file.name)))
+
+
+def add_metrics(run: TickRun, step: Step, metrics: Sequence[MetricRecord]) -> None:
+    """Add a step's metric values to the run; a (name, week) pair is recorded once.
+
+    A run manifest holds a metric name once per week. Two steps may measure the
+    same quantity (the feature step and the scoring step both know the
+    candidates per query): an equal value is recorded once.
+
+    Raises:
+        StepFailed: If a step reports ANOTHER value for a metric that is already
+            recorded: two steps then disagree about one quantity, and the tick stops.
+    """
+    recorded = {(metric.name, metric.week): metric.value for metric in run.metrics}
+    for metric in metrics:
+        key = (metric.name, metric.week)
+        if key not in recorded:
+            run.metrics.append(metric)
+            recorded[key] = metric.value
+        elif recorded[key] != metric.value:
+            raise StepFailed(
+                step.name,
+                f"metric {metric.name} of week {metric.week} is {metric.value!r}, but an earlier "
+                f"step recorded {recorded[key]!r}",
+            )
 
 
 def skipped(run: TickRun, step: Step, detail: str) -> None:
