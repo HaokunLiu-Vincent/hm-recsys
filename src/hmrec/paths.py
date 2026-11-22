@@ -966,6 +966,26 @@ class ProjectPaths:
         """
         return self.artifacts_root / "kaggle" / "submission"
 
+    # ------------------------------------------------------------ stage 3: M13 cloud
+
+    @property
+    def cloud_config_file(self) -> Path:
+        """configs/m13_cloud.yaml: the shape of the Cloud Run job and the prices of its cost."""
+        return self.configs_dir / "m13_cloud.yaml"
+
+    @property
+    def cloud_results_dir(self) -> Path:
+        """results/m13_cloud/: the records of the replay on Cloud Run.
+
+        Copies of the tables the pipeline wrote into its state in the bucket, the
+        comparison with the stage-1 records, and one row per execution of the job.
+        """
+        return self.results_root / "m13_cloud"
+
+    def cloud_table_file(self, table: str) -> Path:
+        """results/m13_cloud/{table}.csv, e.g. "executions"."""
+        return self.cloud_results_dir / f"{table}.csv"
+
     @property
     def mlflow_dir(self) -> Path:
         """artifacts/mlflow/: the local MLflow store (not in git; rebuilt by `make mlflow-sync`)."""

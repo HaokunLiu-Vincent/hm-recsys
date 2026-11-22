@@ -1,0 +1,15 @@
+# M13 (docs/mlops.md §12): the shape of the Cloud Run job and the prices its cost is
+# computed with. Read by hmrec.cloud_costs.load_cloud_config; used only to RECORD what an
+# execution cost (results/m13_cloud/executions.csv). Nothing here changes a result, and
+# nothing here names a project, a bucket or an account.
+
+job:
+  # The shape of decision D10. infra/operate.sh creates the job with the same two values.
+  cpu: 6
+  memory_gib: 24
+
+prices:
+  # Cloud Run jobs, a Tier 1 region, as read from the pricing page on 2026-11-21
+  # (docs/mlops.md §12). An execution is billed for the time its instance runs.
+  usd_per_vcpu_second: 0.000018
+  usd_per_gib_second: 0.000002

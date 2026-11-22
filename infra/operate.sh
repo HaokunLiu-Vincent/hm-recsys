@@ -19,6 +19,10 @@
 #     bash infra/operate.sh create-scheduler            the weekly trigger, paused at once
 #     bash infra/operate.sh run-scheduler               start the job through the scheduler now
 #     bash infra/operate.sh pause-scheduler             pause the weekly trigger
+#     bash infra/operate.sh memory <start> <end>        highest memory use of the job's instance
+#                                                       between two UTC times, as a share of its limit
+#     bash infra/operate.sh download-records [calibration]   the SMALL records of the state
+#                                                       (manifests, step records, tables) to the laptop
 #     bash infra/operate.sh state-size                  bytes under each prefix of the bucket
 #     bash infra/operate.sh status                      every resource that exists
 #     bash infra/operate.sh token                       an access token of the operator (for curl)
@@ -212,6 +216,39 @@ case "$command" in
     ;;
   pause-scheduler)
     g scheduler jobs pause "$SCHEDULER_JOB_NAME" --location "$REGION"
+    ;;
+  memory)
+    start="${1:?give the start, e.g. 2026-11-22T09:00:00Z}"
+    end="${2:?give the end, e.g. 2026-11-22T09:20:00Z}"
+    # Cloud Monitoring: the memory use of the job's container as a share of its limit, the
+    # 99th percentile of every minute; the highest of those minutes is printed. The request
+    # goes to the Monitoring API of the project with a token of the operator.
+    curl --silent --fail --get \
+      --header "Authorization: Bearer $(g auth print-access-token 2>/dev/null)" \
+      --data-urlencode "filter=metric.type=\"run.googleapis.com/container/memory/utilizations\" AND resource.type=\"cloud_run_job\" AND resource.labels.job_name=\"${JOB_NAME}\"" \
+      --data-urlencode "interval.startTime=${start}" \
+      --data-urlencode "interval.endTime=${end}" \
+      --data-urlencode "aggregation.alignmentPeriod=60s" \
+      --data-urlencode "aggregation.perSeriesAligner=ALIGN_PERCENTILE_99" \
+      "https://monitoring.googleapis.com/v3/projects/${PROJECT_ID}/timeSeries" |
+      python3 -c 'import json, sys
+series = json.load(sys.stdin).get("timeSeries", [])
+values = [point["value"]["doubleValue"] for one in series for point in one["points"]]
+print(max(values) if values else "no data")'
+    ;;
+  download-records)
+    # Only what is small: JSON records and CSV tables. Candidates, features, samples,
+    # models, vectors and logs stay in the bucket (docs/mlops.md 12, guardrail 5).
+    prefix="$STATE_PREFIX"
+    if [ "${1:-}" = "calibration" ]; then
+      prefix="${STATE_PREFIX}-calibration"
+    fi
+    target="artifacts/m13_cloud/${prefix}"
+    mkdir -p "$target"
+    g storage rsync --recursive \
+      --exclude '.*\.parquet$|.*\.npy$|.*\.pt$|.*\.bin$|.*\.txt$|.*\.log$|.*/\.staging/.*|.*/\.failed/.*|^\.volume-check/.*' \
+      "gs://${BUCKET}/${prefix}" "$target"
+    echo "records of ${prefix} are in ${target}"
     ;;
   state-size)
     for prefix in "$INPUTS_PREFIX" "$STATE_PREFIX" "${STATE_PREFIX}-calibration" dvc; do
