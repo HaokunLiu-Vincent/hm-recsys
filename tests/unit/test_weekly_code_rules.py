@@ -28,6 +28,7 @@ SCRIPTS = (
     REPO / "scripts" / "weekly.py",
     REPO / "scripts" / "m12_step.py",
     REPO / "scripts" / "m12_replay_compare.py",
+    REPO / "scripts" / "m13_volume_check.py",
 )
 
 PLAIN_MODULES = (
@@ -46,6 +47,7 @@ PLAIN_MODULES = (
     "state.py",
     "steps.py",
     "storage.py",
+    "volume_check.py",
 )
 TORCH_SIDE_MODULES = ("recall_steps.py", "shard_recall.py")
 LIGHTGBM_SIDE_MODULES = ("ranker_steps.py",)
