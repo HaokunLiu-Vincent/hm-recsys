@@ -13,6 +13,7 @@ Usage:
 The layout follows docs/proposal.md §14 and §14.2.
 """
 
+from collections.abc import Mapping
 from dataclasses import dataclass, replace
 from datetime import date
 from pathlib import Path
@@ -46,6 +47,16 @@ STAGING_DIR = ".staging"
 FAILED_DIR = ".failed"
 R1_CHANNEL_NAME = "r1_popularity"
 R5_CHANNEL_NAME = "r5_wals"
+
+# Where a tick of the weekly pipeline reads its inputs and keeps its state when they do
+# not lie inside the repository (M13: two folders of a mounted bucket). Code names no
+# bucket: the two folders come from the environment of the process (TickRootPaths).
+PIPELINE_INPUTS_ROOT_VARIABLE = "HMREC_PIPELINE_INPUTS_ROOT"
+PIPELINE_STATE_ROOT_VARIABLE = "HMREC_PIPELINE_STATE_ROOT"
+# The state of a calibration tick lies NEXT TO the state, in a folder with this suffix.
+CALIBRATION_STATE_SUFFIX = "-calibration"
+# The folder of the pipeline's result tables inside a state that is not in the repository.
+STATE_TABLES_DIR = "results"
 
 
 def resolve_root(root: str, project_root: Path) -> Path:
@@ -1408,6 +1419,122 @@ def pipeline_paths(
         category_codes=paths.category_codes_file,
         staging=staging,
         shard=None,
+    )
+
+
+# ---------------------------------------------------------------- stage 3: M13 roots of a tick
+
+
+@dataclass(frozen=True)
+class TickRootPaths(ProjectPaths):
+    """The ProjectPaths of a tick whose state is not artifacts/pipeline/ of the repository.
+
+    Two cases (docs/mlops.md §6.4, §8.3):
+
+        a state root from the environment   the state of the pipeline lies where
+                                            HMREC_PIPELINE_STATE_ROOT says, e.g. a
+                                            folder of a mounted bucket;
+        a calibration tick                  everything is written under a SEPARATE
+                                            state, next to the state and named
+                                            "{state folder}-calibration".
+
+    In both cases the pipeline's result tables lie INSIDE the state
+    ({state_root}/results/): the repository's results/m12_replay/ holds the
+    replay of M12 and is not written by another run.
+
+    Attributes:
+        state_root: The folder that holds this tick's state (already the
+            calibration folder for a calibration tick).
+        calibration: True for a calibration tick.
+    """
+
+    state_root: Path
+    calibration: bool
+
+    @property
+    def pipeline_state_dir(self) -> Path:
+        """The state of this tick: `state_root`."""
+        return self.state_root
+
+    @property
+    def replay_results_dir(self) -> Path:
+        """{state_root}/results/: the pipeline's result tables of this state."""
+        return self.state_root / STATE_TABLES_DIR
+
+
+def calibration_state_dir(state_dir: Path) -> Path:
+    """The state folder of calibration ticks: next to `state_dir`, e.g. pipeline-calibration/."""
+    return state_dir.with_name(state_dir.name + CALIBRATION_STATE_SUFFIX)
+
+
+def absolute_root(variable: str, value: str) -> Path:
+    """A root folder given in the environment.
+
+    Raises:
+        ValueError: If it is not an absolute path. A relative path would depend
+            on the working directory of the process.
+    """
+    root = Path(value)
+    if not root.is_absolute():
+        raise ValueError(f"{variable} must be an absolute path, got {value!r}")
+    return root
+
+
+def tick_root_paths(
+    paths: ProjectPaths, environment: Mapping[str, str], calibration: bool
+) -> ProjectPaths:
+    """The project paths of a tick, with the roots the environment gives (M13).
+
+        HMREC_PIPELINE_INPUTS_ROOT   a folder that holds the pipeline's inputs in
+                                     their plain layout: data/processed/,
+                                     data/bootstrap/ and
+                                     artifacts/features/category_codes.json.
+        HMREC_PIPELINE_STATE_ROOT    the folder that holds the state (the layout
+                                     of StateLayout) and the result tables.
+
+    Neither is set on the laptop: the paths of configs/base.yaml are used, the
+    state is artifacts/pipeline/ and the tables are results/m12_replay/, as in M12.
+
+    Args:
+        paths: The project paths of configs/base.yaml.
+        environment: The environment of the process (os.environ).
+        calibration: True for a calibration tick: the state is the folder next
+            to the state, see calibration_state_dir.
+
+    Returns:
+        `paths` itself if no root is given and the tick is not a calibration
+        tick; else a TickRootPaths.
+
+    Raises:
+        ValueError: If a root is not an absolute path, or an inputs root is
+            given without a state root (the state would then be written among
+            the inputs).
+    """
+    inputs_value = environment.get(PIPELINE_INPUTS_ROOT_VARIABLE, "")
+    state_value = environment.get(PIPELINE_STATE_ROOT_VARIABLE, "")
+    if inputs_value == "" and state_value == "" and not calibration:
+        return paths
+    if inputs_value != "" and state_value == "":
+        raise ValueError(
+            f"{PIPELINE_INPUTS_ROOT_VARIABLE} is set but {PIPELINE_STATE_ROOT_VARIABLE} is not: "
+            "the state would be written among the inputs"
+        )
+    data_root, artifacts_root = paths.data_root, paths.artifacts_root
+    if inputs_value != "":
+        inputs_root = absolute_root(PIPELINE_INPUTS_ROOT_VARIABLE, inputs_value)
+        data_root, artifacts_root = inputs_root / "data", inputs_root / "artifacts"
+    state_root = paths.pipeline_state_dir
+    if state_value != "":
+        state_root = absolute_root(PIPELINE_STATE_ROOT_VARIABLE, state_value)
+    if calibration:
+        state_root = calibration_state_dir(state_root)
+    return TickRootPaths(
+        project_root=paths.project_root,
+        data_root=data_root,
+        artifacts_root=artifacts_root,
+        results_root=paths.results_root,
+        state_root=state_root,
+        calibration=calibration,
     )
 
 

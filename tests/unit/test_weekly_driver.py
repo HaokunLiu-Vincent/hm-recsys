@@ -10,6 +10,7 @@ before it, F4, is closed in the bootstrap state. V2 is 2020-08-05, V3 2020-08-12
 """
 
 import json
+import subprocess
 from pathlib import Path
 
 import pytest
@@ -22,10 +23,17 @@ from weekly_example import (
     FakeSteps,
     build_workspace,
     patch_driver_environment,
+    tick_context,
 )
 
 from hmrec.csv_records import read_rows
-from hmrec.paths import ProjectPaths, StateLayout
+from hmrec.paths import (
+    PIPELINE_INPUTS_ROOT_VARIABLE,
+    PIPELINE_STATE_ROOT_VARIABLE,
+    ProjectPaths,
+    StateLayout,
+    tick_root_paths,
+)
 from hmrec.run_manifest import (
     EVAL_MODE,
     FAILED,
@@ -35,10 +43,18 @@ from hmrec.run_manifest import (
     read_run_manifest,
 )
 from hmrec.run_records import RunStamp
-from hmrec.weekly.driver import LABEL_ACCESS_COLUMNS, run_tick
+from hmrec.weekly.driver import (
+    CALIBRATION_METRIC,
+    LABEL_ACCESS_COLUMNS,
+    StepCall,
+    next_anchor,
+    run_tick,
+    subprocess_runner,
+)
 from hmrec.weekly.history import MONITORING_COLUMNS
 from hmrec.weekly.state import read_current
-from hmrec.weekly.storage import LocalStateStore
+from hmrec.weekly.steps import steps_before_shards
+from hmrec.weekly.storage import LocalStateStore, MountedStateStore
 
 EVAL_STEPS = [
     "C1_ingest",
@@ -385,3 +401,168 @@ def test_state_files_are_valid_json(paths: ProjectPaths) -> None:
     layout = _layout(paths)
     for file in (layout.current_file, layout.published_file(V1), layout.monitoring_file(V1)):
         json.loads(file.read_text(encoding="utf-8"))
+
+
+# ---------------------------------------------------------------- M13: roots, next tick
+
+
+def _mounted(paths: ProjectPaths, tmp_path: Path) -> ProjectPaths:
+    """The same workspace with inputs and state OUTSIDE the repository, as on a mounted bucket.
+
+    The workspace's data/ is moved to {mount}/inputs/data/, and the state is to
+    be {mount}/pipeline/. Returns the paths the two environment variables give.
+    """
+    mount = tmp_path.parent / f"{tmp_path.name}-mount"
+    (mount / "inputs").mkdir(parents=True)
+    paths.data_root.rename(mount / "inputs" / "data")
+    environment = {
+        PIPELINE_INPUTS_ROOT_VARIABLE: str(mount / "inputs"),
+        PIPELINE_STATE_ROOT_VARIABLE: str(mount / "pipeline"),
+    }
+    return tick_root_paths(paths, environment, calibration=False)
+
+
+def test_a_tick_runs_with_inputs_and_state_outside_the_repository(
+    paths: ProjectPaths, tmp_path: Path
+) -> None:
+    mounted = _mounted(paths, tmp_path)
+    state = mounted.pipeline_state_dir
+    assert state.name == "pipeline" and not state.is_relative_to(paths.project_root)
+    steps = FakeSteps(mounted)
+    result = run_tick(mounted, V1, EVAL_MODE, steps, STAMP)
+    assert result.succeeded and steps.calls == EVAL_STEPS
+    # State, manifests and result tables are all under the state root; the repository
+    # got nothing: no artifacts/pipeline/, no results/m12_replay/.
+    assert result.manifest_file == state / "runs" / "2020-07-29-eval-a1" / "manifest.json"
+    assert (state / "weeks" / "2020-07-29" / "features" / "features.json").is_file()
+    assert (state / "results" / "steps.csv").is_file()
+    assert (state / "results" / "monitoring.csv").is_file()
+    assert not paths.pipeline_state_dir.exists() and not paths.replay_results_dir.exists()
+    # A file is recorded by its key below the mount: "pipeline/..." and "inputs/...";
+    # a file of the code (a lock, a config) by its path in the repository.
+    output_paths = [file.path for file in result.manifest.outputs]
+    assert "pipeline/weeks/2020-07-29/ingest/transactions.parquet" in output_paths
+    assert any(path.startswith("pipeline/predictions/2020-07-29/") for path in output_paths)
+    assert all(path.startswith("pipeline/") for path in output_paths)
+    inputs = {file.role: file.path for file in result.manifest.inputs}
+    assert inputs["lock/ranker"] == "configs/locks/ranker.lock.yaml"
+    current = _current(mounted)
+    assert current is not None and current.prediction_set == "predictions/2020-07-29"
+    chain = next(model for model in current.models if model.role == "twotower_chain")
+    assert chain.path == "inputs/data/bootstrap/models/twotower/chain_locked/F4.pt"
+    # The next tick finds the state there and closes V1.
+    assert run_tick(mounted, V2, EVAL_MODE, FakeSteps(mounted), STAMP).succeeded
+    assert (state / "weeks" / "2020-07-29" / "closed.json").is_file()
+
+
+class _CommitDiesOnce(MountedStateStore):
+    """A mounted store whose commit of ONE step stops after its first file, once."""
+
+    def __init__(self, root: Path, step_folder: str) -> None:
+        super().__init__(root)
+        self.step_folder = step_folder
+        self.died = False
+
+    def commit_dir(self, staging: Path, final: Path) -> None:
+        if final.name == self.step_folder and not self.died:
+            self.died = True
+            first = sorted(path for path in staging.rglob("*") if path.is_file())[0]
+            final.mkdir(parents=True)
+            first.rename(final / first.name)
+            raise OSError("the connection to the bucket was lost")
+        super().commit_dir(staging, final)
+
+
+def test_a_commit_that_did_not_end_is_completed_without_running_the_step_again(
+    paths: ProjectPaths, tmp_path: Path
+) -> None:
+    mounted = _mounted(paths, tmp_path)
+    layout = _layout(mounted)
+    store = _CommitDiesOnce(layout.root, "features")
+    steps = FakeSteps(mounted)
+    stopped = run_tick(mounted, V1, EVAL_MODE, steps, STAMP, store)
+    assert not stopped.succeeded and "O2_features" in stopped.manifest.failure
+    final, staging = layout.step_dir(V1, "features"), layout.staging_dir(V1, "features")
+    # The step finished; half of its files are in place, the record is still in staging.
+    # Nothing was moved to .failed/: this is not a failed attempt.
+    assert final.is_dir() and not (final / "step.json").exists()
+    assert (staging / "step.json").is_file()
+    assert not layout.failed_dir(V1).exists()
+    assert _current(mounted) is None
+    resumed = run_tick(mounted, V1, EVAL_MODE, steps, STAMP, store)
+    assert resumed.succeeded and resumed.manifest.run_id == "2020-07-29-eval-a2"
+    # The feature step ran ONCE; the second run only completed its commit.
+    assert steps.calls.count("O2_features") == 1
+    assert (final / "step.json").is_file() and (final / "features.json").is_file()
+    assert not staging.exists()
+    statuses = {step.name: step.status for step in resumed.manifest.steps}
+    assert statuses["O2_features"] == STEP_SKIPPED and statuses["O3_train"] == STEP_DONE
+
+
+def test_the_next_tick_is_the_week_after_the_current_prediction_set(paths: ProjectPaths) -> None:
+    # What a scheduler runs every week: the same arguments, the anchor from the state.
+    assert next_anchor(paths) == V1
+    assert run_tick(paths, next_anchor(paths), EVAL_MODE, FakeSteps(paths), STAMP).succeeded
+    assert next_anchor(paths) == V2
+    # A tick that stops leaves the pointer where it was: the same tick is due again.
+    failing = FakeSteps(paths, fail={"O2_features"})
+    assert not run_tick(paths, next_anchor(paths), EVAL_MODE, failing, STAMP).succeeded
+    assert next_anchor(paths) == V2
+    assert run_tick(paths, next_anchor(paths), EVAL_MODE, FakeSteps(paths), STAMP).succeeded
+    assert next_anchor(paths) == V3
+
+
+def test_a_calibration_tick_writes_only_into_its_own_state(paths: ProjectPaths) -> None:
+    calibration = tick_root_paths(paths, {}, calibration=True)
+    state = calibration.pipeline_state_dir
+    assert state == paths.artifacts_root / "pipeline-calibration"
+    seen: list[bool] = []
+    steps = FakeSteps(calibration)
+
+    def runner(call: StepCall) -> None:
+        seen.append(call.calibration)
+        steps(call)
+
+    result = run_tick(calibration, V1, EVAL_MODE, runner, STAMP)
+    assert result.succeeded
+    # Every step process is told that it belongs to a calibration tick.
+    assert seen and all(seen)
+    assert result.manifest_file.is_relative_to(state)
+    assert (state / "results" / "steps.csv").is_file()
+    # The pipeline's own state and the M12 result tables were not touched.
+    assert not paths.pipeline_state_dir.exists() and not paths.replay_results_dir.exists()
+    marks = [metric for metric in result.manifest.metrics if metric.name == CALIBRATION_METRIC]
+    assert [(metric.week, metric.value) for metric in marks] == [(V1, 1.0)]
+    # A tick of the pipeline itself is not marked, and starts from the bootstrap state.
+    plain = run_tick(paths, V1, EVAL_MODE, FakeSteps(paths), STAMP)
+    assert plain.succeeded
+    assert all(metric.name != CALIBRATION_METRIC for metric in plain.manifest.metrics)
+
+
+def test_the_step_process_is_started_with_the_calibration_flag(
+    paths: ProjectPaths, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    commands: list[list[str]] = []
+
+    def fake_run(command: list[str], check: bool) -> subprocess.CompletedProcess[str]:
+        commands.append(command)
+        return subprocess.CompletedProcess(command, 0)
+
+    monkeypatch.setattr(subprocess, "run", fake_run)
+    runner = subprocess_runner(Path("/app/scripts"))
+    context = tick_context(paths, V1)
+    step = steps_before_shards(context.tick, context.closing, EVAL_MODE)[0]
+    runner(StepCall(V1, EVAL_MODE, "2020-07-29-eval-a1", step))
+    runner(StepCall(V1, EVAL_MODE, "2020-07-29-eval-a1", step, calibration=True))
+    assert "--calibration" not in commands[0] and commands[1][-1] == "--calibration"
+    assert commands[0][1:] == [
+        "/app/scripts/m12_step.py",
+        "--anchor",
+        "2020-07-29",
+        "--mode",
+        "eval",
+        "--run-id",
+        "2020-07-29-eval-a1",
+        "--step",
+        "C1_ingest",
+    ]

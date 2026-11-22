@@ -114,7 +114,9 @@ def dispatch(context: TickContext, step: Step) -> StepOutcome:
     return run_plain_step(context, step)
 
 
-def run_one_step(anchor: date, mode: str, run_id: str, step_name: str) -> None:
+def run_one_step(
+    anchor: date, mode: str, run_id: str, step_name: str, calibration: bool = False
+) -> None:
     """Start, run and finish one step of a tick in this process.
 
     Args:
@@ -122,13 +124,14 @@ def run_one_step(anchor: date, mode: str, run_id: str, step_name: str) -> None:
         mode: "eval" or "serve".
         run_id: The run of the tick.
         step_name: The step, e.g. "O1_recall_r4_itemcf".
+        calibration: True for a step of a calibration tick.
 
     Raises:
         Exception: Whatever the step raised; the reason is written to the run's
             failures folder first.
     """
     started = time.perf_counter()
-    context, step = start_step(anchor, mode, run_id, step_name)
+    context, step = start_step(anchor, mode, run_id, step_name, calibration)
     try:
         detail, metrics, files = dispatch(context, step)
         finish_step(context, step, started, detail, metrics, files)

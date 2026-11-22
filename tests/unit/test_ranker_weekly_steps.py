@@ -38,12 +38,18 @@ from weekly_example import V1, V2, build_workspace, tick_context, write_processe
 
 from hmrec.hpo.v_trial import TrialInputs
 from hmrec.locks import file_sha256, load_ranker_lock
-from hmrec.paths import ProjectPaths
+from hmrec.paths import ProjectPaths, tick_root_paths
 from hmrec.ranker.identity import model_config, ranker_config_id
 from hmrec.ranker.locked import LockedRanker
-from hmrec.ranker.platform_entry import PlatformNotAccepted
+from hmrec.ranker.platform_entry import (
+    MODE_ACCEPTED,
+    MODE_CALIBRATION,
+    PlatformLockedRanker,
+    PlatformNotAccepted,
+)
 from hmrec.ranker.runtime import read_lightgbm_runtime
 from hmrec.ranker.sampling import read_sample_record, record_file
+from hmrec.weekly import ranker_steps
 from hmrec.weekly.context import TickContext
 from hmrec.weekly.data_steps import run_ingest, run_queries
 from hmrec.weekly.outputs import read_signals, read_week_evaluation, run_publish
@@ -154,6 +160,32 @@ def test_the_locked_configuration_comes_through_this_platforms_entry(paths: Proj
         # A platform without a record (x86-64 until M13): refused, nothing is trained.
         with pytest.raises(PlatformNotAccepted, match="no platform record"):
             load_locked_for_this_platform(context, runtime)
+
+
+def test_a_calibration_tick_enters_in_calibration_mode_on_linux(
+    paths: ProjectPaths, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    # The entry is replaced by a recorder, so both ticks are tried on every platform:
+    # on Linux a calibration tick asks for mode "calibration", any other tick for
+    # "accepted"; the output location is the tick's own view both times.
+    asked: list[tuple[str, Path]] = []
+    strict = LockedRanker.__new__(LockedRanker)
+
+    def recorder(paths_, base, runtime, system, machine, mode, output_paths):
+        asked.append((mode, output_paths.layout.root))
+        return PlatformLockedRanker(locked=strict, mode=mode, runtime=runtime, record=None)
+
+    monkeypatch.setattr(ranker_steps, "load_locked_ranker_for_platform", recorder)
+    monkeypatch.setattr(ranker_steps.sys, "platform", "linux")
+    runtime = read_lightgbm_runtime()
+    plain = tick_context(paths, V1)
+    calibration = tick_context(tick_root_paths(paths, {}, calibration=True), V1)
+    assert load_locked_for_this_platform(plain, runtime) is strict
+    assert load_locked_for_this_platform(calibration, runtime) is strict
+    assert asked == [
+        (MODE_ACCEPTED, paths.pipeline_state_dir),
+        (MODE_CALIBRATION, paths.artifacts_root / "pipeline-calibration"),
+    ]
 
 
 def _architecture() -> str:

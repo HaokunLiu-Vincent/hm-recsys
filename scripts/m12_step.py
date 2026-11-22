@@ -31,13 +31,18 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--mode", required=True, choices=MODES)
     parser.add_argument("--run-id", required=True)
     parser.add_argument("--step", required=True, help="a step name, e.g. C1_ingest")
+    parser.add_argument(
+        "--calibration",
+        action="store_true",
+        help="a step of a calibration tick (the driver passes it on)",
+    )
     return parser.parse_args()
 
 
 def main() -> None:
     """Run the step."""
     args = parse_args()
-    run_one_step(args.anchor, args.mode, args.run_id, args.step)
+    run_one_step(args.anchor, args.mode, args.run_id, args.step, args.calibration)
 
 
 if __name__ == "__main__":

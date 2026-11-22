@@ -12,7 +12,12 @@ import pytest
 from run_manifest_example import TORCH_PLATFORM
 from weekly_example import STAMP, V1, V2, build_workspace, tick_context, write_processed
 
-from hmrec.paths import ProjectPaths
+from hmrec.paths import (
+    PIPELINE_INPUTS_ROOT_VARIABLE,
+    PIPELINE_STATE_ROOT_VARIABLE,
+    ProjectPaths,
+    tick_root_paths,
+)
 from hmrec.run_manifest import EVAL_MODE, SERVE_MODE, MetricRecord, StepRecord
 from hmrec.run_records import RunStamp
 from hmrec.weekly import context as context_module
@@ -57,6 +62,43 @@ def test_a_step_context_writes_into_its_own_staging_folder(paths: ProjectPaths) 
     # C3 writes the CLOSED week's sample; everything else it reads from finished folders.
     assert context.view.ranker_sample_file("full", "V1", 40).parent == week / ".staging" / "sample"
     assert context.view.features_dir("V1") == week / "features"
+
+
+def test_a_file_is_recorded_below_the_root_it_belongs_to(paths: ProjectPaths) -> None:
+    # On the laptop every file lies in the repository and is recorded by its path there.
+    context = tick_context(paths, V1)
+    root, relative = context.recorded_location(
+        context.layout.week_dir(V1) / "queries" / "q.parquet"
+    )
+    assert (root, relative) == (
+        paths.project_root,
+        "artifacts/pipeline/weeks/2020-07-29/queries/q.parquet",
+    )
+    assert not context.calibration
+    # With roots outside the repository (a mounted bucket) a file of the state and a file
+    # of the inputs are recorded by their key below the mount; a lock file by its path
+    # in the repository.
+    environment = {
+        PIPELINE_INPUTS_ROOT_VARIABLE: "/mnt/inputs",
+        PIPELINE_STATE_ROOT_VARIABLE: "/mnt/pipeline",
+    }
+    mounted = tick_context(tick_root_paths(paths, environment, calibration=False), V1)
+    assert mounted.recorded_location(mounted.layout.week_dir(V1) / "queries" / "q.parquet") == (
+        Path("/mnt"),
+        "pipeline/weeks/2020-07-29/queries/q.parquet",
+    )
+    assert mounted.recorded_location(mounted.paths.transactions_file) == (
+        Path("/mnt"),
+        "inputs/data/processed/transactions.parquet",
+    )
+    assert mounted.recorded_location(mounted.paths.ranker_lock_file) == (
+        paths.project_root,
+        "configs/locks/ranker.lock.yaml",
+    )
+    with pytest.raises(ValueError, match="none of the roots"):
+        mounted.recorded_location(Path("/somewhere/else.parquet"))
+    # A calibration tick knows that it is one.
+    assert tick_context(tick_root_paths(paths, {}, calibration=True), V1).calibration
 
 
 def test_uncommitted_code_is_refused() -> None:

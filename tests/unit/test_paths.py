@@ -1,9 +1,20 @@
 from pathlib import Path
 
+import pytest
 import yaml
 
 from hmrec.config import BaseConfig, ChunkingConfig, MemoryConfig, PathsConfig
-from hmrec.paths import PROJECT_ROOT, build_paths, get_paths, resolve_root
+from hmrec.paths import (
+    PIPELINE_INPUTS_ROOT_VARIABLE,
+    PIPELINE_STATE_ROOT_VARIABLE,
+    PROJECT_ROOT,
+    TickRootPaths,
+    build_paths,
+    calibration_state_dir,
+    get_paths,
+    resolve_root,
+    tick_root_paths,
+)
 
 
 def make_config(data_root: str, artifacts_root: str, results_root: str = "results") -> BaseConfig:
@@ -254,3 +265,58 @@ def test_paths_of_m11_versioning(tmp_path: Path) -> None:
     assert paths.mlflow_store_file == tmp_path / "artifacts" / "mlflow" / "mlflow.db"
     assert paths.mlflow_artifacts_dir == tmp_path / "artifacts" / "mlflow" / "artifacts"
     assert paths.pipeline_runs_dir != paths.run_dir("x").parent
+
+
+# ---------------------------------------------------------------- M13: the roots of a tick
+
+
+def test_without_roots_a_tick_uses_the_paths_of_the_repository(tmp_path: Path) -> None:
+    paths = build_paths(make_config("data", "artifacts"), tmp_path)
+    # The laptop: no variable, no calibration. The very same object comes back, so the
+    # state is artifacts/pipeline/ and the tables are results/m12_replay/, as in M12.
+    assert tick_root_paths(paths, {}, calibration=False) is paths
+    assert tick_root_paths(paths, {PIPELINE_STATE_ROOT_VARIABLE: ""}, False) is paths
+
+
+def test_roots_from_the_environment_move_inputs_state_and_tables(tmp_path: Path) -> None:
+    paths = build_paths(make_config("data", "artifacts"), tmp_path)
+    environment = {
+        PIPELINE_INPUTS_ROOT_VARIABLE: "/mnt/inputs",
+        PIPELINE_STATE_ROOT_VARIABLE: "/mnt/pipeline",
+    }
+    rooted = tick_root_paths(paths, environment, calibration=False)
+    assert isinstance(rooted, TickRootPaths) and not rooted.calibration
+    # Inputs keep their plain layout below the inputs root.
+    assert rooted.transactions_file == Path("/mnt/inputs/data/processed/transactions.parquet")
+    assert rooted.bootstrap_dir == Path("/mnt/inputs/data/bootstrap")
+    assert rooted.category_codes_file == Path("/mnt/inputs/artifacts/features/category_codes.json")
+    # The state and the pipeline's result tables are under the state root.
+    assert rooted.pipeline_state_dir == Path("/mnt/pipeline")
+    assert rooted.replay_table_file("steps") == Path("/mnt/pipeline/results/steps.csv")
+    # Code and configs stay in the repository (the image).
+    assert rooted.project_root == tmp_path
+    assert rooted.ranker_lock_file == tmp_path / "configs" / "locks" / "ranker.lock.yaml"
+    # Only a state root: the inputs stay where configs/base.yaml puts them.
+    only_state = tick_root_paths(paths, {PIPELINE_STATE_ROOT_VARIABLE: "/mnt/pipeline"}, False)
+    assert only_state.data_root == paths.data_root
+    assert only_state.pipeline_state_dir == Path("/mnt/pipeline")
+
+
+def test_a_calibration_tick_has_a_state_of_its_own_next_to_the_state(tmp_path: Path) -> None:
+    paths = build_paths(make_config("data", "artifacts"), tmp_path)
+    local = tick_root_paths(paths, {}, calibration=True)
+    assert isinstance(local, TickRootPaths) and local.calibration
+    assert local.pipeline_state_dir == tmp_path / "artifacts" / "pipeline-calibration"
+    assert local.replay_results_dir == tmp_path / "artifacts" / "pipeline-calibration" / "results"
+    mounted = tick_root_paths(paths, {PIPELINE_STATE_ROOT_VARIABLE: "/mnt/pipeline"}, True)
+    assert mounted.pipeline_state_dir == Path("/mnt/pipeline-calibration")
+    assert calibration_state_dir(Path("/mnt/pipeline")) == Path("/mnt/pipeline-calibration")
+
+
+def test_roots_must_be_absolute_and_inputs_need_a_state_root(tmp_path: Path) -> None:
+    paths = build_paths(make_config("data", "artifacts"), tmp_path)
+    with pytest.raises(ValueError, match="must be an absolute path"):
+        tick_root_paths(paths, {PIPELINE_STATE_ROOT_VARIABLE: "pipeline"}, False)
+    # Inputs elsewhere and no state root: the state would be written among the inputs.
+    with pytest.raises(ValueError, match="among the inputs"):
+        tick_root_paths(paths, {PIPELINE_INPUTS_ROOT_VARIABLE: "/mnt/inputs"}, False)

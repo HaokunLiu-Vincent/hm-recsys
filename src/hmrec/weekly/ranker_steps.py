@@ -62,7 +62,11 @@ from hmrec.paths import ProjectPaths
 from hmrec.ranker.ablation import build_experiment, wide_table_columns
 from hmrec.ranker.identity import model_config, ranker_config_id
 from hmrec.ranker.locked import LockedRanker, load_locked_ranker
-from hmrec.ranker.platform_entry import MODE_ACCEPTED, load_locked_ranker_for_platform
+from hmrec.ranker.platform_entry import (
+    MODE_ACCEPTED,
+    MODE_CALIBRATION,
+    load_locked_ranker_for_platform,
+)
 from hmrec.ranker.runtime import LightGBMRuntime, read_lightgbm_runtime
 from hmrec.ranker.sampling import SampleJob, SampleRecord, sample_fold
 from hmrec.ranker.train import first_trees_sha256, load_model, save_model
@@ -121,23 +125,31 @@ class RankerSetup:
 def load_locked_for_this_platform(context: TickContext, runtime: LightGBMRuntime) -> LockedRanker:
     """The locked Ranker configuration through the entry of this platform (module docstring).
 
+    A calibration tick (docs/mlops.md §8.3) measures a platform BEFORE it has a
+    record: on Linux it uses mode "calibration", which records the OpenMP
+    runtime it finds and accepts only the calibration state as output location.
+    On macOS the strict entry is the only one, also for a calibration tick.
+
     Raises:
-        hmrec.ranker.platform_entry.PlatformNotAccepted: On Linux, if the
-            platform has no record or the process is not what its record describes.
-        ValueError: If a lock check fails.
+        hmrec.ranker.platform_entry.PlatformNotAccepted: On Linux, in mode
+            "accepted": the platform has no record or the process is not what
+            its record describes.
+        ValueError: If a lock check fails, or a calibration tick would write
+            outside the calibration state.
     """
     if sys.platform == DARWIN:
         return load_locked_ranker(context.paths, context.base, runtime)
-    accepted = load_locked_ranker_for_platform(
+    mode = MODE_CALIBRATION if context.calibration else MODE_ACCEPTED
+    entered = load_locked_ranker_for_platform(
         context.paths,
         context.base,
         runtime,
         sys.platform,
         platform.machine(),
-        MODE_ACCEPTED,
+        mode,
         context.view,
     )
-    return accepted.locked
+    return entered.locked
 
 
 def load_ranker_setup(context: TickContext) -> RankerSetup:

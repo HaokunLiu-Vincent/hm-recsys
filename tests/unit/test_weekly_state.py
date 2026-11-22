@@ -1,5 +1,6 @@
 """Tests for weekly.storage and weekly.state: staging, never overwriting, the current pointer."""
 
+from dataclasses import replace
 from datetime import date
 from pathlib import Path
 
@@ -15,6 +16,7 @@ from hmrec.weekly.state import (
     is_closed,
     is_published,
     next_run_id,
+    next_tick_anchor,
     pointer_from_json,
     pointer_to_json,
     read_current,
@@ -177,3 +179,29 @@ def test_run_ids_count_the_attempts_of_a_tick(store: LocalStateStore) -> None:
     (layout.runs_dir / "2020-07-29-eval-a1").mkdir(parents=True)
     assert next_run_id(store, layout, V1.anchor, EVAL_MODE) == "2020-07-29-eval-a2"
     assert next_run_id(store, layout, V2.anchor, EVAL_MODE) == "2020-08-05-eval-a1"
+
+
+# ---------------------------------------------------------------- the next tick
+
+
+def test_the_next_tick_is_read_from_the_state(store: LocalStateStore) -> None:
+    layout = _layout(store)
+    # Nothing is published yet: the first tick, the week after the bootstrap state.
+    assert next_tick_anchor(store, layout, V1) == V1.anchor
+    # The tick at V1 published: the tick at V2 is due (it closes V1 and opens V2).
+    switch_current(store, layout, POINTER)
+    assert next_tick_anchor(store, layout, V1) == V2.anchor
+    # A tick that stopped did not replace current.json, so the same tick is due again.
+    assert next_tick_anchor(store, layout, V1) == V2.anchor
+    switch_current(store, layout, replace(POINTER, anchor=V2.anchor, closed_week=V1.anchor))
+    assert next_tick_anchor(store, layout, V1) == V3.anchor
+
+
+def test_a_local_folder_is_complete_as_soon_as_it_exists(store: LocalStateStore) -> None:
+    layout = _layout(store)
+    staging = layout.staging_dir(V1.anchor, "queries")
+    final = layout.step_dir(V1.anchor, "queries")
+    staging.mkdir(parents=True)
+    assert not store.is_committed(final) and not store.commit_interrupted(staging, final)
+    store.commit_dir(staging, final)
+    assert store.is_committed(final) and not store.commit_interrupted(staging, final)

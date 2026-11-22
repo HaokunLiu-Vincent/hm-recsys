@@ -1,10 +1,17 @@
 """The storage interface of the weekly pipeline's state (docs/mlops.md §6.4, §7.2).
 
 The driver never touches the state's files directly: it goes through a
-StateStore. In M12 there is one implementation, LocalStateStore (a folder on
-this machine, artifacts/pipeline/). M13 adds one that keeps the SAME relative
-keys in a Cloud Storage bucket; step processes keep working on local files and
-the store moves them.
+StateStore. There are two implementations:
+
+    LocalStateStore     a folder on a local disk (artifacts/pipeline/ on the
+                        laptop, M12). Renaming a folder is ONE step there.
+    MountedStateStore   a folder of a bucket that is mounted as a volume (M13;
+                        Cloud Storage FUSE on Cloud Run). The keys are the same.
+                        A bucket has no folders: "renaming a folder" is a copy
+                        and a delete per file, so a process that dies in the
+                        middle leaves half of the files under each name. This
+                        store therefore moves the files one by one and the
+                        step's record LAST (see MountedStateStore).
 
 The rules of §6.4 are the store's methods:
 
@@ -19,6 +26,9 @@ The rules of §6.4 are the store's methods:
                         or reused.
     discard_dir         removes an intermediate the design says to remove: the
                         features of a shard after the shard was scored (§8.4).
+    is_committed        True if a step's output is complete.
+    commit_interrupted  True if a commit began and did not end (possible only
+                        where a folder rename is not one step).
 
 This module imports only the standard library.
 """
@@ -28,6 +38,9 @@ from pathlib import Path
 from typing import Protocol
 
 TEMPORARY_SUFFIX = ".tmp"
+# The record a step writes as its LAST action (hmrec.weekly.context.finish_step). A
+# mounted store moves it last, so its presence in the final folder says "complete".
+COMMIT_RECORD_FILE = "step.json"
 
 
 class StateStore(Protocol):
@@ -64,6 +77,14 @@ class StateStore(Protocol):
 
     def discard_dir(self, path: Path) -> None:
         """Remove a folder of the state (only for intermediates the design removes)."""
+        ...
+
+    def is_committed(self, final: Path) -> bool:
+        """True if the output folder of a step is complete."""
+        ...
+
+    def commit_interrupted(self, staging: Path, final: Path) -> bool:
+        """True if commit_dir(staging, final) began earlier and did not end."""
         ...
 
 
@@ -171,3 +192,132 @@ class LocalStateStore:
             raise ValueError("the state folder itself is never removed")
         if target.exists():
             shutil.rmtree(target)
+
+    def is_committed(self, final: Path) -> bool:
+        """True if the folder exists: a local rename puts all of it in place at once."""
+        return self._inside(final).exists()
+
+    def commit_interrupted(self, staging: Path, final: Path) -> bool:
+        """Always False: a local rename happens or does not happen."""
+        self._inside(staging)
+        self._inside(final)
+        return False
+
+
+def files_below(folder: Path) -> list[Path]:
+    """Every file below a folder, as paths relative to it, in sorted order."""
+    return sorted(path.relative_to(folder) for path in folder.rglob("*") if path.is_file())
+
+
+def remove_empty_folders(folder: Path) -> None:
+    """Remove `folder` and the folders below it; all of them must be empty of files.
+
+    Raises:
+        OSError: If a file is left (os.rmdir refuses a folder that is not empty).
+    """
+    below = sorted((path for path in folder.rglob("*") if path.is_dir()), reverse=True)
+    for path in [*below, folder]:
+        path.rmdir()
+
+
+class MountedStateStore(LocalStateStore):
+    """The state in a folder of a bucket that is mounted as a volume (M13).
+
+    Reading, writing a file and renaming ONE file work as on a disk. A folder
+    is not an object of a bucket, so this store never renames a folder:
+
+        commit_dir   moves the files of the staging folder one by one, in sorted
+                     order, and the step's record (step.json) LAST. The output
+                     is complete if and only if its record is there
+                     (is_committed).
+        resume       a process that died during a commit leaves files under both
+                     names. The step itself had finished (its record exists, in
+                     the staging folder), so commit_dir called again moves the
+                     rest; the step is not computed again (commit_interrupted).
+        set_aside    moves the files one by one as well.
+
+    Every method works on a local disk too (the tests run there); it is only
+    slower than one rename.
+    """
+
+    def is_committed(self, final: Path) -> bool:
+        """True if the output folder holds the step's record, which is moved last."""
+        return (self._inside(final) / COMMIT_RECORD_FILE).is_file()
+
+    def commit_interrupted(self, staging: Path, final: Path) -> bool:
+        """True if a commit began and did not end.
+
+        The final folder exists without its record, and the staging folder
+        still holds the record: the step finished, the move did not.
+        """
+        source, target = self._inside(staging), self._inside(final)
+        return (
+            target.exists()
+            and not (target / COMMIT_RECORD_FILE).is_file()
+            and (source / COMMIT_RECORD_FILE).is_file()
+        )
+
+    def _move_files(self, source: Path, target: Path, last: str | None) -> None:
+        """Move every file below `source` to the same place below `target`.
+
+        Args:
+            source: The folder to empty.
+            target: The folder to fill.
+            last: A file name directly in `source` that is moved after all others.
+
+        Raises:
+            FileExistsError: If a file exists under both names with different
+                sizes. Equal sizes mean that an earlier move copied the file and
+                died before it removed the source: the source is then removed.
+        """
+        names = files_below(source)
+        if last is not None:
+            names = [name for name in names if name != Path(last)] + [Path(last)]
+        for name in names:
+            origin, destination = source / name, target / name
+            destination.parent.mkdir(parents=True, exist_ok=True)
+            if destination.exists():
+                if destination.stat().st_size != origin.stat().st_size:
+                    raise FileExistsError(
+                        f"{destination} exists with another size than {origin}; "
+                        "an output is never overwritten"
+                    )
+                origin.unlink()
+            else:
+                origin.rename(destination)
+        remove_empty_folders(source)
+
+    def commit_dir(self, staging: Path, final: Path) -> None:
+        """Move a finished staging folder file by file; the step's record goes last.
+
+        Raises:
+            FileNotFoundError: If the staging folder does not exist or holds no
+                step record (a step that did not finish is never committed).
+            FileExistsError: If the output is complete already, or exists
+                without this being the rest of an interrupted commit.
+        """
+        source, target = self._inside(staging), self._inside(final)
+        if not (source / COMMIT_RECORD_FILE).is_file():
+            raise FileNotFoundError(
+                f"staging folder {source} holds no {COMMIT_RECORD_FILE}: the step did not finish"
+            )
+        if self.is_committed(target):
+            raise FileExistsError(f"{target} already exists; an output is never overwritten")
+        self._move_files(source, target, COMMIT_RECORD_FILE)
+
+    def set_aside(self, staging: Path, failed_dir: Path, name: str) -> Path:
+        """Move what a failed attempt left into `failed_dir`, file by file.
+
+        Returns:
+            The new place, "{failed_dir}/{name}.{n}" with the first free n.
+        """
+        source = self._inside(staging)
+        folder = self._inside(failed_dir)
+        folder.mkdir(parents=True, exist_ok=True)
+        attempt = 1
+        while (folder / f"{name}.{attempt}").exists():
+            attempt += 1
+        target = folder / f"{name}.{attempt}"
+        target.mkdir()
+        self._move_files(source, target, None)
+        return target

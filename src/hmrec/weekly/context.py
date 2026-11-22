@@ -21,6 +21,7 @@ This module imports neither torch nor lightgbm: both sides start here.
 
 import json
 import logging
+import os
 import time
 from collections.abc import Sequence
 from dataclasses import dataclass
@@ -41,7 +42,15 @@ from hmrec.data.folds import FoldManifest, load_fold_manifest
 from hmrec.git_state import git_state
 from hmrec.logging_utils import get_logger, setup_logging
 from hmrec.memory import log_process_peak_memory
-from hmrec.paths import PipelinePaths, ProjectPaths, StateLayout, get_paths, pipeline_paths
+from hmrec.paths import (
+    PipelinePaths,
+    ProjectPaths,
+    StateLayout,
+    TickRootPaths,
+    get_paths,
+    pipeline_paths,
+    tick_root_paths,
+)
 from hmrec.platform_fields import PlatformFields
 from hmrec.run_manifest import MetricRecord, step_record_of_this_process
 from hmrec.run_records import RunStamp, check_memory_limit
@@ -96,6 +105,40 @@ class TickContext:
     def closes_a_week(self) -> bool:
         """False for the first tick: the week before it is closed in the bootstrap state."""
         return self.tick.ordinal > self.first_week.ordinal
+
+    @property
+    def calibration(self) -> bool:
+        """True for a calibration tick: its state is the separate calibration state."""
+        return isinstance(self.paths, TickRootPaths) and self.paths.calibration
+
+    def recorded_location(self, path: Path) -> tuple[Path, str]:
+        """The root a file is recorded against, and its path below that root with "/".
+
+        A run manifest names a file by its path below "the root the pipeline
+        reads and writes under" (hmrec.run_manifest.FileRecord):
+
+            a file of the repository        below the repository root
+                                            ("configs/locks/ranker.lock.yaml",
+                                            "artifacts/pipeline/weeks/..." on the laptop);
+            a file of an external state     below the PARENT of the state folder
+                                            ("pipeline/weeks/...");
+            a file of external inputs       below the PARENT of the inputs folder
+                                            ("inputs/data/processed/...").
+
+        With a mounted bucket the last two are the file's key in the bucket.
+
+        Raises:
+            ValueError: If the file lies under none of the three roots.
+        """
+        roots = (
+            self.paths.project_root,
+            self.layout.root.parent,
+            self.paths.data_root.parent.parent,
+        )
+        for root in roots:
+            if path.is_relative_to(root):
+                return root, path.relative_to(root).as_posix()
+        raise ValueError(f"{path} lies under none of the roots of this tick: {roots}")
 
 
 @dataclass(frozen=True)
@@ -174,7 +217,9 @@ def load_tick_context(
     )
 
 
-def start_step(anchor: date, mode: str, run_id: str, step_name: str) -> tuple[TickContext, Step]:
+def start_step(
+    anchor: date, mode: str, run_id: str, step_name: str, calibration: bool = False
+) -> tuple[TickContext, Step]:
     """Set up logging, refuse uncommitted code, and build the context of one step.
 
     Args:
@@ -182,12 +227,13 @@ def start_step(anchor: date, mode: str, run_id: str, step_name: str) -> tuple[Ti
         mode: "eval" or "serve".
         run_id: The run of the tick (names the log file).
         step_name: The step this process runs, e.g. "O1_recall_r4_itemcf".
+        calibration: True for a step of a calibration tick (hmrec.paths.tick_root_paths).
 
     Raises:
         RuntimeError: If the code is not a committed tree.
         ValueError: If the tick has no such step.
     """
-    paths = get_paths()
+    paths = tick_root_paths(get_paths(), os.environ, calibration)
     layout = StateLayout(paths.pipeline_state_dir)
     setup_logging(logging.INFO, log_file=layout.step_log_file(run_id, step_name))
     commit, dirty = git_state(paths.project_root, paths.results_root)

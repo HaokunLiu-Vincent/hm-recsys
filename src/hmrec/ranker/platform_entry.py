@@ -33,15 +33,20 @@ Rules of this entry:
     stage-1 locations.
   - Mode "calibration" is for measuring a platform before it is accepted
     (docs/m10_calibration_plan.md). It records the OpenMP runtime it finds and
-    may write ONLY into the calibration folders; the caller passes where it
-    will write, and anything else is refused here.
+    may write ONLY into a calibration location; the caller passes where it
+    will write, and anything else is refused here. There are two calibration
+    locations: the folders of the M10 calibration
+    (artifacts/m10_calibration/, results/m10_calibration/), and the calibration
+    state of the weekly pipeline (M13: a calibration tick, whose state lies
+    next to the pipeline's state, hmrec.paths.TickRootPaths).
   - Everything produced through this entry carries the platform fields of
     hmrec.platform_fields (OS, architecture, OpenMP library and version, image
     commit) and goes to new tables. It is never compared bit by bit with a
     laptop result and never written to a stage-1 table.
 
-Only the calibration code may import this module (hmrec.calibration and
-scripts/m10_calibrate.py); tests/unit/test_calibration_code_rules.py checks it.
+Only the calibration code (hmrec.calibration.ranker_items) and the Ranker steps
+of the weekly pipeline (hmrec.weekly.ranker_steps) import this module;
+tests/unit/test_calibration_code_rules.py checks it.
 """
 
 from dataclasses import dataclass
@@ -49,7 +54,7 @@ from pathlib import Path
 
 from hmrec.config import BaseConfig, load_ranker_config
 from hmrec.locks import RankerLock, file_sha256, load_ranker_lock
-from hmrec.paths import ProjectPaths
+from hmrec.paths import CALIBRATION_STATE_SUFFIX, PipelinePaths, ProjectPaths, TickRootPaths
 from hmrec.platform_fields import ARCHITECTURE_NAMES
 from hmrec.platform_records import PlatformRecord, load_platform_record
 from hmrec.ranker.locked import (
@@ -152,18 +157,56 @@ def require_known_openmp_runtime(runtime: LightGBMRuntime) -> None:
         )
 
 
+def require_calibration_state(paths: ProjectPaths, output_paths: PipelinePaths) -> None:
+    """Fail unless a tick of the weekly pipeline writes only into its calibration state.
+
+    Args:
+        paths: The project paths of the tick.
+        output_paths: The paths of the tick's step (its state and result tables).
+
+    Raises:
+        ValueError: If `paths` is not the paths of a calibration tick, if the
+            state folder is not named as a calibration state, or if the step
+            would write its state or its result tables anywhere else.
+    """
+    if not (isinstance(paths, TickRootPaths) and paths.calibration):
+        raise ValueError(
+            "calibration mode in the weekly pipeline needs a calibration tick "
+            "(scripts/weekly.py --calibration): its state is a separate folder"
+        )
+    state = paths.pipeline_state_dir
+    if not state.name.endswith(CALIBRATION_STATE_SUFFIX):
+        raise ValueError(
+            f"the state of a calibration tick is a folder named *{CALIBRATION_STATE_SUFFIX}, "
+            f"got {state}"
+        )
+    if output_paths.layout.root != state:
+        raise ValueError(
+            f"calibration mode may write state only under {state}, got {output_paths.layout.root}"
+        )
+    if not _is_inside(output_paths.results_root, state):
+        raise ValueError(
+            f"calibration mode may write result tables only under {state}, "
+            f"got {output_paths.results_root}"
+        )
+
+
 def require_calibration_outputs(paths: ProjectPaths, output_paths: ProjectPaths) -> None:
-    """Fail unless `output_paths` writes only into the calibration folders.
+    """Fail unless `output_paths` writes only into a calibration location.
 
     Args:
         paths: The project paths (the stage-1 locations).
         output_paths: Where the caller will write artifacts and result tables.
 
     Raises:
-        ValueError: If the artifacts root is not inside
-            artifacts/m10_calibration/ or the results root is not
+        ValueError: For a step of the weekly pipeline (a PipelinePaths): see
+            require_calibration_state. Otherwise: if the artifacts root is not
+            inside artifacts/m10_calibration/ or the results root is not
             results/m10_calibration/ of `paths`.
     """
+    if isinstance(output_paths, PipelinePaths):
+        require_calibration_state(paths, output_paths)
+        return
     allowed_artifacts = paths.calibration_artifacts_dir
     allowed_results = paths.calibration_results_dir
     if not _is_inside(output_paths.artifacts_root, allowed_artifacts):

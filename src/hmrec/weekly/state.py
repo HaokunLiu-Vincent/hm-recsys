@@ -18,12 +18,12 @@ only the standard library and the pipeline's calendar.
 
 import json
 from dataclasses import dataclass
-from datetime import date
+from datetime import date, timedelta
 from pathlib import Path
 from typing import Any
 
 from hmrec.paths import StateLayout
-from hmrec.weekly.calendar import Week
+from hmrec.weekly.calendar import DAYS_PER_WEEK, Week
 from hmrec.weekly.storage import StateStore
 
 CURRENT_SCHEMA_VERSION = 1
@@ -210,6 +210,32 @@ def require_same_mode(
             f"the tick of week {week.name} ({week.anchor}) was started in mode {recorded!r}; "
             f"it cannot be continued in mode {mode!r}"
         )
+
+
+def next_tick_anchor(store: StateStore, layout: StateLayout, first_week: Week) -> date:
+    """The anchor of the tick to run next, read from the state (no clock is asked).
+
+    A scheduler starts the pipeline with the same arguments every week; the
+    state says which week is due:
+
+        nothing published yet     the first tick (the week after the bootstrap state);
+        current.json exists       one week after the week of the current
+                                  prediction set. That tick closes the week of
+                                  the current set (the latest published week)
+                                  and opens the next one.
+
+    A tick that stopped has not replaced current.json, so the same anchor is
+    returned again and the tick is resumed.
+
+    Args:
+        store: The state.
+        layout: Its layout.
+        first_week: The week the first tick opens.
+    """
+    current = read_current(store, layout)
+    if current is None:
+        return first_week.anchor
+    return current.anchor + timedelta(days=DAYS_PER_WEEK)
 
 
 def next_run_id(store: StateStore, layout: StateLayout, anchor: date, mode: str) -> str:

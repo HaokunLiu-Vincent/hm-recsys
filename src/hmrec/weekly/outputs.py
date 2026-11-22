@@ -349,11 +349,15 @@ def chain_model_pointer(context: TickContext) -> ModelPointer:
 
 
 def relative_to_root(context: TickContext, path: Path) -> str:
-    """A path relative to the state root if it lies in it, else to the repository root."""
+    """A path relative to the state root if it lies in it, else to the repository root.
+
+    A file of inputs that lie outside the repository (a mounted bucket) is named
+    as the run manifest names it (TickContext.recorded_location).
+    """
     for root in (context.layout.root, context.paths.project_root):
         if root == path or root in path.parents:
             return path.relative_to(root).as_posix()
-    return path.as_posix()
+    return context.recorded_location(path)[1]
 
 
 def ranker_model_pointer(context: TickContext) -> ModelPointer:

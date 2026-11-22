@@ -50,6 +50,7 @@ from hmrec.paths import (
 )
 from hmrec.run_manifest import EVAL_MODE, MODES, SERVE_MODE
 from hmrec.weekly.calendar import Week
+from hmrec.weekly.storage import COMMIT_RECORD_FILE
 
 SIDE_NONE = "none"
 SIDE_TORCH = "torch"
@@ -88,7 +89,7 @@ O5_PUBLISH = "O5_publish"
 
 SHARD_STEP_NAME = re.compile(r"(O2_features_shard_|O4_score_shard_)(\d{3})")
 # The record every step process writes into its output folder as its last action.
-STEP_RECORD_FILE = "step.json"
+STEP_RECORD_FILE = COMMIT_RECORD_FILE
 
 
 @dataclass(frozen=True)

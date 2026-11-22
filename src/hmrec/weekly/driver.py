@@ -14,7 +14,10 @@ closes the week before the anchor and opens the week of the anchor. The rules of
                 that exists is never overwritten.
     resume      running the same tick again skips every step whose output
                 exists. The staging folder of a failed attempt is moved to
-                .failed/, never deleted and never reused.
+                .failed/, never deleted and never reused. On a mounted bucket a
+                commit is a move file by file (hmrec.weekly.storage): a commit
+                that began and did not end is completed, the step is not
+                computed again.
     stop        the first failed step or check stops the tick. The reason goes
                 into the run manifest ("failed") and into the monitoring table
                 as an alert. `current` is not touched.
@@ -32,6 +35,12 @@ T labels for monitoring and verification only (docs/mlops.md invariant 3).
 the customers who bought, and a `serve` tick removes a shard's features after
 scoring (docs/mlops.md §8.4). The replay ends with its `serve` tick.
 
+Roots (M13): the inputs and the state may lie outside the repository, on a
+mounted bucket (hmrec.paths.tick_root_paths); the state then goes through
+MountedStateStore. A calibration tick (docs/mlops.md §8.3) writes everything
+under a separate state and its Ranker steps use the tolerance-accepted entry in
+calibration mode.
+
 This module imports neither torch nor lightgbm. Steps run through a StepRunner:
 subprocesses in production (subprocess_runner), a function in tests.
 """
@@ -46,12 +55,13 @@ from pathlib import Path
 
 import polars as pl
 
-from hmrec.config import MonitoringConfig, load_monitoring_config
+from hmrec.config import MonitoringConfig, load_monitoring_config, load_versioning_config
 from hmrec.csv_records import append_row
+from hmrec.data.folds import load_fold_manifest
 from hmrec.locks import ALL_CHANNELS
 from hmrec.logging_utils import get_logger
 from hmrec.memory import read_process_peak_memory
-from hmrec.paths import FEATURES_DIR, ProjectPaths, shard_step_dir
+from hmrec.paths import FEATURES_DIR, ProjectPaths, StateLayout, TickRootPaths, shard_step_dir
 from hmrec.platform_fields import read_platform_fields
 from hmrec.run_manifest import (
     EVAL_MODE,
@@ -69,6 +79,7 @@ from hmrec.run_manifest import (
     write_run_manifest,
 )
 from hmrec.run_records import RunStamp
+from hmrec.weekly.calendar import week_named
 from hmrec.weekly.context import (
     TickContext,
     load_tick_context,
@@ -105,6 +116,7 @@ from hmrec.weekly.shards import number_of_shards
 from hmrec.weekly.state import (
     CurrentPointer,
     next_run_id,
+    next_tick_anchor,
     require_same_mode,
     require_tick_may_start,
     switch_current,
@@ -126,11 +138,13 @@ from hmrec.weekly.steps import (
     steps_before_shards,
     steps_of_shards,
 )
-from hmrec.weekly.storage import LocalStateStore, StateStore
+from hmrec.weekly.storage import LocalStateStore, MountedStateStore, StateStore
 
 LOGGER = get_logger("weekly.driver")
 
 STEP_SCRIPT = "m12_step.py"
+# A metric line of the run manifest that marks a calibration tick (value 1.0).
+CALIBRATION_METRIC = "tick/calibration"
 CLOSING_STEPS = (C2_EVALUATE, C3_SAMPLE, C4_FINE_TUNE)
 LABEL_ACCESS_COLUMNS: tuple[str, ...] = (
     "recorded_at",
@@ -185,12 +199,15 @@ class StepCall:
         mode: "eval" or "serve".
         run_id: The run of the tick.
         step: The step.
+        calibration: True for a calibration tick (the step's process then builds
+            the paths of the calibration state).
     """
 
     anchor: date
     mode: str
     run_id: str
     step: Step
+    calibration: bool = False
 
 
 # Runs one step to its end; raises if the step failed. The step leaves step.json in its
@@ -218,6 +235,8 @@ def subprocess_runner(scripts_dir: Path) -> StepRunner:
             "--step",
             call.step.name,
         ]
+        if call.calibration:
+            command.append("--calibration")
         LOGGER.info("starting: %s", " ".join(command[1:]))
         completed = subprocess.run(command, check=False)
         if completed.returncode != 0:
@@ -274,9 +293,10 @@ class TickResult:
 # ---------------------------------------------------------------- one step
 
 
-def relative(context: TickContext, path: Path) -> str:
-    """A path relative to the repository root, with "/"."""
-    return path.relative_to(context.paths.project_root).as_posix()
+def recorded_file(context: TickContext, role: str, path: Path) -> FileRecord:
+    """The record of a file for the run manifest: its recorded path, size and sha256."""
+    root, relative_path = context.recorded_location(path)
+    return file_record(role, root, relative_path)
 
 
 def collect_step(run: TickRun, step: Step, folder: Path, status: str) -> None:
@@ -305,9 +325,8 @@ def collect_step(run: TickRun, step: Step, folder: Path, status: str) -> None:
         record = StepRecord(step.name, status, 0.0, 0.0, None, detail)
     run.steps.append(record)
     add_metrics(run, step, output.metrics)
-    root = run.context.paths.project_root
     for file in output.files:
-        run.outputs.append(file_record(file.role, root, relative(run.context, folder / file.name)))
+        run.outputs.append(recorded_file(run.context, file.role, folder / file.name))
 
 
 def add_metrics(run: TickRun, step: Step, metrics: Sequence[MetricRecord]) -> None:
@@ -372,8 +391,17 @@ def failure_reason(run: TickRun, step: Step, error: Exception) -> str:
 
 
 def set_staging_aside(run: TickRun, step: Step) -> None:
-    """Move what a failed or interrupted attempt of a step left behind to .failed/."""
+    """Move what a failed or interrupted attempt of a step left behind to .failed/.
+
+    Not if the step's COMMIT began and did not end (a mounted bucket, where a
+    commit is a move file by file): the step itself finished, so its staging
+    folder is not a failed attempt. It stays, and the next run of the tick
+    completes the move (finish_interrupted_commit).
+    """
     staging = staging_dir(run.context.layout, step)
+    if run.store.commit_interrupted(staging, final_dir(run.context.layout, step)):
+        LOGGER.warning("step %s: its commit did not end; the next run completes it", step.name)
+        return
     if run.store.exists(staging):
         failed = run.context.layout.failed_dir(step.week.anchor)
         moved = run.store.set_aside(staging, failed, step.name)
@@ -455,17 +483,37 @@ def publish(run: TickRun) -> None:
 
 
 def step_output_exists(run: TickRun, step: Step) -> bool:
-    """True if a step is finished: its output folder exists.
+    """True if a step is finished: its output folder is complete.
 
     A shard's features are finished when the shard is SCORED: the features
     themselves were removed then.
     """
     layout = run.context.layout
-    if run.store.exists(final_dir(layout, step)):
+    if run.store.is_committed(final_dir(layout, step)):
         return True
     if step.kind == SHARD_FEATURES and step.shard is not None:
-        return run.store.exists(final_dir(layout, shard_score_step(step.week, step.shard)))
+        return run.store.is_committed(final_dir(layout, shard_score_step(step.week, step.shard)))
     return False
+
+
+def finish_interrupted_commit(run: TickRun, step: Step) -> bool:
+    """Complete a commit that began in an earlier run and did not end.
+
+    Possible only where a commit is a move file by file (a mounted bucket): the
+    step had finished and passed the driver's gate, part of its files are in
+    the final folder, the rest and the step's record are still in staging. The
+    step is NOT computed again; the move is completed.
+
+    Returns:
+        True if there was such a commit and it is complete now.
+    """
+    layout = run.context.layout
+    staging, final = staging_dir(layout, step), final_dir(layout, step)
+    if not run.store.commit_interrupted(staging, final):
+        return False
+    LOGGER.warning("step %s: completing the commit an earlier run began", step.name)
+    run.store.commit_dir(staging, final)
+    return True
 
 
 def run_step(run: TickRun, step: Step) -> None:
@@ -478,9 +526,13 @@ def run_step(run: TickRun, step: Step) -> None:
     if step.name in CLOSING_STEPS and not context.closes_a_week:
         skipped(run, step, f"week {step.week.name} is closed in the bootstrap state")
         return
+    if finish_interrupted_commit(run, step):
+        collect_step(run, step, final_dir(layout, step), STEP_SKIPPED)
+        after_commit(run, step)
+        return
     if step_output_exists(run, step):
         folder = final_dir(layout, step)
-        if run.store.exists(folder):
+        if run.store.is_committed(folder):
             collect_step(run, step, folder, STEP_SKIPPED)
         else:
             skipped(run, step, "the shard is scored; its features were removed")
@@ -491,7 +543,9 @@ def run_step(run: TickRun, step: Step) -> None:
     set_staging_aside(run, step)
     record_label_access(run, step)
     try:
-        run.runner(StepCall(context.tick.anchor, context.mode, context.run_id, step))
+        run.runner(
+            StepCall(context.tick.anchor, context.mode, context.run_id, step, context.calibration)
+        )
         if step.name == C1_INGEST:
             ingest_gate(run, step)
         run.store.commit_dir(staging_dir(layout, step), final_dir(layout, step))
@@ -604,11 +658,7 @@ def tick_inputs(context: TickContext) -> list[FileRecord]:
         "config/pipeline": paths.pipeline_config_file,
         "config/monitoring": paths.monitoring_config_file,
     }
-    return [
-        file_record(role, paths.project_root, relative(context, path))
-        for role, path in files.items()
-        if path.is_file()
-    ]
+    return [recorded_file(context, role, path) for role, path in files.items() if path.is_file()]
 
 
 def build_manifest(
@@ -618,6 +668,8 @@ def build_manifest(
     context = run.context
     paths = context.paths
     metrics = [*run.metrics, *monitoring_metrics(context.tick.anchor, run.findings)]
+    if context.calibration:
+        metrics.append(MetricRecord(CALIBRATION_METRIC, context.tick.anchor, 1.0))
     return RunManifest(
         run_id=context.run_id,
         anchor=context.tick.anchor,
@@ -702,6 +754,33 @@ def all_steps(run: TickRun) -> None:
         run_step(run, step)
 
 
+def state_store(paths: ProjectPaths) -> StateStore:
+    """The store of the state `paths` points at.
+
+    The state inside the repository (artifacts/pipeline/, M12) is a local
+    folder. A state with a root of its own (hmrec.paths.TickRootPaths: a folder
+    of a mounted bucket, or a calibration state) goes through MountedStateStore,
+    which does not rely on renaming a folder in one step.
+    """
+    root = paths.pipeline_state_dir
+    if isinstance(paths, TickRootPaths):
+        return MountedStateStore(root)
+    return LocalStateStore(root)
+
+
+def next_anchor(paths: ProjectPaths) -> date:
+    """The anchor of the tick the state says is due (hmrec.weekly.state.next_tick_anchor).
+
+    Args:
+        paths: The project paths of the tick (hmrec.paths.tick_root_paths).
+    """
+    manifest = load_fold_manifest(paths.fold_manifest_file)
+    versioning = load_versioning_config(paths.versioning_config_file)
+    first_week = week_named(versioning.bootstrap.first_tick_fold, manifest)
+    layout = StateLayout(paths.pipeline_state_dir)
+    return next_tick_anchor(state_store(paths), layout, first_week)
+
+
 def run_tick(
     paths: ProjectPaths,
     anchor: date,
@@ -713,12 +792,13 @@ def run_tick(
     """Run one tick: close the week before `anchor`, open the week of `anchor`.
 
     Args:
-        paths: The project paths.
+        paths: The project paths (hmrec.paths.tick_root_paths: the roots of the
+            environment, and the calibration state for a calibration tick).
         anchor: The tick's anchor, the only clock of the pipeline.
         mode: "eval" or "serve".
         runner: Runs one step (subprocess_runner in production).
         stamp: The commit of the code and whether it is dirty.
-        store: The state; None means the local folder artifacts/pipeline/.
+        store: The state; None means the store of `paths` (state_store).
 
     Returns:
         The run manifest (status "succeeded" or "failed") and the findings.
@@ -730,7 +810,7 @@ def run_tick(
     """
     require_committed_code(stamp)
     plain = load_tick_context(paths, anchor, mode, "pending", stamp)
-    state = store if store is not None else LocalStateStore(plain.layout.root)
+    state = store if store is not None else state_store(paths)
     require_tick_may_start(state, plain.layout, plain.tick, plain.closing, plain.first_week)
     require_closable(plain)
     context = replace(plain, run_id=next_run_id(state, plain.layout, anchor, mode))

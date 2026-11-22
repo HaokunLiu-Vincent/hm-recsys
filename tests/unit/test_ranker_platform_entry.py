@@ -8,6 +8,7 @@ the laptop too, and the macOS branch inside a container.
 
 import shutil
 from dataclasses import replace
+from datetime import date
 from pathlib import Path
 from typing import Any
 
@@ -15,7 +16,16 @@ import pytest
 import yaml
 
 from hmrec.config import BaseConfig, load_base_config, load_yaml
-from hmrec.paths import ProjectPaths, build_paths, calibration_output_paths
+from hmrec.paths import (
+    PIPELINE_STATE_ROOT_VARIABLE,
+    PipelinePaths,
+    ProjectPaths,
+    StateLayout,
+    build_paths,
+    calibration_output_paths,
+    pipeline_paths,
+    tick_root_paths,
+)
 from hmrec.ranker.locked import load_locked_ranker
 from hmrec.ranker.platform_entry import (
     MODE_ACCEPTED,
@@ -28,6 +38,7 @@ from hmrec.ranker.platform_entry import (
 from hmrec.ranker.runtime import LightGBMRuntime
 
 REPO = Path(__file__).resolve().parents[2]
+V1_ANCHOR = date(2020, 7, 29)
 # What hmrec.ranker.runtime.read_lightgbm_runtime gives in the arm64 image (measured).
 CONTAINER_RUNTIME = LightGBMRuntime(
     lightgbm_version="4.7.0",
@@ -286,3 +297,59 @@ def test_accepted_mode_refuses_macos_before_it_looks_for_a_record(tmp_path: Path
     paths, base, _ = _workspace(tmp_path)
     with pytest.raises(RuntimeError, match="runs on Linux only"):
         _accepted(paths, base, runtime=LAPTOP_RUNTIME, system="darwin", machine="arm64")
+
+
+# ---------------------------------------------------------------- M13: a calibration tick
+
+
+def _tick_view(paths: ProjectPaths, state: Path, results: Path | None = None) -> PipelinePaths:
+    """The paths of a step of a tick whose state is `state` (tables in it unless given)."""
+    view = pipeline_paths(paths, StateLayout(state), V1_ANCHOR, (("V1", V1_ANCHOR),), None)
+    return view if results is None else replace(view, results_root=results)
+
+
+def test_calibration_mode_accepts_the_calibration_state_of_a_tick(tmp_path: Path) -> None:
+    paths, base, _ = _workspace(tmp_path)
+    tick = tick_root_paths(paths, {PIPELINE_STATE_ROOT_VARIABLE: "/mnt/pipeline"}, True)
+    view = _tick_view(tick, tick.pipeline_state_dir)
+    assert view.layout.root == Path("/mnt/pipeline-calibration")
+    assert view.results_root == Path("/mnt/pipeline-calibration/results")
+    # x86-64 has no platform record: mode "accepted" refuses it, mode "calibration" is
+    # how it is measured first.
+    amd64_runtime = replace(
+        CONTAINER_RUNTIME, libomp_path="/usr/lib/x86_64-linux-gnu/libgomp.so.1.0.0"
+    )
+    result = load_locked_ranker_for_platform(
+        tick, base, amd64_runtime, "linux", "x86_64", MODE_CALIBRATION, view
+    )
+    assert result.mode == MODE_CALIBRATION and result.record is None
+    assert result.locked == load_locked_ranker(paths, base, LAPTOP_RUNTIME)
+    assert result.runtime == amd64_runtime
+
+
+def test_calibration_mode_refuses_a_tick_that_writes_anywhere_else(tmp_path: Path) -> None:
+    paths, base, _ = _workspace(tmp_path)
+    tick = tick_root_paths(paths, {}, calibration=True)
+    state = tick.pipeline_state_dir
+    require_calibration_outputs(tick, _tick_view(tick, state))
+    # The pipeline's own state: a tick that is not a calibration tick.
+    with pytest.raises(ValueError, match="needs a calibration tick"):
+        require_calibration_outputs(paths, _tick_view(paths, paths.pipeline_state_dir))
+    # A calibration tick whose step would write into the pipeline's state ...
+    with pytest.raises(ValueError, match="may write state only under"):
+        require_calibration_outputs(tick, _tick_view(tick, paths.pipeline_state_dir))
+    # ... or its result tables into the M12 tables.
+    m12_tables = _tick_view(tick, state, results=paths.replay_results_dir)
+    with pytest.raises(ValueError, match="may write result tables only under"):
+        require_calibration_outputs(tick, m12_tables)
+    # The entry itself refuses it too, before anything is read.
+    with pytest.raises(ValueError, match="needs a calibration tick"):
+        load_locked_ranker_for_platform(
+            paths,
+            base,
+            CONTAINER_RUNTIME,
+            "linux",
+            "aarch64",
+            MODE_CALIBRATION,
+            _tick_view(paths, paths.pipeline_state_dir),
+        )
