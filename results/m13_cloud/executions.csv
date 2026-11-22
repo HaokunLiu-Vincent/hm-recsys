@@ -1,0 +1,2 @@
+label,kind,execution,started_by,image_commit,started_at_utc,finished_at_utc,wall_seconds,cpu,memory_gib,vcpu_seconds,gib_seconds,cost_usd,max_memory_fraction,max_memory_gib,state_bytes,outcome
+smoke test,smoke,hm-weekly-r6p9s,operator,99abd62a714f177bc00295b584c62e0804df86d4,2026-11-22T08:25:19+00:00,2026-11-22T08:28:27+00:00,188.290956,6,24,1129.7457359999999,4518.982943999999,0.029373389135999996,0.0099,0.23760000000000003,,succeeded

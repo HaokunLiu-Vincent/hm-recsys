@@ -136,8 +136,11 @@ case "$command" in
     # started again. Composite uploads are off: an object uploaded in one piece has an md5,
     # which `list-inputs` shows and configs/data_manifest.json records.
     export CLOUDSDK_STORAGE_PARALLEL_COMPOSITE_UPLOAD_ENABLED=False
-    g storage rsync --recursive data/processed "gs://${BUCKET}/${INPUTS_PREFIX}/data/processed"
-    g storage rsync --recursive data/bootstrap "gs://${BUCKET}/${INPUTS_PREFIX}/data/bootstrap"
+    # --exclude: the Finder's .DS_Store files are not inputs.
+    g storage rsync --recursive --exclude '.*\.DS_Store$' \
+      data/processed "gs://${BUCKET}/${INPUTS_PREFIX}/data/processed"
+    g storage rsync --recursive --exclude '.*\.DS_Store$' \
+      data/bootstrap "gs://${BUCKET}/${INPUTS_PREFIX}/data/bootstrap"
     g storage cp --no-clobber artifacts/features/category_codes.json \
       "gs://${BUCKET}/${INPUTS_PREFIX}/artifacts/features/category_codes.json"
     ;;
