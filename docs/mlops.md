@@ -3,6 +3,7 @@
 > **Status.** Approved by the user on 2026-11-21. Stage 3 starts with M10; progress and every later change are recorded in `docs/decisions.md`.
 > **M10 (container and CI) was closed on 2026-11-22.** The acceptance of container and cloud results was simplified by the user on that day (§8.3); the calibration it rests on is described there as it was carried out, and the sections that referred to the earlier, tiered tolerance were aligned with it.
 > **M11 (versioning) was closed on 2026-11-22**: §7 describes DVC, the bootstrap state, the run manifest and the MLflow view as they were built, and S2 states the verification that was used.
+> **M12 (the weekly pipeline, local) was closed on 2026-11-22**: §6 and §7 describe the pipeline as it was built, §8.5 holds what the replay of eight weeks and one `serve` tick measured, and §10 the monitoring rules that were fixed before the first tick.
 > Cloud limits and prices quoted below were read from the Cloud Run quota and pricing pages on 2026-11-21. Everything marked "estimate" has to be measured before it is relied on.
 
 ---
@@ -20,8 +21,8 @@ The data end on 2020-09-22, so there is no live traffic. "Every week" is therefo
 | # | Goal | Accepted when |
 |---|---|---|
 | S1 | A reproducible runtime environment | One container image builds from the repository alone; `make lint` and `make test` pass inside it; the calibration week of §8.3 inside the container meets the acceptance of §8.3. **Met on 2026-11-22 for the arm64 container** (§8.3) |
-| S2 | Versioned data and recorded runs | On a clean clone, `dvc pull` restores every pipeline input and the sha256 values match the records; every pipeline run is visible in MLflow with the same metrics as the result tables. **Met on 2026-11-22 for what exists before the pipeline** (§7.4): the remote holds every tracked file; a clean clone pulled `data/processed` and the category code table and their sha256 equal the data manifest; every metric of the MLflow view equals its source table. The view holds imported records only: the first pipeline run is made in M12 |
-| S3 | A weekly pipeline that is one command | `weekly --anchor DATE` runs a whole week, stops at the first failed check with the reason, and can be resumed; each of the eight replayed weeks, and their pooled MAP@12, meets the acceptance of §8.3 (relative difference at most 1.0% on the four quantities; the two structural checks pass) |
+| S2 | Versioned data and recorded runs | On a clean clone, `dvc pull` restores every pipeline input and the sha256 values match the records; every pipeline run is visible in MLflow with the same metrics as the result tables. **Met on 2026-11-22 for what exists before the pipeline** (§7.4): the remote holds every tracked file; a clean clone pulled `data/processed` and the category code table and their sha256 equal the data manifest; every metric of the MLflow view equals its source table. The view held imported records only at that time. **The rest was met in M12** (§8.5): the nine ticks of the replay are nine pipeline runs in the view, the model registry mirrors 17 model versions, and `make mlflow-check` reports 0 differences over 54 runs and 1,659 metric values |
+| S3 | A weekly pipeline that is one command | `weekly --anchor DATE` runs a whole week, stops at the first failed check with the reason, and can be resumed; each of the eight replayed weeks, and their pooled MAP@12, meets the acceptance of §8.3 (relative difference at most 1.0% on the four quantities; the two structural checks pass). **Met on 2026-11-22 in the arm64 container** (§8.5): the largest difference of a weekly quantity is 0.74% (MAP@12 of T4), the pooled MAP@12 differs by +0.042%, and both structural checks pass in all nine ticks; stopping and resuming are shown by the tests and by the first tick of the replay, which was resumed |
 | S4 | The pipeline runs on GCP on a schedule | A run triggered by Cloud Scheduler completes on Cloud Run Jobs, reads and writes only Cloud Storage, and meets the acceptance of §8.3; its run time and cost are recorded |
 | S5 | A serving endpoint | The endpoint returns the Top-12 of a customer from the latest published prediction set, falls back for unknown customers, and has measured cold-start and p95 latency |
 | S6 | Monitoring and alerts | A failed step, a failed data check, a quality flag and a budget threshold each produce an alert; this is shown by provoking each one once |
@@ -135,18 +136,28 @@ The pipeline is called once per week with an anchor date `a` (the first day of t
 
 Every check in the right-hand column already exists in the code as a stop condition. Stage 3 wires them into one driver; it does not invent new ones.
 
+**As built in M12** (`src/hmrec/weekly/`; `scripts/weekly.py --anchor DATE --mode eval|serve`, in the container `make image-weekly ARGS="…"`):
+
+- **Every step is one process and one folder.** The driver starts `scripts/m12_step.py` once per step, so a step's process max RSS is its true memory peak and torch and LightGBM never share a process. O1 is seven processes (the query list, then one per channel); O3 is two (the binary Dataset, then the model); the model is saved and O4 loads it again, as the sharded path always did.
+- **The steps call the stage-1 functions**, with the paths of the tick (`hmrec.paths.PipelinePaths`). Nothing of the system is computed by new code.
+- **C4 before O1.** In stage 1 one process predicted a week with R6 and then fine-tuned on it. In a weekly pipeline the purchases of a week exist only after it, so the tick fine-tunes on the week it closes (C4) and predicts the new week with the resulting model (O1). The function and its seeds are the same.
+- **The Ranker's configuration** comes through the tolerance-accepted entry in mode `accepted` (§8.3) on Linux, and through the strict entry on macOS.
+- **C2 scores the published prediction set** (`predictions/{anchor}/`), builds the label sets of the closed week from the transactions the tick ingested, and requires the query list written a week earlier to be the one those purchases give.
+- **The input-data check of C1 stops the tick** (row count of the new week outside 50%–200% of the mean of the previous 4 weeks, or a wrong date range; §10). Every other monitoring rule only records.
+
 ### 6.2 Two modes
 
 | Mode | Customers | Purpose | Cost |
 |---|---|---|---|
-| `eval` | Only the customers who bought in the predicted week | Compare with the stage-1 records week by week; this is the acceptance test of S3 and S4 | About a normal week of stage 1 |
-| `serve` | All 1,371,980 customers | Produce the prediction set the endpoint serves | About 18 times more candidates; the Kaggle run took 56 minutes on the laptop |
+| `eval` | Only the customers who bought in the predicted week | Compare with the stage-1 records week by week; this is the acceptance test of S3 and S4 | About a normal week of stage 1. Measured in the arm64 container (M12): 14 to 15 minutes per tick, peak 7.25 GB |
+| `serve` | All 1,371,980 customers | Produce the prediction set the endpoint serves | About 18 times more candidates; the Kaggle run took 56 minutes on the laptop. Measured in the arm64 container (M12): 86 minutes, peak 6.15 GB, 20 shards |
 
-`eval` mode knows who will buy, which a real system cannot know; it exists only to make the replay comparable with recorded numbers. This does not distort the metrics: a customer's candidates, features and score depend only on that customer and on data before the anchor, not on which other customers are in the run, so a buyer receives the same Top-12 in both modes. `serve` mode is what production would run. Its sharded code path exists on branch `kaggle-late-submission` and is brought into main in M12, without the Kaggle-specific parts.
+`eval` mode knows who will buy, which a real system cannot know; it exists only to make the replay comparable with recorded numbers. This does not distort the metrics: a customer's candidates, features and score depend only on that customer and on data before the anchor, not on which other customers are in the run, so a buyer receives the same Top-12 in both modes. `serve` mode is what production would run. Its sharded code path existed on branch `kaggle-late-submission` and was brought into main in M12 without the Kaggle-specific parts (`hmrec.weekly.shard_recall`, `hmrec.weekly.shard_features`; no submission file, no Kaggle id handling).
 
 ### 6.3 Simulated clock and replay
 
 - The anchor date is the only clock. The pipeline never asks for the real date.
+- **The clock is enforced by construction** (M12). Step C1 copies every purchase line with `t_dat` before the anchor from `data/processed/transactions.parquet` into the tick's own folder, in the same row order. Every later step is given that file as its transactions table and cannot read a later row: its input does not hold one. The as-of filters of stage 1 still run on top of it, unchanged. **Two readers of the full table exist**: C1 itself, and the query list of `eval` mode, which by definition needs to know who buys in the predicted week (§6.2); a test counts the callers. The container of a tick mounts only the DVC-tracked inputs (`data/processed`, `data/bootstrap`, the category code table), read-only, so no stage-1 candidate, feature, label or model can be read either.
 - **Bootstrap state** is the state at the end of F4: the R6 chain model after F4, the ranker samples of F1–F4, and the monitoring history. It is stored once, in `data/bootstrap/` (§7.1 lists its files). F4 is closed in that state, so the V1 tick only opens a week: its closing half has nothing to do.
 - **Replay: eight ticks in `eval` mode, V1, V2, V3, V4, T1, T2, T3, T4** (decision D1), followed by **one `serve` tick at anchor 2020-09-23**, the week after the data end and the same week as the Kaggle submission. The `serve` tick closes T4 (so T4 is scored too) and produces the prediction set for the endpoint. Its labels do not exist.
 - Eight weeks give the monitoring rules of §10 enough history to act on, and the V-to-T shift recorded in `docs/final_report.md` (T about 20% above V, with more concentrated purchases and more new articles) is a real distribution change for the monitoring to see.
@@ -158,6 +169,15 @@ Every check in the right-hand column already exists in the code as a stop condit
 - All state lives in Cloud Storage under a prefix per anchor. A step writes its outputs under a temporary name and renames them when its checks pass; an output that exists is never overwritten.
 - `state/current.json` points to the latest closed week, the model files with their sha256, and the current prediction set. It is replaced only by step O5.
 - Running the same tick again skips finished steps. A tick for week `w + 1` refuses to start if week `w` is not closed, so a week cannot be skipped. This is the same rule the R6 chain already enforces.
+
+**As built in M12** (`hmrec.weekly.storage`, `hmrec.weekly.state`, `hmrec.weekly.driver`):
+
+- **In M12 the state is a local folder**, `artifacts/pipeline/`, behind a small interface (`StateStore`: exists, read, write once, replace, commit a folder, set a folder aside, discard a folder). M13 adds an implementation that keeps the same keys in Cloud Storage.
+- **Staging**: a step writes into `weeks/{anchor}/.staging/{step}/`. The driver renames the folder to `weeks/{anchor}/{step}/` when the step's process ended without an error; a rename is the only way an output appears, and it refuses an existing target.
+- **A failed attempt is kept**: its staging folder is moved to `weeks/{anchor}/.failed/{step}.{n}/`. It is never deleted and never reused; the next run of the tick starts that step again.
+- **Every run of a tick has its own id and manifest** (`{anchor}-{mode}-a{n}`; no clock is asked). A failed run writes a manifest too, with the step that stopped it and the reason the step's process gave.
+- **"The previous week is not closed"** is checked as "the tick before this one has finished": the previous week must have published predictions. A tick closes the week before its anchor itself, so this is the condition that can be checked before it starts. The first tick starts from the bootstrap state.
+- **A week keeps the mode of its first run**, and **a week opened in `serve` mode cannot be closed**: closing needs the features of the customers who bought, and a `serve` tick removes a shard's features after scoring (§8.4). The replay ends with its `serve` tick, so it does not meet this; a pipeline that serves every week has to decide whether to keep the buyers' features or to build them again at closing.
 
 ## 7. Data, state and run versioning
 
@@ -207,6 +227,34 @@ gs://<bucket>/
 
 On the laptop the same layout lies under `artifacts/pipeline/` (`artifacts/pipeline/runs/<run-id>/manifest.json`); the DVC remote is the only prefix that exists in the bucket before M13.
 
+**The folder of a week, as built in M12** (a week is named by its anchor; `hmrec.paths.StateLayout`):
+
+```
+weeks/2020-08-05/                written by the tick at 2020-08-05 (it opens this week)
+  tick.json                      the mode of the week's tick
+  ingest/                        C1: transactions.parquet (every row before the anchor), ingest.json
+  queries/                       O1: queries.parquet
+  recall_{channel}/              O1: candidates.parquet; R1's bucket score table; R5 and R6 vectors
+  features/                      O2: part-*.parquet, features.json, feature_stats.csv
+  ranker_dataset/, ranker_model/ O3: train.bin, dataset.json; model.txt, model.json
+  scores/                        O4: top.parquet, signals.json
+  published.json                 O5 is done
+  monitoring.json                the findings of this tick
+                                 written by the tick at 2020-08-12 (it closes this week)
+  evaluation/                    C2: labels.parquet, metrics.json, per_query.parquet
+  sample/                        C3: r40.parquet, r40.json
+  twotower/                      C4: the chain model fine-tuned on this week, chain_record.csv
+  closed.json                    C2-C4 are done
+  .staging/, .failed/            running and failed attempts of steps
+predictions/2020-08-05/          top.parquet (customer_idx, rank, article_idx), manifest.json
+runs/2020-08-05-eval-a1/         manifest.json, logs/{step}.log, failures/{step}.txt
+```
+
+- Every step folder holds a `step.json`: seconds, the true memory peak and the platform fields of the step's process, the metric values it measured and the files it wants recorded.
+- In `serve` mode a channel's folder holds `shards/{k}/` with the candidates and vectors of each shard, and the week has `features_shared/` and `shards/{k}/top/`; `shards/{k}/features/` exists only while shard k is being scored.
+- **The prediction set holds the dense indexes of `data/processed/`**, not the 64-character customer ids, and names the two id-map files with their sha256 in its manifest.
+- The pipeline's result tables are `results/m12_replay/` (run steps, metric values, monitoring findings, label access, the comparison with the stage-1 records, the R6 chain records).
+
 ### 7.3 Run tracking
 
 - Every tick writes a manifest and appends to the result tables, exactly as stage 1 does. These files are the source of truth.
@@ -232,6 +280,8 @@ On the laptop the same layout lies under `artifacts/pipeline/` (`artifacts/pipel
 - **`make mlflow-check` compares every metric in the store with its source.** Every metric carries a tag that names the file, the row and the column it came from; the check reads that row again with its own reader and requires equal float64 values, not close ones. It also reports a missing run, a run that is not expected, and a differing set of metric keys.
 - Reason for a local view: a hosted tracking server needs an always-on service and a database, which breaks goal S8. If a team used this system, the server would be the first thing to add.
 - The MLflow model registry records each weekly ranker and each R6 chain model by storage path and sha256, with one alias for "the model behind the current prediction set". **The registry is a mirror.** The pipeline and the endpoint never read MLflow; what is deployed is decided by `state/current.json`. Reports and interviews describe it that way. **The registry is set up in M12**, when the pipeline produces models; M11 registers nothing.
+- **The registry as built in M12** (`hmrec.tracking.registry`): two registered models, `hmrec-ranker` and `hmrec-twotower-chain`. A version is created for every model file a succeeded tick recorded in its run manifest (output roles `ranker_model` and `r6_chain_model`); its source is the file's path and its tags hold the sha256, the size, the run id and the tick's anchor. No file is copied. The alias `current` is set on the two versions `state/current.json` names, matched by sha256. `make mlflow-check` compares the registry with the manifests, hashes every mirrored file again, and compares the alias with the state.
+- **Flags and alerts in a run manifest** (M12) are metric entries: `monitor/flag/{rule}/{subject}` and `monitor/alert/{rule}/{subject}` with the value 1 and the week they describe, and the two counts `monitor/flags_raised` and `monitor/alerts_raised`. The manifest schema stays at version 1. A metric two steps measure is recorded once; two steps that report different values for one metric stop the tick.
 - Neither tool reports usage from this repository: DVC's analytics and MLflow's telemetry are switched off.
 
 ### 7.4 What M11 verified
@@ -327,7 +377,7 @@ Different operating systems, CPU architectures, OpenMP runtimes and BLAS librari
 | E | End to end: features built from the container's own candidates, scored with the model of item D | MAP@12 | +0.0054% |
 | E | | feature rows = deduplicated candidates of the run; duplicate keys | 22,293,932 = 22,293,932; 0 |
 
-The largest relative difference on any acceptance quantity was 0.048%. The pooled MAP@12 (quantity 4) needs several weeks and is first measured by the replay of M12.
+The largest relative difference on any acceptance quantity was 0.048%. The pooled MAP@12 (quantity 4) needs several weeks and was first measured by the replay of M12 (§8.5).
 
 Reported in the same calibration, for information:
 
@@ -345,15 +395,106 @@ Reported in the same calibration, for information:
 2. M13 starts with a calibration on Cloud Run (x86-64), declared in advance as calibration, and a platform record for that platform. Until then x86-64 is covered only by CI (lint, tests, and the synthetic R6 reproducer).
 3. Thresholds are not changed after any replay result is seen.
 
-**What the calibration does not show**: one week and one R6 update, not the eight chained updates of the replay; one platform for the full-data items; and nothing about whether the results are good (§16).
+**What the calibration does not show**: one week and one R6 update, not the eight chained updates of the replay (measured in M12, §8.5); one platform for the full-data items; and nothing about whether the results are good (§16).
 
 ### 8.4 A constraint to design around: local files on Cloud Run use memory
 
 On Cloud Run the writable filesystem is in memory, so every file a step writes locally counts against the instance's memory limit. One week's features are about 1.5 GB (measured in the container for V4: 1.4 GB); a `serve` run produces about 26 GB of features in total.
 
-- `eval` mode: files of one week plus the process peak fit in 24 GiB by estimate. Measured in the arm64 container for V4: the highest true peak of any process was 6.02 GB (the feature build; 5.67 GB when the fused table of the six channels is built in one piece), with files on a mounted disk. With in-memory files on Cloud Run it is to be measured in M13.
-- `serve` mode: features are produced and scored shard by shard and each shard's features are deleted after scoring, so local files stay near one shard (about 1.5 GB). This needs a change to the sharded driver, but no change to any computation.
+- `eval` mode: files of one week plus the process peak fit in 24 GiB by estimate. Measured in the arm64 container for V4: the highest true peak of any process was 6.02 GB (the feature build; 5.67 GB when the fused table of the six channels is built in one piece), with files on a mounted disk. **Measured over the eight `eval` ticks of the replay (M12)**: the highest true peak of any process was 7.25 GB (the feature build of T1; 5.24 to 7.25 GB over the weeks), and the files one tick writes are about 2.6 GB (features 1.3 GB, Ranker Dataset 0.6 GB, sample 0.2 GB, the ingested transactions 0.16 GB, candidates 0.25 GB). With in-memory files on Cloud Run it is to be measured in M13.
+- `serve` mode: features are produced and scored shard by shard and each shard's features are deleted after scoring, so local files stay near one shard (about 1.5 GB). This needed a change to the sharded driver, but no change to any computation. **Measured in the `serve` tick of the replay (M12)**: 20 shards of 70,000 customers; the highest true peak of any process was 6.15 GB (the feature build of a shard; the R6 recall step 6.11 GB); the files the tick keeps are 5.3 GB (the candidates of the six channels 4.2 GB, the Ranker Dataset 0.6 GB, the scores of the Top-12 0.15 GB), and the features of a shard exist only between its two steps.
 - If this is still not enough: mount the bucket as a volume, or run that step on a Spot VM with a disk. The choice is made on measurements in M13, not now.
+
+### 8.5 What the replay of M12 measured
+
+The replay of §6.3 was run on 2026-11-22 in the arm64 container on the laptop (`make image-weekly`, `--cpus 6 --memory 12g`, the mounts of §6.3): eight `eval` ticks V1 … T4 and one `serve` tick at 2020-09-23, each tick one command, in order, from the bootstrap state. The tables are in `results/m12_replay/` (`comparison.csv`, `metrics.csv`, `steps.csv`, `monitoring.csv`, `twotower_chain.csv`, `label_access.csv`, `serve_overlap.csv`); the record of the run is in `docs/decisions.md`. Nothing was tuned or selected, no run was repeated with other settings, and no threshold was changed.
+
+**Acceptance (§8.3).** Each closed week against its stage-1 record (`results/m6_candidates.csv` and `results/v_phase_metrics.csv` for V1–V4, the M8 tables for T1–T4). The differences are signed: (run − record) / record.
+
+| Week | Recall R1–R4 | Recall R5 | Recall R6 | Union recall, run / record | Difference | MAP@12, run / record | Difference | Feature rows − deduplicated candidates | Duplicate keys |
+|---|---|---|---|---|---|---|---|---|---|
+| V1 | 0% | +0.0116% | 0% | 0.254391 / 0.254379 | +0.0047% | 0.030111 / 0.030112 | −0.0039% | 0 | 0 |
+| V2 | 0% | −0.0222% | +0.0359% | 0.275444 / 0.275415 | +0.0106% | 0.031167 / 0.031332 | −0.5291% | 0 | 0 |
+| V3 | 0% | +0.0125% | +0.0361% | 0.263897 / 0.263840 | +0.0216% | 0.035153 / 0.035029 | +0.3533% | 0 | 0 |
+| V4 | 0% | −0.0036% | −0.0307% | 0.276152 / 0.276163 | −0.0039% | 0.034911 / 0.034850 | +0.1757% | 0 | 0 |
+| T1 | 0% | +0.0074% | +0.0170% | 0.278699 / 0.278773 | −0.0266% | 0.035163 / 0.034960 | +0.5801% | 0 | 0 |
+| T2 | 0% | +0.0010% | −0.0274% | 0.290751 / 0.290767 | −0.0056% | 0.040388 / 0.040270 | +0.2915% | 0 | 0 |
+| T3 | 0% | +0.0073% | −0.0397% | 0.290884 / 0.290926 | −0.0147% | 0.039737 / 0.039673 | +0.1621% | 0 | 0 |
+| T4 | 0% | +0.0074% | +0.0050% | 0.306919 / 0.306944 | −0.0084% | 0.042123 / 0.042435 | −0.7358% | 0 | 0 |
+| **Pooled, 8 weeks** | | | | | | **0.035948 / 0.035933** | **+0.0418%** | | |
+
+- **Every acceptance quantity is inside 1.0%**: 64 weekly quantities (six channels, the union and MAP@12 in eight weeks) and the pooled MAP@12. The largest is MAP@12 of T4 (−0.74%); the largest recall difference is 0.04% (R6 of T3). Both structural checks pass in all nine ticks (the `serve` tick included: 366.8 million feature rows in 20 shards).
+- The recall of R1–R4 equals the record to the last digit in every week: these channels are deterministic and their candidate files hold the same pairs with the same scores.
+- **MAP@12 differs more than recall does** (0.004% to 0.74% against at most 0.04%), and its sign changes from week to week (five weeks above the record, three below), which is why the pooled value is only 0.04% away. From V2 on, a week's Ranker is trained on sample files the container made (one of the four training weeks for V2, all four from T1 on), so it is another model than the laptop's, not the same model with rounding differences. V1 shows the other case: its four training weeks are the frozen stage-1 sample files of the bootstrap state, and it differs by 0.004%.
+
+**Reported, not an acceptance criterion.**
+
+| Week | Queries | Deduplicated candidates, run / record | RRF baseline MAP@12, run / record | Recorded pairs present, R5 | Recorded pairs present, R6 | Common pairs with the same score, R5 | the same, R6 |
+|---|---|---|---|---|---|---|---|
+| V1 | 82,802 | 25,226,142 / 25,226,147 | 0.018510 / 0.018511 | 99.976% | 99.99995% | 0.070% | 61.56% |
+| V2 | 74,833 | 22,936,072 / 22,935,793 | 0.019076 / 0.019064 | 99.979% | 99.766% | 0.075% | 0.008% |
+| V3 | 71,094 | 21,965,861 / 21,965,434 | 0.020612 / 0.020604 | 99.983% | 99.701% | 0.087% | 0.010% |
+| V4 | 72,035 | 22,293,742 / 22,293,247 | 0.019656 / 0.019662 | 99.980% | 99.638% | 0.072% | 0.007% |
+| T1 | 80,253 | 24,592,232 / 24,592,808 | 0.019163 / 0.019151 | 99.983% | 99.559% | 0.086% | 0.005% |
+| T2 | 75,822 | 23,186,908 / 23,186,146 | 0.021480 / 0.021471 | 99.984% | 99.556% | 0.090% | 0.005% |
+| T3 | 72,019 | 22,204,809 / 22,204,166 | 0.021868 / 0.021848 | 99.984% | 99.464% | 0.092% | 0.004% |
+| T4 | 68,984 | 20,984,328 / 20,984,180 | 0.022397 / 0.022411 | 99.983% | 99.444% | 0.091% | 0.007% |
+
+- R1–R4: every recorded pair is present with the same score in every week. The deduplicated candidate count differs from the record by at most 0.0033%.
+- **The R6 chain over eight updates.** V1 is predicted with the recorded model of F4 (bootstrap state), so its candidates are the record's up to 4 pairs in 8.3 million. From V2 on the model is the pipeline's own: the share of recorded pairs that are present falls from 99.77% after one update to 99.44% after eight, by about 0.05 percentage points per update, while the recall stays within 0.04% of the record in every week and does not trend. The risk of §15 (differences that grow along the chain) is visible in the pairs and not in the recall.
+- The hit value of §10 (recorded only): 415, 400, 424, 488, 605, 652, 644 and 672 for V1 … T4, in the price unit of the data.
+
+**Monitoring (§10), rules as fixed before the first tick.** 1,323 findings were recorded; **5 flags and no alert**:
+
+| Tick | Layer | Rule | Subject | Week judged | Value | Mean of the 4 weeks before | Consecutive |
+|---|---|---|---|---|---|---|---|
+| 2020-08-05 | labelled | channel recall more than 10% below | R2 | V1 | 0.0387 | 0.0448 (F1–F4, bootstrap history) | 1 |
+| 2020-08-26 | same week | output signal more than 25% away | share of recommendations among the 100 most popular articles | T1 | 0.509 | 0.371 | — |
+| 2020-09-02 | labelled | channel recall more than 10% below | R3 | T1 | 0.0299 | 0.0341 | 1 |
+| 2020-09-02 | labelled | channel recall more than 10% below | R4 | T1 | 0.0803 | 0.0904 | 1 |
+| 2020-09-02 | labelled | channel recall more than 10% below | R5 | T1 | 0.0841 | 0.1010 | 1 |
+
+No flag repeated in the following week, so no alert was raised. The union recall stayed above 24% and the Ranker stayed above the RRF baseline in every week; no input check and no feature rule raised anything. The `serve` tick has no history of its own population (§10: `eval` and `serve` populations are not compared with each other), so its output signals were recorded only. The flags describe the weeks (in T1 the recall of R1 rises to 12.2%, the highest of the weeks so far, while R3, R4 and R5 fall, and the recommendations move towards the popular articles; the stage-1 records of T1 show the same recalls); they changed nothing.
+
+**The `serve` tick** (anchor 2020-09-23; it closes T4 and predicts for every customer):
+
+| Quantity | Measured |
+|---|---|
+| Run time | 86 minutes (5,186 s): recall 17 min (R6 9.1 min, R5 6.2 min, R4 1.4 min), features 35 min (20 shards, 106 s each), scoring 27 min (80 s a shard), R6 fine-tune 3.2 min, Ranker training 3.0 min |
+| Highest true peak of a process | 6.15 GB (feature build of a shard); R6 recall 6.11 GB |
+| Candidates | 137.2 million rows each for R1 and R6, 99.3 million for R4, 74.1 million for R5; 366.8 million deduplicated (267.3 per customer) |
+| Prediction set | 1,371,980 customers × 12 articles = 16,463,760 rows, 30 MB as Parquet; 20,650 distinct articles; 53.2% of the recommendations are among the 100 most popular articles |
+| Against the saved Kaggle prediction set (reported only) | mean Top-12 overlap 87.8%; the same first article for 82.1% of the customers; the same 12 articles for 14.0%; an identical list for 0.09% |
+
+The Kaggle set was made on the laptop from another Ranker (trained on the stage-1 features) and the recorded R6 chain; the two sets are two runs of the same design on two platforms with two chains, so a difference in order is expected and is not judged.
+
+**Run time and memory of an `eval` tick** (seven ticks, V2 … T4, in the arm64 container; V1 has no closing steps and took 11 minutes):
+
+| Step | Seconds, median (range) | Highest true peak, GB |
+|---|---|---|
+| C1 ingest | 1.4 (1.2–1.6) | 1.43 |
+| C2 evaluate | 5.6 (5.0–7.5) | 2.54 |
+| C3 sample | 11.6 (10.3–12.0) | 4.40 |
+| C4 fine-tune R6 | 218 (203–251) | 3.03 |
+| O1 queries and R1, R2, R3 | 6.6 together | 2.45 |
+| O1 R4 | 31.0 (30.1–32.6) | 3.45 |
+| O1 R5 | 118 (117–120) | 2.73 |
+| O1 R6 | 33.7 (32.0–35.9) | 3.12 |
+| O2 features | 134 (122–151) | 7.25 |
+| O3 Dataset | 14.1 (13.5–16.0) | 1.63 |
+| O3 train | 184 (181–190) | 2.02 |
+| O4 score | 102 (97–113) | 2.91 |
+| O5 publish | 0.4 | 0.32 |
+| **A tick** | **872 (840–906)**, 14 to 15 minutes | **7.25** |
+
+The whole replay took 3 hours 20 minutes of run time: 11 minutes for V1, 102 minutes for the seven other `eval` ticks, 86 minutes for the `serve` tick, and a few seconds for each comparison.
+
+**What happened in the run that is not a number.**
+
+- **The first tick ran twice as a run, once as a computation.** The first run of V1 (`2020-07-29-eval-a1`, image of commit `b32037b`) finished every step and published, then the driver stopped while writing the run manifest: two steps had reported the same metric (`output/candidates_per_query`), which the manifest refuses. Nothing of the state was touched; the driver was corrected (a quantity two steps measure is recorded once, and two steps that disagree stop the tick), the image was built again from commit `c6a9887`, and the same command resumed the tick as run `2020-07-29-eval-a2`: every step was skipped because its output existed, and the manifest was written. **So V1's step outputs were computed by the image of `b32037b` and its manifest was written by the image of `c6a9887`**; the manifest names the second commit, the monitoring rows of the first run name the first, and the step times of V1 are in the step records of the state, not in `steps.csv`. Every other tick ran once, from `c6a9887`. The change between the two commits is in the driver and the feature step's metric list and touches no computation.
+- The image digest of a run manifest is empty in M12: a locally built image has no registry digest. The manifest holds the commit and the code-tree hash instead (§8.1). M13 fills it.
+
+**What the replay does not show**: another platform (x86-64 is M13); a second run of the same replay (not required, §8.3); the behaviour of the monitoring rules on a real incident (the four provoked alerts are M14); and nothing about whether the results are good (§16).
 
 ## 9. Serving
 
@@ -395,6 +536,25 @@ Monitoring has two layers. Same-week signals need no labels and can alert as soo
 | **Hit value**: the sum of the prices of recommended articles that the customer bought in the week, in the dataset's normalised price units | Tracked only, no threshold. It is closer to business language than MAP@12 but is **not** GMV caused by the recommendations (§16) |
 
 - All thresholds and bands above are fixed and recorded before the first replay tick (invariant 3).
+- **The rules as fixed by the user on 2026-11-22, before the first replay tick** (`configs/m12_monitoring.yaml`; `docs/decisions.md`). They are not changed afterwards.
+
+  | Layer | Rule | Raised when | It is |
+  |---|---|---|---|
+  | Same week | Transaction rows of the new week | below 50% or above 200% of the mean of the previous 4 weeks | an alert; the tick stops |
+  | Same week | Date range of the new week | the week has no purchase line on its first day or on its last day | an alert; the tick stops |
+  | Same week | A feature's missing rate | it moves by more than 5 percentage points against the mean of the previous 4 weeks | a flag |
+  | Same week | A feature's mean | it changes by more than 50% (relative) against that mean | a flag |
+  | Same week | An output signal: candidates per query; share of recommended items among the 100 most popular articles of the week; distinct articles recommended | it is more than 25% away from its mean of the previous 4 weeks | a flag |
+  | One week late | Recall of a channel | more than 10% below its mean of the previous 4 weeks | a flag |
+  | One week late | Union recall | below 24% | a flag |
+  | One week late | MAP@12 of the Ranker | not above the RRF baseline | a flag |
+  | One week late | Any labelled flag | the same flag in 3 consecutive weeks | an alert |
+  | One week late | Hit value | — | recorded only |
+  | Pipeline | A step fails or a check stops the tick | — | an alert; the run manifest says "failed" with the reason |
+
+- **A rule with fewer than 4 previous weeks of history records its value and raises nothing.** F1–F4 of the bootstrap state supply the 4 weeks before V1 where stage 1 recorded the quantity (recall of each channel, feature statistics, candidates per query). The two output signals that need a ranking start with V1 and can be flagged from T1 on.
+- **Readings fixed with the rules**: "the 100 most popular articles of the week" are the articles with the most purchase lines in the 7 days before the anchor; the count of consecutive weeks runs over the weeks the pipeline closed; `eval` weeks and `serve` weeks are different populations and are never each other's history, so the one `serve` tick of the replay records its same-week numbers and raises nothing; the share of customers served by the fallback belongs to the endpoint of M14 and is not a signal of the pipeline.
+- **In M12 an alert is a row** of `results/m12_replay/monitoring.csv` **and a metric line of the run manifest** (`monitor/alert/…` with the value 1; `monitor/flags_raised` and `monitor/alerts_raised` count them). Sending it anywhere is M14.
 - Alerts go to one email notification channel.
 - **No alert changes a configuration.** Re-selecting hyperparameters stays a human decision. M15 writes down a proposed rule for when to re-select; it is a design, not an implementation.
 - S6 is accepted by provoking each kind of alert once: a deliberately failing step, a corrupted input week, a quality flag forced in a replay, and a budget threshold set low.
@@ -426,10 +586,10 @@ Monitoring has two layers. Same-week signals need no labels and can alert as soo
 
 | Item | Assumption | Estimate |
 |---|---|---|
-| One `eval` tick | 30 minutes at 6 vCPU and 24 GiB. Measured in the arm64 container on the laptop for V4: about 13 minutes for the steps that were measured (R1–R4 31 s, R5 116 s, R6 prediction 31 s, R6 fine-tune 199 s after a prediction of 29 s, features 126 s, ranker Dataset 11 s, ranker training and scoring 278 s); sampling and the evaluation of the previous week were not measured. Cloud Run is another CPU, so 30 minutes stays the assumption until M13 | about 0.3 USD |
+| One `eval` tick | 30 minutes at 6 vCPU and 24 GiB. **Measured in the arm64 container on the laptop (M12, §8.5): 14 to 15 minutes for a whole tick**, all sixteen steps, peak 7.25 GB. Cloud Run is another CPU, so 30 minutes stays the assumption until M13 | about 0.3 USD |
 | x86 calibration (§8.3) | about one tick | about 0.3 USD |
 | Replay of 8 weeks, run twice | 16 ticks | about 4.6 USD |
-| One `serve` tick | 2 hours at 6 vCPU and 24 GiB | about 1.1 USD |
+| One `serve` tick | 2 hours at 6 vCPU and 24 GiB. Measured in the arm64 container on the laptop (M12, §8.5): 86 minutes, peak 6.15 GB; 2 hours stays the assumption until M13 | about 1.1 USD |
 | Storage | 20 GB for two months | under 1 USD |
 | Images, scheduler, logs, endpoint tests | small | a few USD at most, to be checked |
 | **Total** | | **about 10 USD, under 15 USD**, before the monthly free tier of Cloud Run |
@@ -444,7 +604,7 @@ Local work first; nothing billable before M13 except a few cents of storage in M
 |---|---|---|---|
 | **M10 Container and CI** | Dockerfile with CPU-only torch on Linux; `make` targets to build and run; GitHub Actions for image build, lint and tests; container measurement of the calibration items of §8.3 | S1; acceptance criteria fixed and recorded. **Closed on 2026-11-22** | Approval of the dependency change (D6); enough memory for the container runtime on the laptop |
 | **M11 Versioning** | DVC set-up with a Cloud Storage remote; bootstrap state created and tracked; data manifest; run manifests (schema, writer, reader); local MLflow sync and check commands | S2 for what exists before the pipeline (§7.4). **Closed on 2026-11-22** | A GCP project, the budget alert, one bucket |
-| **M12 Weekly pipeline, local** | The `weekly` driver with both modes, the simulated clock, resume and checks; the sharded `serve` path brought into main; monitoring signals and thresholds of §10 fixed and recorded; replay of V1–T4 in `eval` mode and the `serve` tick inside the container; every tick writes a run manifest and is visible in MLflow (the rest of S2); the model registry mirror of §7.3 | S3 | Nothing |
+| **M12 Weekly pipeline, local** | The `weekly` driver with both modes, the simulated clock, resume and checks; the sharded `serve` path brought into main; monitoring signals and thresholds of §10 fixed and recorded; replay of V1–T4 in `eval` mode and the `serve` tick inside the container; every tick writes a run manifest and is visible in MLflow (the rest of S2); the model registry mirror of §7.3 | S3, and the rest of S2. **Closed on 2026-11-22** (§8.5) | Nothing |
 | **M13 Cloud** | Image in Artifact Registry; Cloud Run job; Cloud Scheduler entry; x86 calibration first; then replay of V1–T4 in `eval` mode and the `serve` tick in the cloud; measured run time, memory and cost | S4 | Enabling APIs; approving the spend |
 | **M14 Serving, monitoring, deployment** | The API service; rollback command; alert policies; deployment on tag with Workload Identity Federation; the four provoked alerts; latency measured with synthetic requests | S5, S6, S7 | An email address for alerts |
 | **M15 Close** | Report section on stage 3 (architecture, runbook, measured cost, limits); the online-experiment design and the re-selection rule (below); teardown; tag `v0.3` | S8 | Confirming the teardown |
@@ -481,7 +641,7 @@ All approved by the user on 2026-11-21.
 | Risk | What happens then |
 |---|---|
 | An acceptance quantity of §8.3 differs by more than 1.0% in the container or the cloud, or a structural check fails | The milestone stops. The most likely cause is the Two-Tower fine-tuning chain (eight chained updates in the replay; one update was measured in M10: Recall@100 within 0.05%); the investigation compares step by step, starting from the first step that differs |
-| The chained R6 differences grow over eight weeks | Each tick's R6 recall is compared with the record of that week and the pair overlap is reported, so growth is visible week by week; if the recall leaves the 1.0% band the cause is investigated rather than the threshold widened |
+| The chained R6 differences grow over eight weeks | Each tick's R6 recall is compared with the record of that week and the pair overlap is reported, so growth is visible week by week; if the recall leaves the 1.0% band the cause is investigated rather than the threshold widened. **Measured in M12 (§8.5)**: the share of recorded pairs present falls from 99.77% to 99.44% over the chain, and the recall stays within 0.04% in every week |
 | A test or a run-time check assumes macOS (for example the Homebrew libomp) or a bit-exact number | It is made platform-aware explicitly, or reported for a decision. No assertion is loosened silently, and no lock file is changed |
 | A step does not fit Cloud Run Jobs because of in-memory files | The measures of §8.4, in that order |
 | The container on the laptop is much slower than native | Acceptance runs become longer; they are not skipped. Measured for V4 (arm64 container against the laptop's records): the R6 fine-tune takes 3.5 times as long (199 s against 56 s), the feature build 2.4 times (120 s against 50 s), R6 prediction 1.7 times, R4 1.3 times; LightGBM about the same (278 s against 268 s); R5 is faster (116 s against 179 s, because the Linux build of `implicit` is multi-threaded) |

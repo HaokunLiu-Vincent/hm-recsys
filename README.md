@@ -86,9 +86,21 @@ alerts. It changes how the system runs, not what it computes. Design:
   `configs/data_manifest.json` with the sha256 of every file. A clean clone pulled the processed
   data and their sha256 equal the manifest. Every tick of the weekly pipeline will write a run
   manifest (`hmrec.run_manifest`); a local MLflow store shows the recorded runs, and a check
-  proves that every metric in it equals its source table. Today the store holds imported records
-  only (the stage-1 weekly records of V1–T4 and the M10 calibration): the pipeline itself is M12.
-- **M12–M15** (the weekly pipeline, cloud, serving and monitoring, close): not started.
+  proves that every metric in it equals its source table.
+- **M12, the weekly pipeline (local): done (2026-11-22).** One command runs one week
+  (`scripts/weekly.py --anchor DATE --mode eval|serve`): it closes the week before the anchor and
+  opens the week of the anchor, each step in its own process, with the anchor date as the only
+  clock. Eight weeks (V1–V4, T1–T4) were replayed in the arm64 container, then one `serve` tick
+  for all 1,371,980 customers. Against the stage-1 records every week is inside 1.0%: channel and
+  union recall within 0.04%, MAP@12 of a week within 0.74% (T4), the pooled MAP@12 of the eight
+  weeks 0.035948 against 0.035933 (+0.042%); feature rows equal the deduplicated candidates and
+  no key repeats, in every tick. An `eval` tick takes 14 to 15 minutes (peak 7.25 GB), the
+  `serve` tick 86 minutes (peak 6.15 GB). The monitoring rules were fixed before the first tick
+  and raised 5 flags and no alert. The nine runs are in the local MLflow store, the model
+  registry mirrors the weekly models, and the check reports 0 differences. T1–T4 labels were
+  read by the replay only, to verify the pipeline; nothing was selected or tuned, and these
+  numbers are not a new evaluation. Measurements: `docs/mlops.md` §8.5.
+- **M13–M15** (cloud, serving and monitoring, close): not started.
 
 **Three things to know when reading these numbers:**
 
@@ -190,6 +202,34 @@ make image-calibrate ARGS="--run run1 --item recall --channel r1_popularity"
 GitHub Actions (`.github/workflows/ci.yml`) builds the linux/amd64 image on every push and pull
 request and runs lint and both test suites inside it.
 
+**The weekly pipeline (stage 3, `docs/mlops.md` §6).** One command runs one week: it closes the
+week before the anchor (ingest, evaluate last week's predictions, sample, fine-tune the Two-Tower
+chain) and opens the week of the anchor (recall, features, train the ranker, score, publish,
+record). The anchor date is the only clock: the first step cuts the transactions at the anchor and
+every later step reads only that cut.
+
+```bash
+make image-build                                            # once, from a clean committed tree
+make image-weekly ARGS="--anchor 2020-07-29 --mode eval"    # one tick in the container
+make image-weekly ARGS="--anchor 2020-09-23 --mode serve"   # all 1,371,980 customers, in shards
+make image-replay-compare                                   # the closed weeks against their stage-1 records
+```
+
+- `eval` mode predicts for the customers who buy in the week (only then can a week be compared
+  with the stage-1 records); `serve` mode predicts for every customer and removes a shard's
+  features after it is scored.
+- A tick stops at the first failed step or check and says why in its run manifest; the same command
+  again skips the finished steps. A tick refuses to start if the tick before it has not finished.
+- The container sees only the DVC-tracked inputs (`data/processed`, `data/bootstrap`, the category
+  code table), read-only. State: `artifacts/pipeline/` (`state/current.json`, `weeks/<anchor>/`,
+  `predictions/<anchor>/`, `runs/<run-id>/manifest.json`). Result tables: `results/m12_replay/`.
+- **The replay** is nine ticks in order: `eval` at 2020-07-29, 08-05, 08-12, 08-19 (V1–V4) and
+  2020-08-26, 09-02, 09-09, 09-16 (T1–T4), then `serve` at 2020-09-23. Keep the laptop awake
+  (`caffeinate -i make image-weekly ...`); a tick takes about a quarter of an hour, the `serve`
+  tick longer (measured times: `docs/mlops.md` §8.5).
+- The monitoring rules are `configs/m12_monitoring.yaml`, fixed before the first replay tick. A flag
+  or an alert is a row of `results/m12_replay/monitoring.csv`; it changes nothing.
+
 **Versioning and run tracking (stage 3, `docs/mlops.md` §7).** DVC and MLflow are not runtime
 dependencies. They are in dependency groups of their own and in a second environment,
 `.venv-tools`, so that `.venv` stays exactly the set of packages every result was computed with.
@@ -199,14 +239,17 @@ make setup-tools        # create / update .venv-tools (DVC with Cloud Storage su
 make dvc ARGS="status"  # any DVC command; see "Data" below for pull
 make data-manifest      # write configs/data_manifest.json from the DVC-tracked files
 make data-verify        # sha256 of the tracked files on disk against the manifest
-make mlflow-sync        # copy result tables and run manifests into the local MLflow store
-make mlflow-check       # every metric in the store against its source table (exit code 1 on a difference)
+make mlflow-sync        # copy result tables, run manifests and the pipeline's model versions into the local MLflow store
+make mlflow-check       # every metric against its source; the model registry against the manifests, the files and the state
 make mlflow-ui          # open http://127.0.0.1:5001 (stop with Ctrl-C)
 make test-tools         # the tracking tests with MLflow installed (a real SQLite store)
 ```
 
 The MLflow store (`artifacts/mlflow/`, not in git) is a view: the result tables and the run
-manifests are the record. Runs marked "(imported)" were made before the weekly pipeline existed.
+manifests are the record. Runs marked "(imported)" were made before the weekly pipeline existed;
+the experiment `weekly-pipeline` holds one run per run of a tick. The model registry mirrors the
+weekly ranker and the Two-Tower chain models by path and sha256, with the alias `current` on the
+models behind the current prediction set; nothing reads the registry to deploy.
 
 Do not `pip install` into `.venv`. New dependencies are added with `uv add <package>`
 (dev tools: `uv add --group dev <package>`), only after agreement (see AGENTS.md §3.4, §8).
@@ -288,5 +331,8 @@ The main entry point of each milestone. See proposal §11 for the milestones and
 | M6 | Features per fold | `scripts/m6_build_features.py --fold F1` |
 | M7 | Ranker HPO on V1–V4 | `scripts/m7_ranker_hpo.py --stage ...` |
 | M8 | Final evaluation on T1–T4 | `scripts/m8_final_eval.py --stage ...` |
+| M10 | Container image, CI, calibration of V4 in the container | `make image-build`, `scripts/m10_calibrate.py` |
+| M11 | Data versioning, bootstrap state, run manifests, MLflow view | `make dvc ARGS="..."`, `scripts/m11_mlflow.py` |
+| M12 | The weekly pipeline and its replay | `scripts/weekly.py --anchor DATE --mode eval\|serve`, `scripts/m12_replay_compare.py` |
 
 Copyright (c) 2026 Haokun Liu. All rights reserved.
