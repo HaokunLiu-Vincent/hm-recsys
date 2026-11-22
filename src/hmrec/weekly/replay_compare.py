@@ -383,9 +383,23 @@ def candidate_comparisons(paths: ProjectPaths, layout: StateLayout, week: Fold) 
 
 
 def compare_week(
-    paths: ProjectPaths, layout: StateLayout, week: Fold, lock: RankerLock
+    paths: ProjectPaths,
+    layout: StateLayout,
+    week: Fold,
+    lock: RankerLock,
+    with_candidates: bool = True,
 ) -> list[Comparison]:
     """Every comparison of one closed week (see the module docstring).
+
+    Args:
+        paths: The project paths (the stage-1 records and candidate files).
+        layout: The state the week was closed in.
+        week: The closed week.
+        lock: The Ranker lock.
+        with_candidates: False leaves out the pair overlap of the candidates. It
+            needs the pipeline's candidate files AND the stage-1 ones on one
+            machine; a state in a bucket is compared from its small records
+            only (M13), and the candidate files are not downloaded.
 
     Raises:
         FileNotFoundError: If the week is not closed (step C2 wrote no metrics).
@@ -399,11 +413,13 @@ def compare_week(
     features = read_step_output(week_dir / "features")
     structure = {metric.name: metric.value for metric in features.metrics}
     feature_rows = int(structure["structure/feature_rows"])
-    return [
+    comparisons = [
         *metric_comparisons(evaluation, record, feature_rows),
         *structural_comparisons(structure),
-        *candidate_comparisons(paths, layout, week),
     ]
+    if with_candidates:
+        comparisons += candidate_comparisons(paths, layout, week)
+    return comparisons
 
 
 # ---------------------------------------------------------------- the pooled MAP@12
@@ -657,6 +673,7 @@ def compare_replay(
     lock: RankerLock,
     threshold: float,
     git_commit: str,
+    with_candidates: bool = True,
 ) -> ReplayComparison:
     """Compare every closed, not yet compared week; then the pooled MAP@12 and the serve tick.
 
@@ -667,6 +684,11 @@ def compare_replay(
         lock: The Ranker lock (selects the Ranker's rows of the records).
         threshold: The largest accepted relative difference (the platform record's).
         git_commit: HEAD of this run, written into every row.
+        with_candidates: False for a state whose large files are not on this
+            machine (a copy of the small records of a state in a bucket): the
+            pair overlap of the candidates and the `serve` tick's overlap with
+            the Kaggle set are then not measured. The acceptance quantities and
+            the structural checks need only the small records.
 
     Returns:
         What was compared and what is outside its criterion.
@@ -679,7 +701,7 @@ def compare_replay(
     for week in closed:
         if week.name in compared_weeks(table):
             continue
-        comparisons = compare_week(paths, layout, week, lock)
+        comparisons = compare_week(paths, layout, week, lock, with_candidates)
         anchor = week.anchor.isoformat()
         append_comparisons(table, week.name, anchor, comparisons, threshold, git_commit)
         compared_now.append(week.name)
@@ -694,7 +716,7 @@ def compare_replay(
     serve_row = None
     overlap_table = paths.replay_table_file("serve_overlap")
     served = layout.published_file(serve_anchor).is_file()
-    if served and not read_rows(overlap_table, SERVE_OVERLAP_COLUMNS):
+    if with_candidates and served and not read_rows(overlap_table, SERVE_OVERLAP_COLUMNS):
         serve_row = serve_overlap_row(paths, layout, serve_anchor, git_commit)
         append_row(overlap_table, SERVE_OVERLAP_COLUMNS, serve_row)
     return ReplayComparison(

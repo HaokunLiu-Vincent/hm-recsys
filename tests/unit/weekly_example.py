@@ -236,6 +236,8 @@ class FakeSteps:
             # Like the real steps of the first replay tick: the feature step and the
             # scoring step both report the candidates per query, with the same value.
             metrics = [
+                MetricRecord("structure/feature_rows", tick.anchor, 1500.0),
+                MetricRecord("structure/deduplicated_candidates", tick.anchor, 1500.0),
                 MetricRecord("structure/duplicate_keys", tick.anchor, 0.0),
                 MetricRecord("output/candidates_per_query", tick.anchor, self.candidates_per_query),
             ]

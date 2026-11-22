@@ -5,16 +5,27 @@ Hand examples for the arithmetic; the real result tables of the repository
 """
 
 import math
+import shutil
 from datetime import date
 from pathlib import Path
 
 import polars as pl
 import pytest
+from weekly_example import (
+    STAMP,
+    V1,
+    V2,
+    FakeSteps,
+    build_workspace,
+    patch_driver_environment,
+)
 
 from hmrec.csv_records import read_rows
 from hmrec.data.folds import load_fold_manifest
 from hmrec.locks import ALL_CHANNELS, load_ranker_lock
 from hmrec.paths import StateLayout, get_paths
+from hmrec.run_manifest import EVAL_MODE
+from hmrec.weekly.driver import run_tick
 from hmrec.weekly.outputs import WeekEvaluation
 from hmrec.weekly.replay_compare import (
     ACCEPTANCE,
@@ -23,6 +34,8 @@ from hmrec.weekly.replay_compare import (
     STRUCTURAL,
     Comparison,
     append_comparisons,
+    compare_replay,
+    compare_week,
     compared_weeks,
     copy_chain_records,
     is_inside,
@@ -212,3 +225,39 @@ def test_chain_records_are_copied_once_per_week(tmp_path: Path) -> None:
     assert copy_chain_records(layout, anchors, table) == 2
     assert copy_chain_records(layout, anchors, table) == 0
     assert [row["fold"] for row in read_rows(table, ("fold", "model", "sha256"))] == ["V1", "V2"]
+
+
+def test_a_state_of_small_records_is_compared_without_its_candidate_files(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    # A replay in the cloud is compared from a copy of its small records (M13). The state
+    # below is what two ticks leave, written by the fake steps; no candidate file of
+    # stage 1 exists in the workspace, and none of the pipeline is read.
+    patch_driver_environment(monkeypatch)
+    paths = build_workspace(tmp_path)
+    for table in ("m6_candidates.csv", "v_phase_metrics.csv"):
+        paths.results_root.mkdir(parents=True, exist_ok=True)
+        shutil.copy(PATHS.results_root / table, paths.results_root / table)
+    for anchor in (V1, V2):
+        assert run_tick(paths, anchor, EVAL_MODE, FakeSteps(paths), STAMP).succeeded
+    weeks = [MANIFEST.get("V1"), MANIFEST.get("V2")]
+    result = compare_replay(
+        paths, weeks, date(2020, 9, 23), LOCK, THRESHOLD, "abc123", with_candidates=False
+    )
+    # V1 is closed (by the tick at V2) and compared; V2 is open; no pooled value yet.
+    assert result.closed == ("V1",) and result.compared_now == ("V1",)
+    assert result.serve_row is None and result.chain_records_copied == 1
+    rows = read_rows(paths.replay_table_file("comparison"), COMPARISON_COLUMNS)
+    kinds = {(row["kind"], row["quantity"]) for row in rows}
+    assert (ACCEPTANCE, "recall") in kinds and (ACCEPTANCE, "map@12") in kinds
+    assert (STRUCTURAL, "duplicate_keys") in kinds
+    # Eight acceptance rows and two structural rows, as for any week; nothing of the
+    # candidate files.
+    assert sum(row["kind"] == ACCEPTANCE for row in rows) == 8
+    assert sum(row["kind"] == STRUCTURAL for row in rows) == 2
+    assert all(row["quantity"] != "recorded_pairs_present" for row in rows)
+    # The made-up numbers of the fake steps are far from the records: reported as outside.
+    assert {name for name, _ in result.failed} == {"V1"}
+    # With candidates the same call needs the stage-1 candidate files, which are not here.
+    with pytest.raises(FileNotFoundError):
+        compare_week(paths, StateLayout(paths.pipeline_state_dir), weeks[0], LOCK)
