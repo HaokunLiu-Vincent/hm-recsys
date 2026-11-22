@@ -1,2 +1,25 @@
 recorded_at,run_id,tick_anchor,mode,week,phase,step,purpose,git_commit
 2026-11-22T03:20:30,2020-07-29-eval-a1,2020-07-29,eval,V1,V,O1_queries,eval-mode query list: WHO buys in the week the tick opens (docs/mlops.md 6.2),b32037b13674f220768a3dc5781836595591dd79
+2026-11-22T03:40:18,2020-08-05-eval-a1,2020-08-05,eval,V1,V,C2_evaluate,"closing: label sets of the closed week, evaluation of its predictions",c6a98874ad7db2abd92ea6e4105a859ec66823fb
+2026-11-22T03:40:25,2020-08-05-eval-a1,2020-08-05,eval,V1,V,C3_sample,closing: Ranker training sample of the closed week (labels as training labels),c6a98874ad7db2abd92ea6e4105a859ec66823fb
+2026-11-22T03:44:50,2020-08-05-eval-a1,2020-08-05,eval,V2,V,O1_queries,eval-mode query list: WHO buys in the week the tick opens (docs/mlops.md 6.2),c6a98874ad7db2abd92ea6e4105a859ec66823fb
+2026-11-22T03:55:28,2020-08-12-eval-a1,2020-08-12,eval,V2,V,C2_evaluate,"closing: label sets of the closed week, evaluation of its predictions",c6a98874ad7db2abd92ea6e4105a859ec66823fb
+2026-11-22T03:55:35,2020-08-12-eval-a1,2020-08-12,eval,V2,V,C3_sample,closing: Ranker training sample of the closed week (labels as training labels),c6a98874ad7db2abd92ea6e4105a859ec66823fb
+2026-11-22T03:59:37,2020-08-12-eval-a1,2020-08-12,eval,V3,V,O1_queries,eval-mode query list: WHO buys in the week the tick opens (docs/mlops.md 6.2),c6a98874ad7db2abd92ea6e4105a859ec66823fb
+2026-11-22T04:10:01,2020-08-19-eval-a1,2020-08-19,eval,V3,V,C2_evaluate,"closing: label sets of the closed week, evaluation of its predictions",c6a98874ad7db2abd92ea6e4105a859ec66823fb
+2026-11-22T04:10:06,2020-08-19-eval-a1,2020-08-19,eval,V3,V,C3_sample,closing: Ranker training sample of the closed week (labels as training labels),c6a98874ad7db2abd92ea6e4105a859ec66823fb
+2026-11-22T04:13:44,2020-08-19-eval-a1,2020-08-19,eval,V4,V,O1_queries,eval-mode query list: WHO buys in the week the tick opens (docs/mlops.md 6.2),c6a98874ad7db2abd92ea6e4105a859ec66823fb
+2026-11-22T04:24:11,2020-08-26-eval-a1,2020-08-26,eval,V4,V,C2_evaluate,"closing: label sets of the closed week, evaluation of its predictions",c6a98874ad7db2abd92ea6e4105a859ec66823fb
+2026-11-22T04:24:16,2020-08-26-eval-a1,2020-08-26,eval,V4,V,C3_sample,closing: Ranker training sample of the closed week (labels as training labels),c6a98874ad7db2abd92ea6e4105a859ec66823fb
+2026-11-22T04:27:54,2020-08-26-eval-a1,2020-08-26,eval,T1,T,O1_queries,eval-mode query list: WHO buys in the week the tick opens (docs/mlops.md 6.2),c6a98874ad7db2abd92ea6e4105a859ec66823fb
+2026-11-22T04:38:59,2020-09-02-eval-a1,2020-09-02,eval,T1,T,C2_evaluate,"closing: label sets of the closed week, evaluation of its predictions",c6a98874ad7db2abd92ea6e4105a859ec66823fb
+2026-11-22T04:39:05,2020-09-02-eval-a1,2020-09-02,eval,T1,T,C3_sample,closing: Ranker training sample of the closed week (labels as training labels),c6a98874ad7db2abd92ea6e4105a859ec66823fb
+2026-11-22T04:43:00,2020-09-02-eval-a1,2020-09-02,eval,T2,T,O1_queries,eval-mode query list: WHO buys in the week the tick opens (docs/mlops.md 6.2),c6a98874ad7db2abd92ea6e4105a859ec66823fb
+2026-11-22T04:53:42,2020-09-09-eval-a1,2020-09-09,eval,T2,T,C2_evaluate,"closing: label sets of the closed week, evaluation of its predictions",c6a98874ad7db2abd92ea6e4105a859ec66823fb
+2026-11-22T04:53:48,2020-09-09-eval-a1,2020-09-09,eval,T2,T,C3_sample,closing: Ranker training sample of the closed week (labels as training labels),c6a98874ad7db2abd92ea6e4105a859ec66823fb
+2026-11-22T04:57:39,2020-09-09-eval-a1,2020-09-09,eval,T3,T,O1_queries,eval-mode query list: WHO buys in the week the tick opens (docs/mlops.md 6.2),c6a98874ad7db2abd92ea6e4105a859ec66823fb
+2026-11-22T05:08:17,2020-09-16-eval-a1,2020-09-16,eval,T3,T,C2_evaluate,"closing: label sets of the closed week, evaluation of its predictions",c6a98874ad7db2abd92ea6e4105a859ec66823fb
+2026-11-22T05:08:23,2020-09-16-eval-a1,2020-09-16,eval,T3,T,C3_sample,closing: Ranker training sample of the closed week (labels as training labels),c6a98874ad7db2abd92ea6e4105a859ec66823fb
+2026-11-22T05:11:59,2020-09-16-eval-a1,2020-09-16,eval,T4,T,O1_queries,eval-mode query list: WHO buys in the week the tick opens (docs/mlops.md 6.2),c6a98874ad7db2abd92ea6e4105a859ec66823fb
+2026-11-22T05:22:21,2020-09-23-serve-a1,2020-09-23,serve,T4,T,C2_evaluate,"closing: label sets of the closed week, evaluation of its predictions",c6a98874ad7db2abd92ea6e4105a859ec66823fb
+2026-11-22T05:22:27,2020-09-23-serve-a1,2020-09-23,serve,T4,T,C3_sample,closing: Ranker training sample of the closed week (labels as training labels),c6a98874ad7db2abd92ea6e4105a859ec66823fb

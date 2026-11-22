@@ -1,0 +1,2 @@
+anchor,n_customers,n_customers_in_reference,identical_list_share,same_articles_share,mean_overlap,first_article_identical_share,reference,git_commit,recorded_at
+2020-09-23,1371980,1371980,0.0009300427119928862,0.13964926602428607,0.8779325621850659,0.8213064330383825,artifacts/kaggle/submission,c6a98874ad7db2abd92ea6e4105a859ec66823fb,2026-11-22T06:48:48
