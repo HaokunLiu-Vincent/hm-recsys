@@ -7,8 +7,8 @@ no state file: every script can be read from top to bottom and run again.
 | File | Who runs it | What it does |
 |---|---|---|
 | `env.example` | — | The names the scripts need, with placeholders. Copy it to `infra/.env` |
-| `setup.sh` | **The owner of the project**, once | Enables APIs, creates the image repository, three service accounts, one custom role and Workload Identity Federation, and gives the operator account its roles |
-| `operate.sh` | The operator (a person or a coding agent, by impersonation) | Uploads the inputs, creates and updates the job, starts and watches executions, creates the paused scheduler job |
+| `setup.sh` | **The owner of the project**, once (and again after M14) | Enables APIs, creates the image repository, four service accounts, one custom role and Workload Identity Federation, gives the operator and the deployer their roles, and creates the email notification channel and five alert policies |
+| `operate.sh` | The operator (a person or a coding agent, by impersonation) | Uploads the inputs, creates and updates the job, starts and watches executions, creates the paused scheduler job; creates, updates and calls the recommendation service; moves the `current` pointer |
 | `teardown.sh` | **The owner of the project**, at the end | Removes everything `setup.sh` and `operate.sh` created; keeps the bucket and the DVC data |
 
 **The repository is public.** The project id, the bucket name and the service-account
@@ -28,9 +28,10 @@ A billing budget with alerts must exist on the project before the first job runs
 cp infra/env.example infra/.env
 ```
 
-Fill in the first five values: the project id, the region, the bucket, the address of
-the operator service account, and the GitHub repository as `owner/name`. The other
-values are names of things the scripts create and can stay as they are.
+Fill in the first six values: the project id, the region, the bucket, the address of
+the operator service account, the GitHub repository as `owner/name`, and the address
+that receives the alert emails (`ALERT_EMAIL`, M14). The other values are names of
+things the scripts create and can stay as they are.
 
 ## 2. `setup.sh` (owner)
 
@@ -40,7 +41,9 @@ bash infra/setup.sh
 ```
 
 It prints every command before it runs it and ends with `setup finished` and the three
-values of step 3. It can be run again at any time.
+values of step 3. It can be run again at any time: a thing that exists is left alone.
+After M14 the last lines say `1 email notification channel and 5 alert policies exist
+(5 expected)`.
 
 **What exists afterwards, and who may do what:**
 
@@ -48,8 +51,9 @@ values of step 3. It can be run again at any time.
 |---|---|---|---|
 | Runtime account of the job | `setup.sh` | Read, write and delete objects of the one bucket; write log entries | Anything else. The job mounts only the inputs and state prefixes, so it never sees `dvc/` |
 | Scheduler account | `setup.sh` | Start a Cloud Run job of the project (a custom role with the single permission `run.jobs.run`) | Change a job, call a service, read anything |
-| Deployer account | `setup.sh` | Push and read images of the one repository. Only runs of this GitHub repository can act as it (Workload Identity Federation with a repository condition) | Deploy, read the bucket, anything else |
-| Operator account | before M13 | Create, update and run the job; create, pause and run the scheduler job; read logs and metrics; read images; read and write objects of the bucket | Change IAM, billing or APIs; create service accounts |
+| Runtime account of the service (M14) | `setup.sh` | Read objects of the one bucket; write log entries | Write or delete an object, anything else. The service mounts only the state prefix, read-only |
+| Deployer account | `setup.sh` | Push and read images of the one repository; from M14 update the Cloud Run job and service (`roles/run.developer`) and attach their two runtime accounts. Only runs of this GitHub repository can act as it (Workload Identity Federation with a repository condition) | Read the bucket, change who may call a service, anything else |
+| Operator account | before M13 | Create, update and run the job; create, pause and run the scheduler job; read logs and metrics; read images; read and write objects of the bucket; from M14 create and update the service and call it (`roles/run.invoker`) | Change IAM, billing or APIs; create service accounts, notification channels or alert policies |
 
 Nothing has the Owner or Editor role, no key file exists, and nothing is public.
 
@@ -127,7 +131,44 @@ are `scripts/weekly.py --next --mode eval`: the anchor comes from the state, so 
 scheduler starts it with the same arguments every week. One execution at a time;
 `operate.sh` refuses to start a second one.
 
-## 6. `teardown.sh` (owner)
+## 6. The recommendation service, rollback and deployment (M14)
+
+```bash
+bash infra/operate.sh serving-set 2020-09-23        # once per prediction set published before M14
+bash infra/operate.sh create-service                # private, min 0 / max 2 instances, state read-only
+git tag deploy-<name> <commit> && git push origin deploy-<name>   # build both images, deploy job and service
+bash infra/operate.sh call /healthz
+bash infra/operate.sh call /v1/recommendations/<customer id>
+bash infra/operate.sh rollback previous             # point `current` at the previous prediction set
+bash infra/operate.sh rollback next                 # and forward again
+bash infra/operate.sh pointer                       # state/current.json as it is in the bucket
+bash infra/operate.sh service-logs hmrec_alert      # the service's alert lines
+```
+
+- **The service** (`docs/mlops.md` §9) is a Cloud Run service with authenticated calls
+  only, minimum instances 0 and a small maximum, 1 vCPU, and ONE volume: the state
+  prefix, read-only. It runs as an account that can only read objects and write logs. It
+  loads the prediction set `state/current.json` names and follows the pointer without a
+  restart.
+- **`create-service` without a digest** starts the service from Google's placeholder
+  image; the first run of the deploy workflow puts the real image in. With a digest
+  (`create-service sha256:...`, `update-service sha256:...`) it runs that image of
+  `<image>-serving`.
+- **Deployment on a tag** (`.github/workflows/deploy.yml`): a tag `deploy-*` or `v*`, or a
+  manual run, builds and pushes the pipeline image and the service image and points the
+  job and the service at the two digests. It needs **no new secret**: the three of
+  step 3 are enough. It changes images only; the job and the service must exist.
+- **Rollback** is one execution of the job (it has the state mounted and checks the
+  target's checksums there): `scripts/m14_rollback.py`. A target that does not exist or
+  fails a check is refused and the pointer stays. The service switches at its next look
+  at the pointer (every 60 seconds while it has CPU).
+- **Alerting** (`docs/mlops.md` §10): `setup.sh` creates one email channel
+  (`ALERT_EMAIL`) and five policies: four match the alert lines of the pipeline and the
+  service (`jsonPayload.hmrec_alert` = `step_failed`, `input_check_failed`,
+  `quality_alert`, `prediction_set_load_failed`), one a failed execution of a job. The
+  operator creates no channel and no policy.
+
+## 7. `teardown.sh` (owner)
 
 ```bash
 bash infra/teardown.sh                    # asks for the project id before it removes anything
@@ -135,7 +176,8 @@ bash infra/teardown.sh --delete-objects   # also inputs/, pipeline/ and pipeline
 ```
 
 It never deletes the bucket, the `dvc/` prefix, the operator account or the budget, and it
-leaves the APIs enabled.
+leaves the APIs enabled. From M14 it also removes the service, the alert policies and the
+notification channel.
 
 ## What costs money at rest
 
@@ -143,6 +185,8 @@ leaves the APIs enabled.
 |---|---|
 | Cloud Run job (no execution running) | nothing |
 | Cloud Scheduler job, paused or not | nothing (the first three jobs of a billing account are free) |
+| Cloud Run service with minimum instances 0 (M14) | nothing while no request arrives |
+| Notification channel, alert policies | nothing |
 | Service accounts, the custom role, Workload Identity Federation | nothing |
 | Images in Artifact Registry | storage, about 0.10 USD per GB and month above the first 0.5 GB |
 | Objects in the bucket | storage, about 0.02 USD per GB and month (Standard, `us-central1`) |

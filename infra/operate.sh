@@ -1,12 +1,14 @@
 #!/usr/bin/env bash
-# infra/operate.sh: what the OPERATOR does with the cloud project (docs/mlops.md §6, §12; M13).
+# infra/operate.sh: what the OPERATOR does with the cloud project (docs/mlops.md §6, §9, §12;
+# M13, M14).
 #
 # WHO RUNS IT: someone who may impersonate the operator service account of infra/.env.
 # EVERY gcloud command below runs as that account (--impersonate-service-account); the
 # person's own account is never used for a cloud action. The operator can create, update
-# and run the job and the scheduler job, read logs and metrics, and read and write
-# objects of the bucket. It cannot change IAM, billing or APIs: that is infra/setup.sh,
-# which only the owner of the project runs.
+# and run the job and the scheduler job, create, update and call the recommendation
+# service, read logs and metrics, and read and write objects of the bucket. It cannot
+# change IAM, billing or APIs: that is infra/setup.sh, which only the owner of the
+# project runs.
 #
 #     bash infra/operate.sh upload-inputs               copy the pipeline's inputs to the bucket
 #     bash infra/operate.sh list-inputs                 name, size and md5 of every uploaded input
@@ -27,6 +29,22 @@
 #     bash infra/operate.sh state-size                  bytes under each prefix of the bucket
 #     bash infra/operate.sh status                      every resource that exists
 #     bash infra/operate.sh token                       an access token of the operator (for curl)
+#
+# The recommendation service (M14):
+#     bash infra/operate.sh create-service [sha256:<digest>]   the Cloud Run service; without a
+#                                                       digest it starts from Google's placeholder
+#                                                       image and the deploy workflow puts the
+#                                                       real image in (.github/workflows/deploy.yml)
+#     bash infra/operate.sh update-service sha256:<digest>     the same service with another image
+#     bash infra/operate.sh service-url                 the URL of the service
+#     bash infra/operate.sh call <path>                 GET a path of the service with an identity
+#                                                       token of the operator, e.g. /healthz
+#     bash infra/operate.sh service-logs [text]         log lines of the service (optionally with a text)
+#     bash infra/operate.sh pointer                     state/current.json as it is in the bucket
+#     bash infra/operate.sh serving-set <anchor>        build the serving form of a prediction set
+#                                                       that was published before M14 (one execution)
+#     bash infra/operate.sh rollback <previous|next|YYYY-MM-DD>   move the `current` pointer
+#                                                       (one execution; the service follows it)
 #
 # `execute` takes the arguments of the container, a script first, for example
 #     bash infra/operate.sh execute scripts/m13_volume_check.py --megabytes 1024 --hash-inputs
@@ -50,10 +68,15 @@ set +a
 : "${ARTIFACT_REPOSITORY:?}" "${IMAGE_NAME:?}" "${RUNTIME_SERVICE_ACCOUNT_NAME:?}"
 : "${SCHEDULER_SERVICE_ACCOUNT_NAME:?}" "${JOB_NAME:?}" "${SCHEDULER_JOB_NAME:?}"
 : "${INPUTS_PREFIX:?}" "${STATE_PREFIX:?}"
+: "${SERVICE_NAME:?}" "${SERVICE_RUNTIME_SERVICE_ACCOUNT_NAME:?}"
 
 RUNTIME_SA="${RUNTIME_SERVICE_ACCOUNT_NAME}@${PROJECT_ID}.iam.gserviceaccount.com"
 SCHEDULER_SA="${SCHEDULER_SERVICE_ACCOUNT_NAME}@${PROJECT_ID}.iam.gserviceaccount.com"
+SERVICE_RUNTIME_SA="${SERVICE_RUNTIME_SERVICE_ACCOUNT_NAME}@${PROJECT_ID}.iam.gserviceaccount.com"
 IMAGE_REPOSITORY="${REGION}-docker.pkg.dev/${PROJECT_ID}/${ARTIFACT_REPOSITORY}/${IMAGE_NAME}"
+# The service's image lies next to the pipeline's, under "<image>-serving" (the deploy
+# workflow pushes it there).
+SERVICE_IMAGE_REPOSITORY="${IMAGE_REPOSITORY}-serving"
 
 # Where the three prefixes of the bucket appear inside the container. The pipeline is told
 # the first two through its environment; the calibration state is the folder next to the
@@ -71,6 +94,20 @@ JOB_MEMORY=24Gi
 JOB_TIMEOUT=6h
 # The weekly trigger: Wednesday 06:00 UTC (an anchor is a Wednesday). It stays paused.
 SCHEDULE="0 6 * * 3"
+
+# The recommendation service (docs/mlops.md §9). No always-on resource: it scales to zero
+# and to at most SERVICE_MAX_INSTANCES. 1 vCPU; the memory holds the `serve` prediction
+# set (about 160 MB in memory, twice that for the moment of a switch) with room to spare.
+SERVICE_CPU=1
+SERVICE_MEMORY=1Gi
+SERVICE_MAX_INSTANCES=2
+# Seconds between two looks of the service at the `current` pointer.
+SERVICE_POLL_SECONDS=60
+# The port of Dockerfile.serving.
+SERVICE_PORT=8080
+# What a service is created from before the first deployment: Google's sample container.
+# It listens on the port and ignores the mounts; the deploy workflow replaces it.
+PLACEHOLDER_IMAGE="us-docker.pkg.dev/cloudrun/container/hello"
 
 # gcloud as the operator, in the project.
 g() {
@@ -126,6 +163,33 @@ job_flags() {
     # "--args=..." in one word: the list starts with a script, but holds words with "--".
     "--args=scripts/weekly.py,--next,--mode,eval"
   )
+}
+
+# The flags that define the service; create and update use the same ones.
+service_flags() {
+  local image="$1"
+  SERVICE_FLAGS=(
+    --region "$REGION"
+    --image "$image"
+    --service-account "$SERVICE_RUNTIME_SA"
+    # Authenticated calls only: nothing is public (docs/mlops.md §9).
+    --no-allow-unauthenticated
+    --cpu "$SERVICE_CPU" --memory "$SERVICE_MEMORY"
+    --min-instances 0 --max-instances "$SERVICE_MAX_INSTANCES"
+    --port "$SERVICE_PORT"
+    # A mounted bucket needs the second-generation execution environment.
+    --execution-environment gen2
+    # More CPU while an instance starts: the prediction set is loaded then.
+    --cpu-boost
+    # The state prefix, READ-ONLY: the service can change nothing of the state.
+    --add-volume "$(volume state "$STATE_PREFIX" true)"
+    --add-volume-mount "volume=state,mount-path=${STATE_MOUNT}"
+    --set-env-vars "HMREC_SERVING_STATE_ROOT=${STATE_MOUNT},HMREC_SERVING_POLL_SECONDS=${SERVICE_POLL_SECONDS}"
+  )
+}
+
+service_url() {
+  g run services describe "$SERVICE_NAME" --region "$REGION" --format 'value(status.url)'
 }
 
 command="${1:-}"
@@ -265,21 +329,74 @@ print(max(values) if values else "no data")'
       g storage du --summarize "gs://${BUCKET}/${prefix}" || true
     done
     ;;
+  create-service)
+    # `run deploy` creates the service, or changes it if it exists. With a digest the
+    # service runs that image of the service's repository; without one it starts from
+    # the placeholder, and the first run of the deploy workflow puts the real image in.
+    if [ -n "${1:-}" ]; then
+      require_digest "$1"
+      service_flags "${SERVICE_IMAGE_REPOSITORY}@${1}"
+    else
+      service_flags "$PLACEHOLDER_IMAGE"
+    fi
+    g run deploy "$SERVICE_NAME" "${SERVICE_FLAGS[@]}"
+    ;;
+  update-service)
+    require_digest "${1:-}"
+    service_flags "${SERVICE_IMAGE_REPOSITORY}@${1}"
+    g run deploy "$SERVICE_NAME" "${SERVICE_FLAGS[@]}"
+    ;;
+  service-url)
+    service_url
+    ;;
+  call)
+    path="${1:?give a path of the service, e.g. /healthz}"
+    url="$(service_url)"
+    # An identity token of the operator for this one service. It is given to curl on its
+    # standard input, so it is not in a command line.
+    printf 'header = "Authorization: Bearer %s"\n' "$(g auth print-identity-token --audiences "$url" 2>/dev/null)" |
+      curl --silent --show-error --config - "${url}${path}"
+    echo
+    ;;
+  service-logs)
+    filter="resource.type=\"cloud_run_revision\" AND resource.labels.service_name=\"${SERVICE_NAME}\""
+    if [ -n "${1:-}" ]; then
+      filter="${filter} AND \"${1}\""
+    fi
+    g logging read "$filter" --freshness 7d --order asc --limit 2000 \
+      --format 'value(timestamp,jsonPayload,textPayload)'
+    ;;
+  pointer)
+    g storage cat "gs://${BUCKET}/${STATE_PREFIX}/state/current.json"
+    ;;
+  serving-set)
+    anchor="${1:?give the anchor of the prediction set, e.g. 2020-09-23}"
+    exec bash "$0" execute scripts/m14_serving_set.py --anchor "$anchor"
+    ;;
+  rollback)
+    target="${1:?give the target: previous, next or an anchor YYYY-MM-DD}"
+    # One execution of the job, which has the state mounted: it checks the target's
+    # checksums there and replaces state/current.json. The service follows the pointer.
+    exec bash "$0" execute scripts/m14_rollback.py --to "$target"
+    ;;
   status)
     echo "== Cloud Run jobs"
     g run jobs list --region "$REGION" || true
+    echo "== Cloud Run services"
+    g run services list --region "$REGION" || true
     echo "== executions of ${JOB_NAME}"
     g run jobs executions list --job "$JOB_NAME" --region "$REGION" --limit 30 || true
     echo "== Cloud Scheduler jobs"
     g scheduler jobs list --location "$REGION" || true
     echo "== images"
     g artifacts docker images list "$IMAGE_REPOSITORY" --include-tags || true
+    g artifacts docker images list "$SERVICE_IMAGE_REPOSITORY" --include-tags || true
     ;;
   token)
     g auth print-access-token
     ;;
   *)
-    sed -n '2,31p' "$0"
+    sed -n '2,54p' "$0"
     exit 1
     ;;
 esac

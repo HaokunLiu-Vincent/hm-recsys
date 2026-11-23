@@ -1,0 +1,222 @@
+# Deployment on a tag (docs/mlops.md §11; M14): build both images, push them, and point
+# the Cloud Run job and the Cloud Run service at the new digests.
+#
+# Trigger: a tag "deploy-<anything>" or a version tag "v<anything>" on a commit, or a
+# manual run. Tag a commit whose CI run is green: this workflow builds and deploys, it
+# does not run the tests again.
+#
+#   1. the pipeline image   Dockerfile, exactly as the CI workflow and the image workflow
+#                           build it, pushed under the commit hash;
+#   2. the service image    Dockerfile.serving, pushed next to it as "<image>-serving";
+#   3. the job              `gcloud run jobs update`: the new image digest, and the digest
+#                           in the job's environment (every run manifest records it);
+#   4. the service          `gcloud run services update`: the new image digest. Cloud Run
+#                           starts a new revision and moves the traffic when it is ready.
+#
+# The job and the service must exist: the operator creates them once, with their mounts,
+# accounts and limits (infra/operate.sh create-job, create-service). This workflow changes
+# their IMAGE only. Rolling back a deployment is the same workflow on the earlier commit,
+# or `infra/operate.sh update-job / update-service` with the earlier digest.
+#
+# Authentication: Workload Identity Federation, as in the image workflow. GitHub signs a
+# short-lived token for this run; the cloud project accepts tokens of this one repository
+# and lets them act as the deployer account (infra/setup.sh: push images, update jobs and
+# services). No key is stored anywhere.
+#
+# The repository is public and so is this log. The names of the cloud project are NOT in
+# this file: they come from the three repository secrets of the image workflow, which
+# GitHub masks in the log. The region and the project id are parts of the third one.
+#   GCP_WORKLOAD_IDENTITY_PROVIDER   projects/<number>/locations/global/workloadIdentityPools/<pool>/providers/<provider>
+#   GCP_DEPLOYER_SERVICE_ACCOUNT     the address of the deployer service account
+#   GCP_IMAGE_REPOSITORY             <region>-docker.pkg.dev/<project>/<repository>/<image>
+# gcloud's own output (it prints resource names and URLs) is kept out of the log; it is
+# shown only if a command fails.
+#
+# Third-party actions are pinned by commit hash; the comment gives the release.
+
+name: deploy
+
+on:
+  push:
+    tags:
+      - "deploy-*"
+      - "v*"
+  workflow_dispatch:
+
+# contents: read   -> check out the repository.
+# id-token: write  -> ask GitHub for the signed token of this run (nothing is written to
+#                     the repository; the name of the permission is GitHub's).
+permissions:
+  contents: read
+  id-token: write
+
+# One deployment at a time; a second one waits for the first.
+concurrency:
+  group: deploy
+  cancel-in-progress: false
+
+defaults:
+  run:
+    shell: bash
+
+# The names of the job and of the service: JOB_NAME and SERVICE_NAME of infra/env.example
+# (tests/unit/test_infra_rules.py compares them). They are names of resources, not of
+# the project, and are published in that file already.
+env:
+  JOB_NAME: hm-weekly
+  SERVICE_NAME: hm-recs
+
+jobs:
+  deploy:
+    name: build, push, deploy (linux/amd64)
+    runs-on: ubuntu-24.04
+    timeout-minutes: 60
+    steps:
+      - name: Check out the repository
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      # Both images carry the commit they were built from (docs/mlops.md §8.1). A fresh
+      # checkout of a tag is a clean, committed tree by construction.
+      - name: Read the commit of the checkout
+        id: commit
+        run: echo "sha=$(git rev-parse HEAD)" >> "$GITHUB_OUTPUT"
+
+      # The three secrets are masked by GitHub as whole strings. The project id and the
+      # project number are PARTS of them and could appear on their own in a message of a
+      # tool, so they are masked too. The secrets are read from the environment, not
+      # written into the script, so this step's own head shows only "***".
+      - name: Mask the names of the cloud project in the log
+        env:
+          IMAGE_REPOSITORY: ${{ secrets.GCP_IMAGE_REPOSITORY }}
+          PROVIDER: ${{ secrets.GCP_WORKLOAD_IDENTITY_PROVIDER }}
+        run: |
+          test -n "$IMAGE_REPOSITORY" || { echo "::error::the secret GCP_IMAGE_REPOSITORY is not set"; exit 1; }
+          test -n "$PROVIDER" || { echo "::error::the secret GCP_WORKLOAD_IDENTITY_PROVIDER is not set"; exit 1; }
+          echo "::add-mask::$(echo "$IMAGE_REPOSITORY" | cut -d/ -f2)"
+          echo "::add-mask::$(echo "$PROVIDER" | cut -d/ -f2)"
+
+      - name: Authenticate to Google Cloud (Workload Identity Federation, no key)
+        id: auth
+        uses: google-github-actions/auth@7c6bc770dae815cd3e89ee6cdf493a5fab2cc093 # v3.0.0
+        with:
+          workload_identity_provider: ${{ secrets.GCP_WORKLOAD_IDENTITY_PROVIDER }}
+          service_account: ${{ secrets.GCP_DEPLOYER_SERVICE_ACCOUNT }}
+          # A short-lived access token of the deployer account, used only to log Docker in.
+          token_format: access_token
+          access_token_lifetime: 1800s
+          # No credentials file is written into the checkout (it would enter the build context).
+          create_credentials_file: false
+
+      - name: Log Docker in to Artifact Registry
+        env:
+          ACCESS_TOKEN: ${{ steps.auth.outputs.access_token }}
+          IMAGE_REPOSITORY: ${{ secrets.GCP_IMAGE_REPOSITORY }}
+        run: |
+          echo "$ACCESS_TOKEN" | docker login --username oauth2accesstoken --password-stdin "https://$(echo "$IMAGE_REPOSITORY" | cut -d/ -f1)"
+
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@f87e5991a6d7451dcb8d9637bfbc97413f497069 # v4.4.1
+
+      # The same build as in the CI workflow and the image workflow, with push.
+      # provenance: false -> the pushed object is ONE image manifest, so the digest below
+      # is the digest Cloud Run runs and the pipeline records.
+      - name: Build the pipeline image (linux/amd64) and push it
+        id: pipeline
+        uses: docker/build-push-action@c3c9e263c25d99ce0380d002d59b67737d91b0dc # v7.4.0
+        with:
+          context: .
+          platforms: linux/amd64
+          push: true
+          provenance: false
+          tags: ${{ secrets.GCP_IMAGE_REPOSITORY }}:${{ steps.commit.outputs.sha }}
+          build-args: |
+            GIT_COMMIT=${{ steps.commit.outputs.sha }}
+          cache-from: type=gha
+          cache-to: type=gha,mode=max
+
+      # The service image: its own Dockerfile and its own ignore file (an allow-list of
+      # five source files), its own cache scope so that the two builds do not replace
+      # each other's cache.
+      - name: Build the service image (linux/amd64) and push it
+        id: serving
+        uses: docker/build-push-action@c3c9e263c25d99ce0380d002d59b67737d91b0dc # v7.4.0
+        with:
+          context: .
+          file: Dockerfile.serving
+          platforms: linux/amd64
+          push: true
+          provenance: false
+          tags: ${{ secrets.GCP_IMAGE_REPOSITORY }}-serving:${{ steps.commit.outputs.sha }}
+          build-args: |
+            GIT_COMMIT=${{ steps.commit.outputs.sha }}
+          cache-from: type=gha,scope=serving
+          cache-to: type=gha,mode=max,scope=serving
+
+      # The digests and the commit are not names of the project: they are published as
+      # notices (readable without signing in) and in the run summary, BEFORE the
+      # deployment, so that they are known even if a later step fails.
+      - name: Publish the image digests
+        env:
+          PIPELINE_DIGEST: ${{ steps.pipeline.outputs.digest }}
+          SERVING_DIGEST: ${{ steps.serving.outputs.digest }}
+          COMMIT: ${{ steps.commit.outputs.sha }}
+        run: |
+          test -n "$PIPELINE_DIGEST" && test -n "$SERVING_DIGEST"
+          echo "::notice title=pipeline image digest::$PIPELINE_DIGEST"
+          echo "::notice title=service image digest::$SERVING_DIGEST"
+          echo "::notice title=image commit::$COMMIT"
+          { echo '### Images pushed (linux/amd64)'; echo "- commit: \`$COMMIT\`"; echo "- pipeline image: \`$PIPELINE_DIGEST\`"; echo "- service image: \`$SERVING_DIGEST\`"; } >> "$GITHUB_STEP_SUMMARY"
+
+      # A fresh token for the deployment: the builds above may take longer than the first
+      # token lives.
+      - name: Authenticate again for the deployment
+        id: deploy-auth
+        uses: google-github-actions/auth@7c6bc770dae815cd3e89ee6cdf493a5fab2cc093 # v3.0.0
+        with:
+          workload_identity_provider: ${{ secrets.GCP_WORKLOAD_IDENTITY_PROVIDER }}
+          service_account: ${{ secrets.GCP_DEPLOYER_SERVICE_ACCOUNT }}
+          token_format: access_token
+          access_token_lifetime: 900s
+          create_credentials_file: false
+
+      # gcloud is part of the runner image. It gets the token through its environment
+      # (CLOUDSDK_AUTH_ACCESS_TOKEN); nothing is written to its configuration. The region
+      # and the project id are read out of the image repository's name:
+      #   <region>-docker.pkg.dev/<project>/<repository>/<image>
+      # `quiet` keeps a command's output out of the public log unless the command fails.
+      - name: Update the Cloud Run job and the Cloud Run service to the new digests
+        env:
+          CLOUDSDK_AUTH_ACCESS_TOKEN: ${{ steps.deploy-auth.outputs.access_token }}
+          CLOUDSDK_CORE_DISABLE_PROMPTS: "1"
+          IMAGE_REPOSITORY: ${{ secrets.GCP_IMAGE_REPOSITORY }}
+          PIPELINE_DIGEST: ${{ steps.pipeline.outputs.digest }}
+          SERVING_DIGEST: ${{ steps.serving.outputs.digest }}
+        run: |
+          command -v gcloud >/dev/null || { echo "::error::gcloud is not installed on this runner"; exit 1; }
+          registry_host="${IMAGE_REPOSITORY%%/*}"
+          region="${registry_host%-docker.pkg.dev}"
+          project="$(echo "$IMAGE_REPOSITORY" | cut -d/ -f2)"
+          quiet() {
+            if ! "$@" > gcloud-output.txt 2>&1; then
+              cat gcloud-output.txt
+              return 1
+            fi
+          }
+          # The job: its image, and the digest every run manifest records.
+          quiet gcloud run jobs update "$JOB_NAME" --project "$project" --region "$region" \
+            --image "${IMAGE_REPOSITORY}@${PIPELINE_DIGEST}" \
+            --update-env-vars "HMREC_IMAGE_DIGEST=${PIPELINE_DIGEST}"
+          # The service: its image. The command waits until the new revision serves.
+          quiet gcloud run services update "$SERVICE_NAME" --project "$project" --region "$region" \
+            --image "${IMAGE_REPOSITORY}-serving@${SERVING_DIGEST}"
+          # Read both back: what runs now must be what was built in this run.
+          job_image="$(gcloud run jobs describe "$JOB_NAME" --project "$project" --region "$region" \
+            --format 'value(spec.template.spec.template.spec.containers[0].image)')"
+          service_image="$(gcloud run services describe "$SERVICE_NAME" --project "$project" --region "$region" \
+            --format 'value(spec.template.spec.containers[0].image)')"
+          test "${job_image##*@}" = "$PIPELINE_DIGEST" || { echo "::error::the job does not run the new pipeline image"; exit 1; }
+          test "${service_image##*@}" = "$SERVING_DIGEST" || { echo "::error::the service does not run the new service image"; exit 1; }
+          echo "::notice title=deployed::job ${JOB_NAME} -> ${PIPELINE_DIGEST}; service ${SERVICE_NAME} -> ${SERVING_DIGEST}"
+          { echo '### Deployed'; echo "- job \`${JOB_NAME}\`: \`${PIPELINE_DIGEST}\`"; echo "- service \`${SERVICE_NAME}\`: \`${SERVING_DIGEST}\`"; } >> "$GITHUB_STEP_SUMMARY"
