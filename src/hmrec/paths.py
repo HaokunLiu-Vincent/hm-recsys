@@ -992,6 +992,20 @@ class ProjectPaths:
         return self.cloud_results_dir / f"{table}.csv"
 
     @property
+    def serving_results_dir(self) -> Path:
+        """results/m14_serving/: the records of M14 (docs/mlops.md §9, §10).
+
+        What was measured of the recommendation service with synthetic requests,
+        the rollback drill, the provoked alerts, and one row per execution of a
+        Cloud Run job of the milestone.
+        """
+        return self.results_root / "m14_serving"
+
+    def serving_table_file(self, table: str) -> Path:
+        """results/m14_serving/{table}.csv, e.g. "probe_summary" or "executions"."""
+        return self.serving_results_dir / f"{table}.csv"
+
+    @property
     def cloud_state_records_dir(self) -> Path:
         """artifacts/m13_cloud/pipeline/: the SMALL records of the state in the bucket.
 

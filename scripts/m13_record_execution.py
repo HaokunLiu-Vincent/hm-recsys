@@ -1,4 +1,8 @@
-"""CLI for M13: append one execution of the Cloud Run job to results/m13_cloud/executions.csv.
+"""CLI for M13 and M14: append one execution of a Cloud Run job to an executions table.
+
+    results/m13_cloud/executions.csv     the replay of M13 (the default)
+    results/m14_serving/executions.csv   the executions of M14 (--records m14_serving):
+                                         serving sets, pointer moves, alert drills
 
     uv run python scripts/m13_record_execution.py --label V1 --kind eval \
         --execution <name> --started-by operator --image-commit <commit> \
@@ -21,7 +25,11 @@ from hmrec.logging_utils import get_logger, setup_logging
 from hmrec.paths import get_paths
 
 LOGGER = get_logger("scripts.m13_record_execution")
-KINDS = ("smoke", "calibration", "eval", "serve")
+# The last three are the kinds of M14: building the serving form of a published
+# prediction set, moving the `current` pointer, and a provoked alert.
+KINDS = ("smoke", "calibration", "eval", "serve", "serving_set", "rollback", "drill")
+RECORDS_M13 = "m13_cloud"
+RECORDS_M14 = "m14_serving"
 
 
 def parse_time(text: str) -> datetime:
@@ -42,6 +50,12 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--max-memory-fraction", type=float, default=None)
     parser.add_argument("--state-bytes", type=int, default=None)
     parser.add_argument("--outcome", required=True, choices=("succeeded", "failed"))
+    parser.add_argument(
+        "--records",
+        default=RECORDS_M13,
+        choices=(RECORDS_M13, RECORDS_M14),
+        help="which executions table gets the row (default: the replay of M13)",
+    )
     return parser.parse_args()
 
 
@@ -50,7 +64,10 @@ def main() -> None:
     args = parse_args()
     setup_logging()
     paths = get_paths()
-    table = paths.cloud_table_file("executions")
+    if args.records == RECORDS_M14:
+        table = paths.serving_table_file("executions")
+    else:
+        table = paths.cloud_table_file("executions")
     recorded = {row["execution"] for row in read_rows(table, EXECUTION_COLUMNS)}
     if args.execution in recorded:
         raise ValueError(f"execution {args.execution} is recorded already in {table}")

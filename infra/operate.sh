@@ -45,6 +45,23 @@
 #                                                       that was published before M14 (one execution)
 #     bash infra/operate.sh rollback <previous|next|YYYY-MM-DD>   move the `current` pointer
 #                                                       (one execution; the service follows it)
+#     bash infra/operate.sh service-request-logs <start> <end>   the service's request lines
+#                                                       between two UTC times, as JSON
+#     bash infra/operate.sh service-metric <metric> <aligner> <start> <end> [service]
+#                                                       one Cloud Monitoring metric of the service,
+#                                                       a value per minute (memory, instances)
+#
+# Alert drills (M14): a job, a service and a state prefix of their own ("-drill"), so that
+# the replay's state is never touched. Every alert line of a drill carries a note.
+#     bash infra/operate.sh create-drill-job sha256:<digest>
+#     bash infra/operate.sh execute-drill <case> <inputs|drill-inputs> <arguments>
+#                                                       one execution with the state
+#                                                       <drill prefix>/<case>; "drill-inputs"
+#                                                       reads <drill prefix>/<case>-inputs
+#                                                       instead of the real inputs
+#     bash infra/operate.sh create-drill-service sha256:<digest> <case>
+#     bash infra/operate.sh call-drill <path>
+#     bash infra/operate.sh delete-drill                the drill job and the drill service
 #
 # `execute` takes the arguments of the container, a script first, for example
 #     bash infra/operate.sh execute scripts/m13_volume_check.py --megabytes 1024 --hash-inputs
@@ -109,6 +126,16 @@ SERVICE_PORT=8080
 # It listens on the port and ignores the mounts; the deploy workflow replaces it.
 PLACEHOLDER_IMAGE="us-docker.pkg.dev/cloudrun/container/hello"
 
+# The alert drills of M14 (docs/mlops.md §10): a job, a service and a prefix of the
+# bucket of their own. The note is added to every alert line a drill writes
+# (hmrec.structured_logs; no comma in it: gcloud separates variables with commas).
+DRILL_JOB_NAME="${JOB_NAME}-drill"
+DRILL_SERVICE_NAME="${SERVICE_NAME}-drill"
+DRILL_PREFIX="${STATE_PREFIX}-drill"
+DRILL_MOUNT="${MOUNT_ROOT}/${DRILL_PREFIX}"
+DRILL_NOTE="provoked on purpose - alert drill of M14 - not a real failure"
+DRILL_TIMEOUT=30m
+
 # gcloud as the operator, in the project.
 g() {
   gcloud --impersonate-service-account "$OPERATOR_SERVICE_ACCOUNT" --project "$PROJECT_ID" "$@"
@@ -123,8 +150,9 @@ require_digest() {
 
 # Stop if an execution of the job is running: one execution at a time.
 require_idle() {
+  local job="${1:-$JOB_NAME}"
   local running
-  running="$(g run jobs executions list --job "$JOB_NAME" --region "$REGION" \
+  running="$(g run jobs executions list --job "$job" --region "$REGION" \
     --filter '-status.completionTime:*' --format 'value(metadata.name)' 2>/dev/null || true)"
   if [ -n "$running" ]; then
     echo "an execution is still running: ${running}. One execution at a time."
@@ -379,6 +407,107 @@ print(max(values) if values else "no data")'
     # checksums there and replaces state/current.json. The service follows the pointer.
     exec bash "$0" execute scripts/m14_rollback.py --to "$target"
     ;;
+  service-request-logs)
+    start="${1:?give the start, e.g. 2026-11-23T09:00:00Z}"
+    end="${2:?give the end, e.g. 2026-11-23T09:20:00Z}"
+    service="${3:-$SERVICE_NAME}"
+    filter="resource.type=\"cloud_run_revision\" AND resource.labels.service_name=\"${service}\""
+    filter="${filter} AND jsonPayload.hmrec_log=\"request\""
+    filter="${filter} AND timestamp>=\"${start}\" AND timestamp<=\"${end}\""
+    g logging read "$filter" --order asc --limit 20000 --format json 2>/dev/null
+    ;;
+  service-metric)
+    metric="${1:?give the metric, e.g. run.googleapis.com/container/memory/utilizations}"
+    aligner="${2:?give the aligner, e.g. ALIGN_PERCENTILE_99 or ALIGN_MAX}"
+    start="${3:?give the start, e.g. 2026-11-23T09:00:00Z}"
+    end="${4:?give the end, e.g. 2026-11-23T09:20:00Z}"
+    service="${5:-$SERVICE_NAME}"
+    # One value per minute and time series of the metric, with the series' labels.
+    printf 'header = "Authorization: Bearer %s"\n' "$(g auth print-access-token 2>/dev/null)" |
+      curl --silent --fail --get --config - \
+        --data-urlencode "filter=metric.type=\"${metric}\" AND resource.type=\"cloud_run_revision\" AND resource.labels.service_name=\"${service}\"" \
+        --data-urlencode "interval.startTime=${start}" \
+        --data-urlencode "interval.endTime=${end}" \
+        --data-urlencode "aggregation.alignmentPeriod=60s" \
+        --data-urlencode "aggregation.perSeriesAligner=${aligner}" \
+        "https://monitoring.googleapis.com/v3/projects/${PROJECT_ID}/timeSeries" |
+      python3 -c 'import json, sys
+for series in json.load(sys.stdin).get("timeSeries", []):
+    labels = {**series.get("metric", {}).get("labels", {})}
+    labels["revision"] = series["resource"]["labels"].get("revision_name", "")
+    for point in reversed(series["points"]):
+        value = point["value"]
+        number = value.get("doubleValue", value.get("int64Value"))
+        print(point["interval"]["endTime"], number, json.dumps(labels, sort_keys=True))'
+    ;;
+  create-drill-job)
+    require_digest "${1:-}"
+    # The real inputs read-only and the drill prefix writable; NOT the state of the
+    # replay. The state root is given per execution (execute-drill).
+    g run jobs deploy "$DRILL_JOB_NAME" \
+      --region "$REGION" \
+      --image "${IMAGE_REPOSITORY}@${1}" \
+      --service-account "$RUNTIME_SA" \
+      --cpu "$JOB_CPU" --memory "$JOB_MEMORY" \
+      --tasks 1 --parallelism 1 --max-retries 0 \
+      --task-timeout "$DRILL_TIMEOUT" \
+      --add-volume "$(volume inputs "$INPUTS_PREFIX" true)" \
+      --add-volume-mount "volume=inputs,mount-path=${INPUTS_MOUNT}" \
+      --add-volume "$(volume drill "$DRILL_PREFIX" false)" \
+      --add-volume-mount "volume=drill,mount-path=${DRILL_MOUNT}" \
+      --set-env-vars "HMREC_PIPELINE_INPUTS_ROOT=${INPUTS_MOUNT},HMREC_PIPELINE_STATE_ROOT=${DRILL_MOUNT}/unset,HMREC_IMAGE_DIGEST=${1},HMREC_ALERT_NOTE=${DRILL_NOTE}" \
+      --command python \
+      "--args=scripts/weekly.py,--next,--mode,eval"
+    ;;
+  execute-drill)
+    case_name="${1:?give the name of the drill case (a folder of the drill prefix)}"
+    inputs="${2:?give inputs (the real inputs) or drill-inputs (<case>-inputs of the drill prefix)}"
+    shift 2
+    if [ "$#" -eq 0 ]; then
+      echo "give the container's arguments, a script first"
+      exit 1
+    fi
+    require_idle "$DRILL_JOB_NAME"
+    variables="HMREC_PIPELINE_STATE_ROOT=${DRILL_MOUNT}/${case_name}"
+    if [ "$inputs" = "drill-inputs" ]; then
+      variables="${variables},HMREC_PIPELINE_INPUTS_ROOT=${DRILL_MOUNT}/${case_name}-inputs"
+    elif [ "$inputs" != "inputs" ]; then
+      echo "the second argument is inputs or drill-inputs"
+      exit 1
+    fi
+    arguments="$(IFS=,; printf '%s' "$*")"
+    g run jobs execute "$DRILL_JOB_NAME" --region "$REGION" "--args=${arguments}" \
+      --update-env-vars "$variables" --async --format 'value(metadata.name)'
+    ;;
+  create-drill-service)
+    require_digest "${1:-}"
+    case_name="${2:?give the name of the drill case (a folder of the drill prefix)}"
+    # The service's own flags, but the DRILL prefix mounted (read-only) and a state root
+    # inside it: this service never sees the replay's state.
+    g run deploy "$DRILL_SERVICE_NAME" \
+      --region "$REGION" \
+      --image "${SERVICE_IMAGE_REPOSITORY}@${1}" \
+      --service-account "$SERVICE_RUNTIME_SA" \
+      --no-allow-unauthenticated \
+      --cpu "$SERVICE_CPU" --memory "$SERVICE_MEMORY" \
+      --min-instances 0 --max-instances 1 \
+      --port "$SERVICE_PORT" \
+      --execution-environment gen2 \
+      --add-volume "$(volume drill "$DRILL_PREFIX" true)" \
+      --add-volume-mount "volume=drill,mount-path=${DRILL_MOUNT}" \
+      --set-env-vars "HMREC_SERVING_STATE_ROOT=${DRILL_MOUNT}/${case_name},HMREC_SERVING_POLL_SECONDS=${SERVICE_POLL_SECONDS},HMREC_ALERT_NOTE=${DRILL_NOTE}"
+    ;;
+  call-drill)
+    path="${1:?give a path of the drill service, e.g. /healthz}"
+    url="$(g run services describe "$DRILL_SERVICE_NAME" --region "$REGION" --format 'value(status.url)')"
+    printf 'header = "Authorization: Bearer %s"\n' "$(g auth print-identity-token --audiences "$url" 2>/dev/null)" |
+      curl --silent --show-error --config - "${url}${path}"
+    echo
+    ;;
+  delete-drill)
+    g run services delete "$DRILL_SERVICE_NAME" --region "$REGION" --quiet || true
+    g run jobs delete "$DRILL_JOB_NAME" --region "$REGION" --quiet || true
+    ;;
   status)
     echo "== Cloud Run jobs"
     g run jobs list --region "$REGION" || true
@@ -396,7 +525,7 @@ print(max(values) if values else "no data")'
     g auth print-access-token
     ;;
   *)
-    sed -n '2,54p' "$0"
+    sed -n '2,71p' "$0"
     exit 1
     ;;
 esac
