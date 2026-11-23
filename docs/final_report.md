@@ -1,12 +1,15 @@
 # H&M Personalized Fashion Recommendation — Final Report
 
 > **Language.** This report exists in English only. Its Chinese translation was removed on 2026-11-21 (`docs/decisions.md`); it remains in the git history up to tag `v0.2`.
-> Dates and tags: sections 1–9, 2026-11-19, tag `v0.1`; section 10 and the pointers to it were added on 2026-11-20, tag `v0.2`.
+> Dates and tags: sections 1–9, 2026-11-19, tag `v0.1`; section 10 and the pointers to it were added on 2026-11-20, tag `v0.2`; section 11 (stage 3) and the pointers to it were added on 2026-11-23, tag `v0.3`.
 > The design reference is `docs/proposal.md`; every decision made along the way is logged in `docs/decisions.md`. This report is written for readers who did not take part in the project and can be read on its own; for details, follow the sections and files it points to.
 > **Where the numbers come from.** Every result comes from a file under `results/` or from `docs/decisions.md`, cited below the table or at the end of the sentence. Numbers derived from result tables (relative changes, query-weighted pooled values) say how they were computed. Configuration values (quotas, windows, τ and so on) come from the four lock files under `configs/locks/` and from `configs/fold_manifest.yaml`.
+> **Stage 3 in one line.** The same system now runs as a weekly pipeline in a container and on Google Cloud, with a serving endpoint, alerts and deployment by tag; replaying eight weeks reproduced the stage-1 records within 1% on two platforms (§11). No model or result of stages 1 and 2 changed.
 > **What this report does not do.** It gives no official Kaggle rank (§7.3 says why the T1–T4 result is not compared with the leaderboard; §4.6 and §10.6 report two late submissions and label where their scores would stand), and it does not present correlation as causation (§5).
 
 ---
+
+**Contents.** 1 Summary · 2 System design · 3 Evaluation protocol · 4 Results · 5 Why T is higher than V · 6 Other findings · 7 Deviations and limitations · 8 Reproduction · 9 Next steps · 10 Stage 2: DeepFM as an alternative ranker · **11 Stage 3: the system run every week, in a container and in the cloud** (11.1 what it is and is not · 11.2 architecture · 11.3 the weekly tick · 11.4 acceptance across environments · 11.5 monitoring flags · 11.6 the serving endpoint · 11.7 rollback drill · 11.8 alert drills · 11.9 deployment by tag · 11.10 run times and cost · 11.11 runbook · 11.12 limitations · 11.13 where the cloud stands)
 
 ## 1. Summary
 
@@ -48,6 +51,8 @@ Sources: `results/t_phase_metrics.csv`, `results/t_phase_recall.csv`. "Pooled" m
 3. **T1–T4 is used data.** Its labels were read for the final evaluation and on 4 more occasions afterwards; every occasion is recorded (§7.2 item 5). Any later change may only be compared and selected on V1–V4 (`AGENTS.md` §3.2).
 
 **Stage 2 (added 2026-11-20): DeepFM as an alternative ranker.** With the same candidates, features and training rows, a DeepFM ranker was compared with LambdaMART (§10). The configuration chosen on V (standardised numeric input, listwise loss) has a pooled MAP@12 of 0.032765 on V1–V4 against 0.032701 for LambdaMART (means of 3 seeds), and 0.039341 on T1–T4 against 0.039194 (LambdaMART: 1 seed); both 95% intervals of the difference include zero. One Kaggle late submission scored Private 0.03588 against 0.03600, a difference of −0.33%, inside the band of 1% fixed before the run (Public: 0.03492 against 0.03548, −1.58%). In all three comparisons the two rankers cannot be told apart, which does not mean that they are equal. The ranker of the system is still LambdaMART.
+
+**Stage 3 (added 2026-11-23): the system run every week, in a container and in the cloud.** The same system, unchanged, was turned into a weekly pipeline: one command per week, in a container image, with versioned inputs, a record per run and the existing stop conditions wired in; on Google Cloud it runs as a Cloud Run job with a scheduler, a serving endpoint that looks up the weekly Top-12, alert policies, and deployment by tag without a stored key (§11). There is no live traffic: the clock is simulated, and eight weeks (V1–T4) were replayed. Against the stage-1 records every weekly recall and MAP@12 is inside the 1.0% tolerance that was fixed beforehand, on both platforms: the pooled MAP@12 over the eight weeks is 0.035948 in the arm64 container and 0.035893 on Cloud Run against 0.035933 (+0.04% and −0.11%); the largest weekly difference is MAP@12 of T4, 0.74% and 0.80% below the record. The service answered 2,500 synthetic requests as the prediction set and the fallback list say; a cold start took 6.0 and 6.3 s, and a warm lookup has a p95 of 0.77 ms inside the service and 236 ms from a laptop on another continent. A rollback reached the service in 41 seconds, four kinds of alert were provoked once each and reached the mailbox, and a deployment by tag took under 3 minutes. Stage 3 used about 4.15 USD of compute at list prices. **The replay is a verification of the pipeline, not a new evaluation, and nothing here is evidence about live behaviour or business impact** (§11.12).
 
 ---
 
@@ -784,6 +789,8 @@ Directions that look worth prioritizing given these results (all need to be vali
 
 ### 9.4 MLOps
 
+**Done: stage 3 (2026-11-21 to 2026-11-23) built the weekly pipeline, and its results are in §11.** Of the items below, orchestration, monitoring, versioning and the environment were built; the cadence of re-selection and the online experiment were written as designs and not implemented (`docs/stage3_designs.md`). The rest of this subsection is the plan as it was written before that work.
+
 The system today is a set of scripts started by hand in order, and the traceability of results rests on conventions and tests. To run it automatically every week, the following are still missing:
 
 - **Orchestration**: connect "weekly recall → fine-tune → features → retrain → predict" into a pipeline with dependencies that stops at the failing step and raises an alert. The existing stop conditions (memory over the limit, sha256 mismatch, abnormal loss) are already in the code and can serve directly as pipeline checks.
@@ -1024,3 +1031,255 @@ So DeepFM needs less time, for training and for scoring, and LambdaMART needs le
 **Reproducibility does not separate the two.** Each reproduced its earlier records bit for bit when it was trained again: LambdaMART in the rehearsals of §3.5 and §4.6, DeepFM in the rehearsals of §10.5 and §10.6. For DeepFM this holds on CPU; on MPS a training does not repeat from the same seed (§10.2). **Note added on 2026-11-22.** On 2026-11-22 a synthetic-data reproducer that runs the real R6 fine-tuning code showed that fine-tuning was not repeatable from run to run with the stage-1 settings: on the laptop, in the arm64 container and on x86-64. This was not verified with real data on the laptop. The chain models are recorded files with their sha256, and every reported result was produced from those files, so no result changes. See `docs/decisions.md`, 2026-11-22, "M10 part 3: what was measured — R6 fine-tuning repeatability on three platforms, item C2 with the Linux-only runtime, and the end-to-end item E (no decision about the tolerance)".
 
 **A judgement, not a result.** With two rankers that cannot be told apart (§10.7), the system keeps LambdaMART because it needs less memory (2.94–3.14 GB against 8.98–10.29 GB per process, under a budget of 12 GB) and because its seed-to-seed variation on V is smaller (a range of 0.07% against 0.24%).
+
+---
+
+## 11. Stage 3: the system run every week, in a container and in the cloud
+
+This section was added on 2026-11-23. It covers milestones M10–M15, whose design and full record are `docs/mlops.md` and the entries of 2026-11-21 to 2026-11-23 in `docs/decisions.md`. **The system of §2 is unchanged: no model, feature, locked configuration, lock file or earlier result was modified.** Stage 3 changes how the system runs, not what it computes. The tables behind every number are named below it; they are `results/m10_calibration/`, `results/m12_replay/`, `results/m13_cloud/` and `results/m14_serving/`.
+
+### 11.1 What stage 3 is, and what it is not
+
+Stages 1 and 2 are a sequence of scripts started by hand on one laptop. Stage 3 runs the same system as it would run in production:
+
+- **every week, as one command**: a *tick* closes last week (scores its predictions, builds its training sample, updates the Two-Tower model) and opens the next (recall, features, Ranker, Top-12 for every customer);
+- **in a container**, the same image on the laptop, in CI and in the cloud, with the system libraries that can change a result pinned;
+- **on a schedule**, as a Cloud Run job started by Cloud Scheduler;
+- **with versioned inputs and recorded runs**: DVC for the data, a manifest per run (commit, image digest, inputs, outputs, metrics, timings, peak memory), MLflow as a local view;
+- **with checks that stop it**: the stop conditions that already existed in the code, wired into one driver;
+- **with a serving endpoint** that looks up the weekly Top-12, and **alerts** that reach a mailbox.
+
+What it is not:
+
+- **There is no live traffic.** The data end on 2020-09-22. "Every week" is a **simulated clock**: the pipeline is given a date and behaves as if that date were today. By construction a tick can read only purchases from before its date: its first step writes exactly those rows into the tick's own folder, and every later step reads that file.
+- **It is not a new evaluation.** The weeks that were replayed are V1–V4 and T1–T4, which stage 1 already used. Matching their records shows that the pipeline reproduces the system; it says nothing new about how good the system is (§11.12).
+- **Nothing was selected or tuned in stage 3**: no hyperparameter search, no change after a result. The monitoring thresholds and the acceptance rule were fixed and recorded before the runs they judge.
+
+### 11.2 Architecture
+
+```mermaid
+flowchart LR
+    subgraph Dev["Laptop"]
+        G["git repository"]
+        ML["MLflow UI (local view)"]
+    end
+    subgraph GH["GitHub Actions"]
+        CI["every push: image, lint, tests"]
+        CD["on a tag: build, push, deploy"]
+    end
+    subgraph GCP["Google Cloud, one region"]
+        AR["Artifact Registry<br/>two images"]
+        SCH["Cloud Scheduler<br/>weekly, paused"]
+        JOB["Cloud Run job<br/>the weekly tick"]
+        subgraph GCS["one bucket"]
+            IN["inputs/<br/>data, bootstrap state"]
+            ST["pipeline/<br/>state, models, prediction sets,<br/>run manifests, current pointer"]
+            DVC["dvc/<br/>DVC remote"]
+        end
+        SVC["Cloud Run service<br/>recommendation API"]
+        MON["Cloud Logging and Monitoring<br/>alert policies, email"]
+    end
+    G --> CI
+    G --> CD
+    CD -- "Workload Identity Federation, no key" --> AR
+    CD --> JOB
+    CD --> SVC
+    SCH --> JOB
+    AR --> JOB
+    AR --> SVC
+    IN --> JOB
+    JOB --> ST
+    ST -- "read-only" --> SVC
+    JOB --> MON
+    SVC --> MON
+    ST -- "small records" --> ML
+```
+
+| Component | What it is for |
+|---|---|
+| The pipeline image | One container image for the laptop, CI and the cloud. Python packages come from `uv.lock`; the base image is pinned by digest and the OpenMP runtime LightGBM uses by package version. It carries its commit and a hash of its code tree, and refuses to run if the code inside differs |
+| Cloud Run job | Runs one tick to completion: 6 vCPU, 24 GiB, no automatic retry. Billed per second while it runs |
+| Cloud Scheduler job | Starts the job with the same request every week; the pipeline takes the date from its own state. It is paused: the replay's weeks are simulated |
+| The bucket | Three prefixes, mounted into the job as folders: the inputs (read-only), the pipeline's state, and the DVC remote (never mounted). The pipeline reads and writes files and has no cloud dependency |
+| The state | A folder per week with every step's outputs, a folder per prediction set, a manifest per run, and one pointer file, `state/current.json`, that names the prediction set being served |
+| Cloud Run service | Looks up a customer's Top-12 in the set the pointer names. Its own small image (70 MB), minimum instances 0, authenticated calls only, the state mounted read-only |
+| Alert policies | Four match a structured log line each (a stopped tick, a failed input-data check, a quality alert, a prediction set that cannot be loaded); one matches a failed execution of the job. One email channel |
+| GitHub Actions | CI builds the x86-64 image and runs lint and both test suites inside it on every push. A tag builds both images and updates the job and the service to the new digests. No key is stored: GitHub proves its identity to Google Cloud with a short-lived token (Workload Identity Federation) |
+| DVC and MLflow | DVC tracks the inputs (38 files, 6.2 GB) and git holds a manifest with their sha256. MLflow is a **local view** over the run manifests and result tables; nothing reads it to decide anything |
+
+Five service accounts exist, each with only the roles it needs (the runtime accounts of the job and of the service, the scheduler's, the deployer's and the operator's); the owner of the project alone changes access rights. No key file exists and nothing is public (`infra/README.md`).
+
+### 11.3 The weekly tick
+
+A tick is called with an anchor date `a`, the first day of the week to predict. Labels of a week exist only after the week has ended, so a week's predictions are scored by the next tick.
+
+| Half | Step | What it does | What stops the tick |
+|---|---|---|---|
+| Close the week before `a` | C1 ingest | Writes the purchases before `a` into the tick's folder | Row count of the new week outside 50%–200% of the mean of the previous 4 weeks; a wrong date range |
+| | C2 evaluate | Scores last week's published Top-12: recall of each channel, union recall, MAP@12, the RRF baseline | — (quality flags only) |
+| | C3 sample | Builds last week's Ranker training sample | Implausible row counts |
+| | C4 fine-tune R6 | Advances the Two-Tower chain by one week | A previous model with another sha256; a loss above the recorded limit |
+| Open the week of `a` | O1 recall | R1–R6 candidates | Schema validation; scores that are not the dot products of the saved vectors |
+| | O2 features | The 71 features | Feature rows ≠ deduplicated candidates; a duplicate key |
+| | O3 train | LambdaMART on the last 4 closed weeks, locked configuration | The checks of the locked entry point |
+| | O4 score | Top-12 per customer | A customer without 12 distinct valid articles |
+| | O5 publish | Writes the prediction set and its serving form, then switches the pointer | Any earlier failure: the pointer moves only after everything passed |
+
+Every step is one process and writes one folder; a step's output appears only when the step ended without an error, and an existing output is never overwritten. Running the same command again skips the finished steps, so a stopped tick is resumed, and a tick refuses to start if the tick before it has not finished. Two modes: `eval` predicts only for the customers who bought in the week (comparable with the stage-1 records) and `serve` for all 1,371,980 customers (what the endpoint serves), in 20 shards.
+
+**The replay**: eight `eval` ticks, V1 … T4, then one `serve` tick at 2020-09-23, the week after the data end. It ran twice: in the arm64 container on the laptop (M12) and on Cloud Run, x86-64 (M13).
+
+### 11.4 Acceptance across environments
+
+**The rule.** The stage-1 records made on the laptop (Apple silicon, macOS) are the reference. Another operating system, CPU, OpenMP runtime and BLAS change the order of floating-point sums, so a container result is not bit-identical to the laptop, and bit-level reproduction is not the goal. A result is accepted when the relative difference |result − record| / record is **at most 1.0%** for each of: the recall of a channel in a week, the union recall of a week, MAP@12 of a week, and the pooled MAP@12 over the replayed weeks; and when two structural checks pass in every tick (the feature rows equal the deduplicated candidates of the same run; no key repeats). The rule was decided by the user on 2026-11-22, after a calibration of one week (V4) in the arm64 container whose largest difference on any acceptance quantity was 0.048%, and before either replay; it was not changed afterwards. It is an engineering threshold, not a statistical test: for scale, LambdaMART varies by 0.07% across seeds on V (§10.4).
+
+**Result: every acceptance quantity is inside 1.0% on both platforms** (65 quantities each: six channels, the union and MAP@12 in eight weeks, and the pooled MAP@12), and both structural checks pass in all nine ticks of each replay. Differences are signed, (run − record) / record.
+
+| Week | MAP@12, stage-1 record | arm64 container | Difference | Cloud Run, x86-64 | Difference | Union recall: arm64, Cloud Run |
+|---|---|---|---|---|---|---|
+| V1 | 0.030112 | 0.030111 | −0.0039% | 0.030108 | −0.0134% | +0.0047%, +0.0047% |
+| V2 | 0.031332 | 0.031167 | −0.5291% | 0.031275 | −0.1841% | +0.0106%, −0.0038% |
+| V3 | 0.035029 | 0.035153 | +0.3533% | 0.035155 | +0.3588% | +0.0216%, +0.0132% |
+| V4 | 0.034850 | 0.034911 | +0.1757% | 0.034694 | −0.4459% | −0.0039%, −0.0281% |
+| T1 | 0.034960 | 0.035163 | +0.5801% | 0.034968 | +0.0229% | −0.0266%, −0.0139% |
+| T2 | 0.040270 | 0.040388 | +0.2915% | 0.040399 | +0.3191% | −0.0056%, −0.0031% |
+| T3 | 0.039673 | 0.039737 | +0.1621% | 0.039617 | −0.1398% | −0.0147%, −0.0127% |
+| T4 | 0.042435 | 0.042123 | −0.7358% | 0.042095 | −0.8025% | −0.0084%, −0.0083% |
+| **Pooled, 8 weeks** | **0.035933** | **0.035948** | **+0.0418%** | **0.035893** | **−0.1118%** | |
+
+Sources: `results/m12_replay/comparison.csv`, `results/m13_cloud/comparison.csv`; the records are `results/m6_candidates.csv` and `results/v_phase_metrics.csv` for V1–V4 and the M8 tables for T1–T4.
+
+- **Recall.** R1–R4 equal the record in every week on both platforms. The largest difference of a channel's recall is 0.040% in the arm64 container (R6, T3) and 0.075% on Cloud Run (R6, V4); the largest of the union recall is 0.027% and 0.028%.
+- **MAP@12 differs more than recall, and its sign changes from week to week** (arm64: five weeks above the record, three below; Cloud Run: three above, five below). From V2 on a week's Ranker is trained on sample files the replay made itself, so it is another model than the laptop's, not the same model with rounding differences. V1, whose four training weeks are the frozen stage-1 samples, differs by 0.004% and 0.013%.
+- **T4 is the largest difference on both platforms and is negative on both**: 0.042123 in the arm64 container and 0.042095 on Cloud Run against 0.042435, −0.74% and −0.80%. It is inside the tolerance and was not investigated (§11.12).
+- **x86-64 was calibrated before its replay**: two ticks in a separate state measured V1 (recall of R5 +0.0113%, union recall +0.0047%, MAP@12 −0.0134%, every other channel equal to the record), and only then was the platform accepted (`results/m13_cloud/calibration/`).
+- **Reported, not judged** (arm64 only, because it needs the large files of both sides on one machine): the share of recorded candidate pairs of R6 that are present falls from 99.77% after one weekly update to 99.44% after eight, while its recall stays within 0.04% of the record; the `serve` tick's Top-12 overlaps the saved Kaggle prediction set of §4.6 by 87.8% on average, with the same first article for 82.1% of the customers (`results/m12_replay/serve_overlap.csv`).
+
+### 11.5 What the monitoring flags showed
+
+The rules were fixed by the user before the first replay tick (`configs/m12_monitoring.yaml`) and not changed afterwards. Same-week rules need no labels (input rows, feature drift, output signals); labelled rules arrive one tick late (a channel's recall more than 10% below its mean of the previous 4 weeks; union recall below 24%; the Ranker not above the RRF baseline). A labelled flag in 3 consecutive weeks is an alert. **No flag changes a configuration.**
+
+Both replays recorded 1,323 findings, **5 flags and no alert**, and they are the same five (`results/m12_replay/monitoring.csv`, `results/m13_cloud/monitoring.csv`):
+
+| Tick | Rule | Subject | Week judged | Value | Mean of the 4 weeks before |
+|---|---|---|---|---|---|
+| 2020-08-05 | channel recall more than 10% below | R2 | V1 | 0.0387 | 0.0448 (F1–F4) |
+| 2020-08-26 | output signal more than 25% away | share of recommendations among the 100 most popular articles | T1 | 0.509 (arm64), 0.517 (Cloud Run) | 0.371 |
+| 2020-09-02 | channel recall more than 10% below | R3 | T1 | 0.0299 | 0.0341 |
+| 2020-09-02 | channel recall more than 10% below | R4 | T1 | 0.0803 | 0.0904 |
+| 2020-09-02 | channel recall more than 10% below | R5 | T1 | 0.0841 | 0.1010 |
+
+No flag repeated in the following week. The union recall stayed above 24% and the Ranker above the RRF baseline in every week.
+
+**What they showed about the change from the V weeks to the T weeks.** The four flags of T1 are the monitoring's view of the shift that §5 describes. In T1 the three channels that rely on a customer's history were flagged together (the stage-1 records show the same, §6.3), and in the same tick the recommendations moved towards the popular articles: their share among the 100 most popular articles of the week is 0.34 to 0.39 in the four V weeks and 0.48 to 0.51 in the four T weeks (arm64 replay), while the recall of the popularity channel R1 is 0.078 to 0.110 in V and 0.112 to 0.128 in T. The hit value (the summed prices of recommended articles that were bought, tracked without a threshold) rises from 400–488 in V to 605–672 in T. This is consistent with §5.2 (purchases are more concentrated in the T weeks); it is a description of the weeks, not a tested cause. The flags changed nothing, and the rule that would have sent an email (the same flag in three weeks) was not met.
+
+### 11.6 The serving endpoint
+
+The pipeline precomputes the Top-12 of every customer once a week; the endpoint only looks it up. Ranking at request time would need two years of aggregates and six channels per request, for a system that changes once a week by design; the trade-off is that a customer's new purchase changes nothing until the next weekly run.
+
+- `GET /v1/recommendations/{customer_id}` returns 12 article ids, the prediction set (anchor and model version) and `source`: `ranker`, or `fallback` for a customer who is not in the set. Identifiers are the original ones of the dataset.
+- **Unknown customers** get the popularity list of R1 for the "age missing" bucket of the same week, read from the tick's own R1 output (no second computation).
+- The service loads the set the pointer names when it starts, checks the pointer every 60 seconds, and switches to a new set without a restart; a set that fails its checksums leaves the old one in place and writes an alert line.
+
+Measured on 2026-11-23 on Cloud Run (1 vCPU, 1 GiB; `results/m14_serving/probe_summary.csv`), with synthetic requests from a laptop on another continent over one kept-alive connection. The served set is the `serve` set of the Cloud Run replay: 1,371,980 customers × 12 articles.
+
+| Quantity | Measured |
+|---|---|
+| Cold start, as the laptop sees it (first request after scale to zero) | 5.98 s and 6.31 s |
+| Cold start, inside the service | 5.4 s and 5.8 s, of which 2.3 s and 2.4 s are reading and checking the 155 MB of the set |
+| Latency when warm, as the service logs it | p50 0.47 ms, p95 0.77 ms (n = 1,998); p50 0.51 ms, p95 0.83 ms (n = 500) |
+| Latency when warm, as the laptop sees it | p50 211 ms, p95 236 ms (n = 1,999); p50 211 ms, p95 239 ms (n = 499) |
+| Memory of the instance | 0.19 GiB of 1 GiB |
+| Known customers | 1,870 of 1,870 answers equal the customer's rows of the prediction file |
+| Unknown customers | 630 of 630 answers equal the 12 best articles of the "age missing" bucket in R1's score table |
+
+The laptop's latency is the network between the laptop and the region; the lookup itself is under a millisecond. The expected answers were derived on the laptop from the prediction file and R1's score table, not from the form the service loads. **The requests came one after another over one connection: nothing here is a load test** (§11.12).
+
+### 11.7 Rollback drill
+
+Rollback is one command that points `state/current.json` at another published prediction set. A target is refused unless it exists, was published, its prediction file has the recorded sha256 and its serving form loads with every check.
+
+The replay left one `serve` set, so the drill rolled back to the `eval` set of 2020-09-16 (68,984 customers; everyone else is unknown for it) (`results/m14_serving/rollback_drill.csv`, `pointer_moves.csv`):
+
+| Step | Result |
+|---|---|
+| Roll back | The service had loaded the older set **41 seconds** after the pointer moved, on the same instance |
+| Check | 400 requests against the older set (300 of its customers, 100 unknown ids): 0 not as expected |
+| Roll forward | The first answer from the newer set came **at most 59 seconds** after the pointer moved; no request failed in between |
+| Afterwards | The pointer file is byte-identical to the one the pipeline wrote |
+
+### 11.8 Alert drills
+
+Each kind of alert was provoked once, in a state of its own so that the replay's state was not touched, and every line was labelled as provoked (`results/m14_serving/alert_drills.csv`). The drills use V weeks only; no T label was read.
+
+| Alert | How it was provoked | Log line to incident |
+|---|---|---|
+| A failed step | A tick whose inputs' metadata file holds another config hash: the existing check of the first step fails | 26 s |
+| A failed input-data check | A tick whose transactions table keeps 30% of the rows of the week before the anchor (89,841 against a mean of 357,762 over the previous 4 weeks) | 57 s |
+| A quality alert | A finished tick run again in a copy of its state with a doctored flag history, so that a real recall becomes the third flagged week in a row | 53 s |
+| A prediction set the service cannot load | A temporary copy of the service whose pointer was moved to a set with a damaged file; it kept serving the older set | 69 s |
+| A failed execution of the job | The two drill executions that ended as failed | 4 min 2 s and 4 min 36 s after the execution ended (the delay of the metric) |
+| A budget threshold | **Not provoked.** The billing budget alert was set up by the user before the first job ran and was not changed; it cannot be read with the operator's access, so no record of this project shows it | |
+
+Each policy opened an incident (read from the Monitoring API), and **the user confirmed on 2026-11-23 that the emails arrived**. This shows that the path from a failure to a mailbox works; it does not show how the alerting behaves over months (§11.12).
+
+### 11.9 Deployment by tag
+
+A tag `deploy-*` or a version tag builds the pipeline image and the service image, pushes both, and updates the job and the service to the two digests; then it reads both back and compares. It stores no key and changes images only: the job and the service themselves are created once by the operator. Two deployments were made on 2026-11-23, in **2 min 45 s** and **2 min 36 s**; the second one deployed a fix found in the cloud (Cloud Run's front end answers the path `/healthz` itself, so the service got a second health route). A deployment is rolled back by tagging the earlier commit.
+
+### 11.10 Run times and cost, next to the estimates
+
+Estimates are those of `docs/mlops.md` §12, written on 2026-11-21 before anything ran. Cost is run time × list prices (0.000018 USD per vCPU-second, 0.000002 USD per GiB-second for jobs), without the free tier; **the bill itself was not read**.
+
+| Item | Estimate | Measured |
+|---|---|---|
+| One `eval` tick, arm64 container on the laptop | — | 14 to 15 minutes (840 to 906 s); highest true peak of a process 7.25 GB |
+| One `eval` tick on Cloud Run | 30 minutes, about 0.3 USD | 25 to 29 minutes, 0.24 to 0.28 USD; peak 7.53 GB |
+| The `serve` tick on the laptop | — | 86 minutes; peak 6.15 GB |
+| The `serve` tick on Cloud Run | 2 hours, about 1.1 USD | 2 h 39 min, 1.49 USD; peak 6.35 GB |
+| Calibration of x86-64 | about one tick, about 0.3 USD | two ticks and a smoke test, 0.55 USD |
+| Replay of 8 weeks in the cloud | two runs, about 4.6 USD | one run, 3.6 hours, 2.00 USD |
+| M13 in all (12 executions, 7.2 hours) | | 4.04 USD |
+| M14 in all (7 executions, 637 s; the service) | "small" | about 0.11 USD |
+| **Stage 3 compute in all** | **about 10 USD, under 15 USD** | **about 4.15 USD** |
+| Storage | 20 GB, under 1 USD for two months | 35.2 GiB kept after the close, about 0.70 USD a month |
+
+Sources: `results/m12_replay/steps.csv`, `results/m13_cloud/executions.csv`, `results/m14_serving/executions.csv`. Inside the pipeline an `eval` tick takes 1,473 to 1,615 s on Cloud Run against 840 to 906 s in the laptop's container: Ranker training is the largest difference (2.2 times as long), and the steps that mostly move bytes pay for the mounted bucket (copying the transactions takes 61 to 80 s against 2 s on a local disk).
+
+### 11.11 Runbook
+
+The names of the cloud project are only in `infra/.env`, which git ignores. `infra/setup.sh` and `infra/teardown.sh` are run by the owner of the project; everything else as an operator account, by impersonation, without a key.
+
+| Task | Command |
+|---|---|
+| Run a tick on the laptop (container) | `make image-weekly ARGS="--anchor 2020-07-29 --mode eval"` |
+| Run a tick in the cloud | `bash infra/operate.sh execute scripts/weekly.py --anchor 2020-07-29 --mode eval`; the scheduler's form is `--next`, which takes the anchor from the state |
+| Resume a stopped tick | Read the reason in the run manifest (`runs/<run-id>/manifest.json`) or the alert line, fix the cause, and run **the same command** again: finished steps are skipped. Nothing in the state is deleted or edited to make a tick pass |
+| Roll back the served set | `bash infra/operate.sh rollback previous`; forward again with `rollback next` |
+| Deploy | `git tag deploy-<name> <commit> && git push origin deploy-<name>` |
+| Roll back a deployment | Tag the earlier commit, or `bash infra/operate.sh update-job` / `update-service` with the earlier image digest |
+| Call the service | `bash infra/operate.sh call /v1/recommendations/<customer id>`; health: `call /v1/health` |
+| See alerts | `bash infra/operate.sh alert-lines`, `bash infra/operate.sh incidents` |
+| Compare a replay with the records | `make image-replay-compare` (laptop); for the cloud, `bash infra/operate.sh download-records` and `scripts/m12_replay_compare.py --platform linux-amd64 --without-candidates` |
+| Tear down | `bash infra/teardown.sh` (owner): removes the job, the service, the scheduler job, the images, the accounts and the alerting; with `--delete-objects` also the pipeline's prefixes. It never deletes the bucket or the DVC data |
+
+### 11.12 Limitations
+
+1. **No live traffic, and no evidence of business impact.** The clock is simulated and there are no users. The purchases in the data were made on H&M's own site under H&M's own recommendations; these were never shown to anyone. MAP@12 and the hit value measure how well purchases were predicted, not revenue caused by the system. Only an online experiment could measure that; its design is written and not implemented (`docs/stage3_designs.md`).
+2. **The replay is a verification, not a new evaluation.** V1–V4 took part in selecting the Ranker and T1–T4 were already used for the final evaluation (§7.2 item 5). **T labels were read again for the replay, under the user's approval of 2026-11-21**: by the closing steps, by the `eval` query lists, and for the comparison with the records; each replay has 12 recorded reads of T weeks (`label_access.csv` in `results/m12_replay/` and `results/m13_cloud/`). Nothing was selected or tuned with them.
+3. **MAP@12 of T4 was lower than the record on both platforms**: 0.042123 in the arm64 container and 0.042095 on Cloud Run against 0.042435 (−0.74% and −0.80%). Both are inside the 1.0% tolerance, and the cause was not investigated. T4's Ranker is trained on four weeks of the replay's own samples and its candidates come from eight chained Two-Tower updates; which of the two carries the difference is not known.
+4. **A week opened in `serve` mode cannot be closed.** Closing a week needs the features of the customers who bought, and a `serve` tick removes each shard's features after scoring to bound its files. The replay ends with its one `serve` tick, so it does not meet this; a pipeline that serves every week needs another way to build that week's training sample.
+5. **R6 fine-tuning is not repeatable with the stage-1 settings.** Two fine-tunes of the same data in fresh processes give different weights on all three platforms tested, the laptop included (`results/m10_calibration/r6_repeatability.csv`), which contradicts a statement made in stage 1. A stage-1 chain model cannot be assumed to be reproducible by running its fine-tune again; the stage-1 results rest on the recorded model files and their sha256. On Linux the pipeline fine-tunes with a deterministic setting, which makes two runs on one machine identical; two executions on Cloud Run still need not be, because they need not run on the same CPU.
+6. **Not measured in the cloud**: the pair overlap of the candidates with the records, and the overlap of the `serve` set with the Kaggle set. Both need large files of both sides on one machine; they were measured for the arm64 replay only (§11.4).
+7. **Alerting was shown by provoked drills and eight replayed weeks**, not by months of operation. Nothing is known about missed alerts or noise. The budget alert was not provoked. Policies on the service's error rate and latency were not built.
+8. **The platform's request log contains the customer id.** The service's own log lines hold no customer id, but Cloud Run's request log records the URL, and the id is part of it. The ids of this dataset are hashes; with real customer ids this would have to change (an id in the request body, or an exclusion in logging).
+9. **One region, one instance, no failover, no load test.** The latency numbers are for single requests in sequence. The service keeps 1 GiB although the set needs 0.19 GiB, because a switch between two full sets holds both for a moment and that could not be measured with one `serve` set.
+10. **MLflow is a local view and its registry a mirror.** No tracking server runs; the result tables and the run manifests are the record, and what is deployed is decided by the pointer file, not by the registry.
+11. **Cost figures are for eight replayed weeks and one `serve` tick**, computed from run times and list prices, not for a year of weekly runs with growing data, and the bill was not read.
+12. **After a rollback, the next tick scores the set that was published for the week, not the older set that was served during the rollback.**
+
+### 11.13 Where the cloud stands
+
+By the user's decision of 2026-11-23 the cloud is **not torn down at the close**: it is kept as a small live demo and torn down later with `infra/teardown.sh`. This replaces the original goal that no billable resource remains. What holds instead: nothing bills by the hour (no instance is running, the service scales to zero, the scheduler job is paused), the budget alert stays, and the cost at rest is recorded: 35.2 GiB of objects, about 0.70 USD a month, and the images, at most 0.28 USD a month (`infra/README.md`). The calibration state and the drill states (8.7 GiB) were deleted at the close; their records are in `results/`.
+
+The designs that stage 3 wrote and did not implement (an online experiment, online metrics, a rule for re-selecting hyperparameters, and what a production version would change) are in `docs/stage3_designs.md`.
