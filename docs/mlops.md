@@ -5,6 +5,7 @@
 > **M11 (versioning) was closed on 2026-11-22**: §7 describes DVC, the bootstrap state, the run manifest and the MLflow view as they were built, and S2 states the verification that was used.
 > **M12 (the weekly pipeline, local) was closed on 2026-11-22**: §6 and §7 describe the pipeline as it was built, §8.5 holds what the replay of eight weeks and one `serve` tick measured, and §10 the monitoring rules that were fixed before the first tick.
 > **M13 (the pipeline on Cloud Run) was closed on 2026-11-23**: the job, its storage and its trigger are described as they were built (§5, §6.4, §7.2, §11), §8.6 holds the calibration of x86-64 and what the replay on Cloud Run measured, and §12 the measured cost and what is left in the project.
+> **M14 (serving, rollback, alerting, deployment on a tag) was built and measured on 2026-11-23**: §9.1 describes the service as built and holds what was measured, §10.1 the alert lines, the alert policies and the provoked alerts, §11 the deploy workflow, and §12 the cost and what is left in the project.
 > Cloud limits and prices quoted below were read from the Cloud Run quota and pricing pages on 2026-11-21. Everything marked "estimate" has to be measured before it is relied on.
 
 ---
@@ -25,9 +26,9 @@ The data end on 2020-09-22, so there is no live traffic. "Every week" is therefo
 | S2 | Versioned data and recorded runs | On a clean clone, `dvc pull` restores every pipeline input and the sha256 values match the records; every pipeline run is visible in MLflow with the same metrics as the result tables. **Met on 2026-11-22 for what exists before the pipeline** (§7.4): the remote holds every tracked file; a clean clone pulled `data/processed` and the category code table and their sha256 equal the data manifest; every metric of the MLflow view equals its source table. The view held imported records only at that time. **The rest was met in M12** (§8.5): the nine ticks of the replay are nine pipeline runs in the view, the model registry mirrors 17 model versions, and `make mlflow-check` reports 0 differences over 54 runs and 1,659 metric values |
 | S3 | A weekly pipeline that is one command | `weekly --anchor DATE` runs a whole week, stops at the first failed check with the reason, and can be resumed; each of the eight replayed weeks, and their pooled MAP@12, meets the acceptance of §8.3 (relative difference at most 1.0% on the four quantities; the two structural checks pass). **Met on 2026-11-22 in the arm64 container** (§8.5): the largest difference of a weekly quantity is 0.74% (MAP@12 of T4), the pooled MAP@12 differs by +0.042%, and both structural checks pass in all nine ticks; stopping and resuming are shown by the tests and by the first tick of the replay, which was resumed |
 | S4 | The pipeline runs on GCP on a schedule | A run triggered by Cloud Scheduler completes on Cloud Run Jobs, reads and writes only Cloud Storage, and meets the acceptance of §8.3; its run time and cost are recorded. **Met on 2026-11-22** (§8.6): the tick of V2 was started by Cloud Scheduler and completed on Cloud Run Jobs; every tick read its inputs from the bucket and wrote only into it; all eight weeks and the pooled MAP@12 are inside §8.3 (largest weekly difference 0.80%, MAP@12 of T4; pooled −0.11%); run time and cost of every execution are in `results/m13_cloud/executions.csv` |
-| S5 | A serving endpoint | The endpoint returns the Top-12 of a customer from the latest published prediction set, falls back for unknown customers, and has measured cold-start and p95 latency |
-| S6 | Monitoring and alerts | A failed step, a failed data check, a quality flag and a budget threshold each produce an alert; this is shown by provoking each one once |
-| S7 | CI and CD | Every push runs lint, tests and an image build; a version tag builds, pushes and deploys without stored keys. From M13 a tag `image-*` builds and pushes the image without a stored key (§11); deploying on a tag is M14 |
+| S5 | A serving endpoint | The endpoint returns the Top-12 of a customer from the latest published prediction set, falls back for unknown customers, and has measured cold-start and p95 latency. **Met on 2026-11-23** (§9.1): the service on Cloud Run answered 2,000 synthetic requests as the prediction set and the fallback list say (0 differences); the first request after scale to zero took 5.98 s and 6.31 s; warm p95 is 0.77 ms as the service measures it and 236 ms as a laptop on another continent sees it |
+| S6 | Monitoring and alerts | A failed step, a failed data check, a quality flag and a budget threshold each produce an alert; this is shown by provoking each one once. **Shown on 2026-11-23** (§10.1) for a failed step, a failed input-data check, a quality alert and a failed load of a prediction set: each wrote its log line and its alert policy opened an incident; a failed execution of the job opened one too. **The budget threshold was not provoked**: the budget and its alerts exist since before M13 (§12). Whether the emails arrived is confirmed by the user |
+| S7 | CI and CD | Every push runs lint, tests and an image build; a version tag builds, pushes and deploys without stored keys. From M13 a tag `image-*` builds and pushes the image without a stored key (§11); deploying on a tag is M14. **Met on 2026-11-23** (§11): a tag `deploy-*` built and pushed both images and updated the job and the service to the two digests, twice (2 min 45 s and 2 min 36 s), with Workload Identity Federation and no stored key |
 | S8 | It stays cheap and leaves nothing behind | Total spend stays under the budget of §12; at the end no billable resource remains |
 
 ## 3. Non-goals
@@ -118,6 +119,13 @@ flowchart LR
 - **Five identities**: the job's runtime account (objects of the bucket, writing logs), the scheduler account (start a job), the deployer account (push images), the operator account (create and run the job and the scheduler job, read logs and metrics; used by impersonation, without a key), and the owner, who alone changes IAM (`infra/setup.sh`). No key file exists and nothing is public.
 - **Not built in M13**: the serving endpoint, alert policies and deployment on a tag (M14).
 
+**As built in M14** (`infra/`, `infra/README.md`; §9.1, §10.1, §11):
+
+- **One Cloud Run service** runs the service's own image (§9.1): 1 vCPU, 1 GiB, minimum instances 0, maximum 2, authenticated calls only, and ONE volume: the state prefix `pipeline/`, read-only. It is created by the operator and gets its image from the deploy workflow.
+- **A sixth identity**: the runtime account of the service, which can read objects of the bucket and write logs. The deployer account may now also update the job and the service (`roles/run.developer`) and attach their two runtime accounts; the operator may create the service and call it.
+- **One email notification channel and five alert policies** (§10.1), created by `infra/setup.sh`.
+- **A drill prefix** `pipeline-drill/` in the bucket: the states of the provoked alerts. The job and the service of the drills were deleted after them.
+
 ## 6. The weekly pipeline
 
 ### 6.1 One tick
@@ -197,6 +205,11 @@ Every check in the right-hand column already exists in the code as a stop condit
 - **`--next`** takes the anchor from `state/current.json`: one week after the current prediction set, or the first tick if nothing is published. A tick that stopped did not move the pointer, so the same request resumes it. This is what the scheduler runs.
 - **A calibration tick** (`--calibration`) writes everything under a state of its own next to the state (`pipeline-calibration/`) and gets the Ranker configuration in calibration mode (§8.3). Its run manifest carries the metric `tick/calibration`.
 - **A run manifest names a file by its key in the bucket** (`inputs/data/processed/...`, `pipeline/weeks/...`) and holds the image digest of the job.
+
+**Changed in M14** (`hmrec.weekly.rollback`, `hmrec.weekly.state.next_tick_anchor`):
+
+- **`state/current.json` has a second writer: the rollback command** (§9.1). It points the file at another PUBLISHED prediction set and writes nothing else; step O5 stays the only writer that publishes.
+- **`--next` follows the latest published week, not a rolled-back pointer.** It walks from the pointer's week over the weeks that have a published marker, so the tick after a rollback is the one that was due anyway and its step O5 moves the pointer forward again. Without a rollback the answer is the one of M13. That tick closes the latest published week by scoring the set that was PUBLISHED for it, not the older set that was served during the rollback.
 
 ## 7. Data, state and run versioning
 
@@ -281,6 +294,8 @@ weeks/2020-08-05/                written by the tick at 2020-08-05 (it opens thi
   closed.json                    C2-C4 are done
   .staging/, .failed/            running and failed attempts of steps
 predictions/2020-08-05/          top.parquet (customer_idx, rank, article_idx), manifest.json
+  serving/                       M14: the same predictions as the service loads them (§9.1):
+                                 customer_ids.npy, top_articles.npy, article_ids.npy, serving.json
 runs/2020-08-05-eval-a1/         manifest.json, logs/{step}.log, failures/{step}.txt
 ```
 
@@ -658,6 +673,38 @@ Why not rank at request time: the features of one customer–article pair need a
 | Scaling | Minimum instances 0, a small maximum |
 | Measured in M14 | Cold-start time, p50 and p95 latency when warm, memory, using synthetic requests |
 
+### 9.1 As built and measured in M14
+
+**The service** (`src/hmrec/serving/`, FastAPI on uvicorn; `Dockerfile.serving`):
+
+- `GET /v1/recommendations/{customer_id}` returns `{"articles": [12 ids], "prediction_set": {"anchor", "model_version"}, "source": "ranker" | "fallback"}`. The ids are the original customer and article ids of the dataset. **The model version is the first 12 characters of the sha256 of the Ranker file** behind the set: the service reads no registry, and that sha256 is what the pointer and the run manifest record.
+- **Health: `GET /healthz` and `GET /v1/health`, the same answer.** On a Cloud Run `run.app` address Google's front end answers `/healthz` itself with a 404 page and the request never reaches the container (found when the service was first called in the cloud). `/healthz` works wherever the server is reached directly; `/v1/health` is the route to call through Cloud Run.
+- **The serving form of a prediction set** (`hmrec.serving_set`): step O5 writes `predictions/{anchor}/serving/` next to the prediction file: the customer ids as bytes, sorted, so that a customer is found by binary search; the Top-12 as an int32 matrix of article positions; the article ids; and a record `serving.json` with the sha256, dtype and shape of each file, written last. Why a second form: the prediction set holds dense indexes and the id maps are inputs, not state; the service mounts only the state prefix and its image has no parquet reader. Loading checks every checksum.
+- **Unknown customers get R1's list for the "age missing" bucket of the same week, read from the tick's own output.** R1 gives every query the list of its customer's age bucket, so the R1 candidates of any query whose customer has no age ARE that bucket's list; its first 12 rows are stored in the serving record (`hmrec.weekly.serving_build`; in `serve` mode from the first shard with such a customer, 836 of them in the real set). Nothing is computed again. A week none of whose queries has such a customer stops O5.
+- **The sets published before M14** (the replay's) got their serving form once, with `scripts/m14_serving_set.py`, as one execution of the job each (81 s for the `serve` set, 117 s for the set of 2020-09-16); no step of a tick ran again.
+- **The pointer**: the service loads the set `state/current.json` names when it starts, before it accepts a request, and looks at the pointer every 60 seconds in a thread. A new set is loaded completely next to the old one and then swapped in. A set that fails to load leaves the old one in place and writes one alert line (§10.1); without any set the service answers 503.
+- **Logs**: one JSON line per request with the route's template, the status, the latency, the source and the prediction-set id. No customer id is in a line of the service, and uvicorn's access log is off. **Cloud Run's own request log holds the URL of a request and so the customer id** (a hash in this dataset); that log is the platform's and was not changed.
+- **The image** holds Python, numpy, FastAPI, uvicorn and five source files; no torch, LightGBM, polars or config. It uses the base image and uv of the pipeline image by the same digests and installs only the dependency group `serving`. **70 MB in the registry** (the pipeline image: 640 MB); 319 MB unpacked for arm64.
+- **Rollback** (`scripts/m14_rollback.py --to previous|next|DATE`; in the cloud `bash infra/operate.sh rollback ...`, one execution of the job, because the checksums are computed where the state is mounted): the pointer is rebuilt from the target set's own manifest. A target is refused unless it exists, was published, its prediction file has the recorded sha256 and its serving form loads with every check. A move is a row of `pointer_moves.csv`.
+
+**The service on Cloud Run** (`infra/operate.sh create-service`): 1 vCPU, 1 GiB, second-generation execution environment (a mounted bucket needs it), start-up CPU boost, minimum instances 0, maximum 2, authenticated calls only; the state prefix mounted read-only; a runtime account that can read objects and write logs.
+
+**Measured on 2026-11-23** with synthetic requests, authenticated as the operator, from a laptop on another continent, over one kept-alive HTTPS connection (`scripts/m14_probe_service.py`; tables `results/m14_serving/probe_summary.csv` and `probe_requests.csv`). Percentiles are nearest-rank. The served set is the `serve` set of the cloud replay: 1,371,980 customers × 12 articles, anchor 2020-09-23, model version `53a9bab5d2e6`.
+
+| Quantity | Measured | How |
+|---|---|---|
+| Cold start, as the laptop sees it | **5.98 s** and **6.31 s** | The first request after the service had no instance for several minutes (Cloud Monitoring's instance count was 0); it includes opening the connection |
+| Cold start, inside the service | **5.4 s** and **5.8 s** from "instance starting" to "ready": 3.1 s and 3.4 s until the server process runs (container, mount, imports), 2.3 s and 2.4 s to read and checksum the 155 MB of the set | The service's log of the two cold starts. The start at a deployment took 4.5 s |
+| Latency when warm, as the service logs it | **p50 0.47 ms, p95 0.77 ms** (n = 1,998; maximum 26 ms); second series p50 0.51 ms, p95 0.83 ms (n = 500) | Its own request lines for the two series (2 of the first 2,000 lines were not returned by the log query) |
+| Latency when warm, as the laptop sees it | **p50 211 ms, p95 236 ms** (n = 1,999; minimum 187 ms, maximum 1,088 ms); second series p50 211 ms, p95 239 ms (n = 499) | Almost all of it is the network between the laptop and the region: the lookup itself is under a millisecond |
+| Memory of the instance | **0.19 GiB** with the `serve` set (19% of the 1 GiB limit); 0.06 GiB with the set of 2020-09-16 (68,984 customers) | Cloud Monitoring, 99th percentile per minute, also during the two switches of the rollback drill |
+| A known customer | 1,500 of 1,500 answers (and 370 of 370 in the second series) equal the customer's rows of the prediction file, translated with the id maps; `source` is `ranker` | The expected answers are derived on the laptop from `top.parquet` (its sha256 equals the manifest's), not from the serving form |
+| An unknown customer | 500 of 500 answers (and 130 of 130 in the second series) equal the 12 best articles of the "age missing" bucket in R1's score table of the tick; `source` is `fallback` | Derived from `r1_bucket_scores.parquet`; the list is `0719530003 0854818005 0889550002 0762143011 0890022002 0448509014 0806131012 0862751001 0866731001 0871311002 0911870009 0919499001` |
+
+- **Memory: 1 GiB was kept.** The `serve` set needs 0.19 GiB, so 512 MiB (the smallest size of this execution environment) would hold it; but a switch between two full `serve` sets holds both for a moment (about 0.45 GiB by estimate), which was not measured, because the replay has one `serve` set. An idle service costs nothing at either size.
+- **Rollback drill** (`results/m14_serving/rollback_drill.csv`, `pointer_moves.csv`): the replay left ONE `serve` set, so the drill rolled back to the `eval` set of 2020-09-16, which holds the 68,984 buyers of that week; everyone else is an unknown customer for it. The pointer was replaced at 02:26:18 UTC (an execution of 27 s) and the service had loaded the older set 41 s later, on the same instance; 400 requests against it (300 of its customers, 100 unknown ids) were all as expected. Rolled forward at 02:35:17 (43 s); the first answer from the newer set came at most 59 s later, and no request failed in between. Afterwards `state/current.json` was byte-identical to the file step O5 had written.
+- **What this does not show**: load. The requests came one after another over one connection; nothing is known about concurrent traffic, about a second instance, or about latency inside the region (§16).
+
 ## 10. Monitoring and alerting
 
 Monitoring has two layers. Same-week signals need no labels and can alert as soon as a tick runs. Quality signals need the purchases of the predicted week, so they arrive one tick later, as in any system that predicts future purchases.
@@ -704,18 +751,40 @@ Monitoring has two layers. Same-week signals need no labels and can alert as soo
 - **No alert changes a configuration.** Re-selecting hyperparameters stays a human decision. M15 writes down a proposed rule for when to re-select; it is a design, not an implementation.
 - S6 is accepted by provoking each kind of alert once: a deliberately failing step, a corrupted input week, a quality flag forced in a replay, and a budget threshold set low.
 
+### 10.1 Alerting as built in M14, and the provoked alerts
+
+- **An alert is one structured log line** (`hmrec.structured_logs`): a JSON object with the fixed field `hmrec_alert` and one of four kinds. The driver writes `step_failed` for a tick that stopped, or `input_check_failed` when the input-data check of C1 stopped it (one line, not both), and `quality_alert` for every labelled flag that was raised in 3 consecutive weeks; the service writes `prediction_set_load_failed`. A line changes nothing: the rows of the monitoring table and the metric lines of the run manifest are as in M12, and the rules of `configs/m12_monitoring.yaml` are untouched.
+- **Five alert policies and one email channel** (`infra/setup.sh`, run by the owner): four policies match `jsonPayload.hmrec_alert` = one kind each (at most one notification in 5 minutes, an incident closes itself after 30 minutes); the fifth is a metric policy on executions of a Cloud Run job that ended as failed. The channel is the address `ALERT_EMAIL` of `infra/.env`.
+- **Not built**: policies on the service's 5xx rate and p95 latency (the table above lists them; the milestone's task named the five). The budget alert is the billing budget's own.
+
+**The provoked alerts** (2026-11-23; `results/m14_serving/alert_drills.csv`). Every drill ran in a state of its own under `pipeline-drill/`, with a job and a service of their own, so the replay's state was not touched; every line carries the note `provoked on purpose - alert drill of M14 - not a real failure` (`HMREC_ALERT_NOTE`). No T label was read: the weeks involved are V1 and V3.
+
+| Alert | How it was provoked | Log line (UTC) | Incident opened |
+|---|---|---|---|
+| A failed step | A tick at 2020-07-29 whose inputs hold a `metadata.json` with another config hash: the existing check of step C1 fails | `step_failed`, 02:02:19 | "hmrec: a tick stopped", 02:02:45 |
+| A failed input-data check | A tick at 2020-07-29 whose transactions table keeps 30% of the rows of the week before the anchor: 89,841 rows against a mean of 357,762 over the previous 4 weeks, below the 50% band | `input_check_failed`, 02:08:08 | "hmrec: the input data check stopped a tick", 02:09:05 |
+| A quality alert | The finished tick of 2020-08-19 run again in a copy of its state (every step is skipped) with a doctored history: the R3 recall of V1 and V2 multiplied by 1.5 and the R3 flag set in the records of the ticks that closed them. V3's real recall (0.03484) is then more than 10% below the mean (0.04353) for the third week in a row. The tick succeeded: a flag never stops one | `quality_alert`, 02:12:35 | "hmrec: a quality flag in 3 consecutive weeks", 02:13:28 |
+| A prediction set the service cannot load | A second, temporary service on a drill state: it served the set of 2020-09-16, then the pointer was moved to a set whose `top_articles.npy` had been replaced by a text file. The checksum failed and the service kept serving the older set | `prediction_set_load_failed`, 02:42:21 | "hmrec: the service could not load a prediction set", 02:43:30 |
+| A failed execution of the job | The two drill executions that ended as failed (02:02:27 and 02:08:15) | not a log line | "hmrec: an execution of the pipeline job failed", 02:06:29 and 02:12:51: four to five minutes after the execution ended, the delay of the metric |
+| A budget threshold | **Not provoked.** The budget of the project and its thresholds (20%, 50%, 80%, 100% of 50 USD) exist since before M13 and were not changed | | |
+
+- A log-line incident opened 26 to 69 seconds after its line. The incidents were read from the Monitoring API as the operator; **that the emails arrived is confirmed by the user**, not by a tool.
+- **What this does not show**: alerting over months of operation, a missed alert, or how often an alert would be noise (§16).
+
 ## 11. CI and CD
 
 | Trigger | What runs |
 |---|---|
 | Every push and pull request | Build the x86-64 image (not pushed to a registry); run `make lint` and the torch-side and LightGBM-side tests, in two processes, inside it |
 | A tag `image-*`, or a manual run (M13) | Build the x86-64 image as above, push it to Artifact Registry under the commit hash, publish its digest as a notice. The operator deploys the job from the digest |
-| A version tag (from M14) | Build the x86-64 image, push it to Artifact Registry, update the Cloud Run job and service to that digest |
+| A tag `deploy-*` or a version tag `v*`, or a manual run (M14) | Build the x86-64 pipeline image and the service image, push both to Artifact Registry, update the Cloud Run job and the Cloud Run service to the two digests |
 
 - GitHub authenticates to GCP with Workload Identity Federation, restricted to this repository; no service-account key exists.
 - Workflows use the minimum permissions and pin third-party actions by commit hash. The M10 workflow needs no secret at all.
 - **The image workflow as built in M13** (`.github/workflows/image.yml`): the permissions are `contents: read` and `id-token: write`; a provider of a workload identity pool accepts tokens of this one repository; they may act as a deployer account whose only role is writing to the one image repository. **The names of the project come from three repository secrets, not from the file and not from repository variables**: the log of a public repository is public, a secret is masked in it, and a variable would be printed in the head of every step. They are names, not credentials. Two images were built this way in M13 (the calibration image and the image with the platform record).
-- Rollback: redeploy the previous image digest; for data, point `current` back to the previous prediction set. Both are one command and are written in the runbook.
+- **The deploy workflow as built in M14** (`.github/workflows/deploy.yml`): the pipeline image is built exactly as CI builds it, the service image from `Dockerfile.serving`; both are pushed under the commit hash and their digests published as notices before anything is deployed. Then `gcloud run jobs update` (the image, and the digest in the job's environment, which every run manifest records) and `gcloud run services update` (the image; Cloud Run starts a new revision and moves the traffic when it is ready), and both are read back and compared with the digests of the run. **It changes images only**: the job and the service, with their mounts, accounts and limits, are created by the operator. It uses the four actions of the image workflow at the same commits, the permissions `contents: read` and `id-token: write`, **no new secret** (the region and the project id are parts of the image repository's name), and it keeps gcloud's output out of the public log unless a command fails.
+- **Two deployments on 2026-11-23**: tag `deploy-m14-1` (commit `d855a6a`; 2 min 45 s: the pipeline image 1 min 48 s from the cache of CI, the service image 10 s, the two updates 27 s) replaced Google's placeholder image in the new service and the image of the job; tag `deploy-m14-2` (commit `b6d2f37`; 2 min 36 s) brought the second health route. The pipeline image for the first serving sets had been built by the image workflow (tag `image-m14-1`), so that the sets existed before the service started.
+- Rollback: redeploy the previous image digest (the deploy workflow on the earlier commit, or `infra/operate.sh update-job` / `update-service` with the earlier digest); for data, point `current` back to the previous prediction set (§9.1). Both are one command and are written in the runbook.
 - Infrastructure is created by scripts of `gcloud` commands kept in `infra/`, with a matching teardown script (decision D7).
 
 ## 12. Security and cost
@@ -758,6 +827,22 @@ The free tier of Cloud Run (240,000 vCPU-seconds and 450,000 GiB-seconds per mon
 
 Nothing runs and nothing is billed by the hour. `infra/teardown.sh` removes all of it except the bucket and the DVC data; with `--delete-objects` also the three pipeline prefixes.
 
+**What M14 cost** (2026-11-23; list prices, without the free tier; the bill was not read). Seven executions of a Cloud Run job, 637 seconds in all (`results/m14_serving/executions.csv`): two serving sets (198 s), three alert drills (369 s), two pointer moves (70 s): **0.10 USD**. The service and the drill service were billed for about 450 seconds of instance time (Cloud Monitoring's billable instance time showed 333 seconds before the last series of about 110 seconds was in it; request-based billing, 0.000024 USD per vCPU-second and 0.0000025 USD per GiB-second for 1 vCPU and 1 GiB): **about 0.01 USD**. Three workflow runs on GitHub's runners cost nothing. Not in it: the storage of the new images and of the drill prefix (cents a month, below) and operations on the bucket. **About 0.11 USD of the 3 USD approved for the milestone.**
+
+**What exists in the project after M14, and what it costs at rest** (listed on 2026-11-23 after the last request):
+
+| Resource | State | Cost at rest |
+|---|---|---|
+| Cloud Run job (16 executions, none running) | idle | nothing |
+| Cloud Run service, minimum instances 0 | **no instance** | nothing while no request arrives |
+| Cloud Scheduler job, weekly | **paused** | nothing |
+| Artifact Registry: five pipeline images (635 to 640 MB each) and two service images (70 MB each); images share layers, so the stored size is smaller than the sum | kept | at most 0.3 USD a month if no layer were shared |
+| Bucket: `inputs/` 2.3 GiB, `pipeline/` 27.3 GiB (0.16 GiB of serving sets were added), `pipeline-calibration/` 5.4 GiB, `pipeline-drill/` 3.2 GiB, `dvc/` 5.6 GiB | kept | about 0.88 USD a month |
+| One email notification channel, five alert policies | enabled | nothing |
+| Four service accounts, one custom role, a workload identity pool and provider | kept | nothing |
+
+The job and the service of the drills were deleted. `infra/teardown.sh` removes everything above except the bucket and the DVC data; with `--delete-objects` also the pipeline's prefixes, the drill prefix included.
+
 ## 13. Milestones
 
 Local work first; nothing billable before M13 except a few cents of storage in M11.
@@ -768,7 +853,7 @@ Local work first; nothing billable before M13 except a few cents of storage in M
 | **M11 Versioning** | DVC set-up with a Cloud Storage remote; bootstrap state created and tracked; data manifest; run manifests (schema, writer, reader); local MLflow sync and check commands | S2 for what exists before the pipeline (§7.4). **Closed on 2026-11-22** | A GCP project, the budget alert, one bucket |
 | **M12 Weekly pipeline, local** | The `weekly` driver with both modes, the simulated clock, resume and checks; the sharded `serve` path brought into main; monitoring signals and thresholds of §10 fixed and recorded; replay of V1–T4 in `eval` mode and the `serve` tick inside the container; every tick writes a run manifest and is visible in MLflow (the rest of S2); the model registry mirror of §7.3 | S3, and the rest of S2. **Closed on 2026-11-22** (§8.5) | Nothing |
 | **M13 Cloud** | Image in Artifact Registry; Cloud Run job; Cloud Scheduler entry; x86 calibration first; then replay of V1–T4 in `eval` mode and the `serve` tick in the cloud; measured run time, memory and cost | S4. **Closed on 2026-11-23** (§8.6) | Enabling APIs; approving the spend. Done by the user with `infra/setup.sh` and three repository secrets |
-| **M14 Serving, monitoring, deployment** | The API service; rollback command; alert policies; deployment on tag with Workload Identity Federation; the four provoked alerts; latency measured with synthetic requests | S5, S6, S7 | An email address for alerts |
+| **M14 Serving, monitoring, deployment** | The API service; rollback command; alert policies; deployment on tag with Workload Identity Federation; the four provoked alerts; latency measured with synthetic requests | S5, S6, S7. **Built and measured on 2026-11-23** (§9.1, §10.1, §11); the budget alert was not provoked, and the arrival of the emails is confirmed by the user | An email address for alerts. Done by the user with `ALERT_EMAIL` and `infra/setup.sh` |
 | **M15 Close** | Report section on stage 3 (architecture, runbook, measured cost, limits); the online-experiment design and the re-selection rule (below); teardown; tag `v0.3` | S8 | Confirming the teardown |
 
 **Contents of the M15 designs** (written, not implemented):
@@ -812,8 +897,9 @@ All approved by the user on 2026-11-21.
 | Cost grows unexpectedly | The budget alerts; every cloud milestone ends by listing what is deployed. M13: 4.04 USD of compute, and the list of §12 |
 | A mounted bucket is not a file system: no atomic folder rename, slower small reads and writes, and two executions may run on different CPUs | Found and handled in M13: a step is committed file by file with its record last (§6.4); the time is paid in the file-heavy steps (§8.6); bit-identical repetition is not required (§8.3) |
 | The file-based use of MLflow does not fit the pinned MLflow version | Keep the manifests as the record and adapt the sync command; the acceptance of S2 does not depend on a particular MLflow backend. **Happened in M11**: MLflow 3.18 refuses a folder of files as a store, so the local store is a SQLite file (§7.3) |
+| The platform keeps a path of the service for itself | **Happened in M14**: on a `run.app` address Google's front end answers `/healthz` with its own 404 page. The service has a second health route, `/v1/health` (§9.1) |
 
-Open question that does not block M10: which email address receives alerts.
+Open question that does not block M10: which email address receives alerts. (Answered in M14: `ALERT_EMAIL` of `infra/.env`.)
 
 ## 16. What stage 3 will not show
 

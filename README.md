@@ -114,7 +114,20 @@ alerts. It changes how the system runs, not what it computes. Design:
   the whole milestone used 4.04 USD of compute. At rest the project costs under 1 USD a month
   (objects in the bucket). The T numbers verify the pipeline; they are not a new evaluation.
   Measurements: `docs/mlops.md` §8.6; set-up, roles and operation: [`infra/README.md`](infra/README.md).
-- **M14–M15** (serving and monitoring, close): not started.
+- **M14, serving, rollback, alerting, deployment on a tag: built and measured (2026-11-23).** A
+  small FastAPI service on Cloud Run (its own 70 MB image, scaled to zero, authenticated calls
+  only) looks up the precomputed Top-12 of a customer by the original customer id and follows
+  the `current` pointer without a restart; unknown customers get R1's popularity list for the
+  "age missing" bucket of the same week, read from the tick's own output. Measured with 2,500
+  synthetic requests, all answered as the prediction set and the fallback list say: cold start
+  6.0 and 6.3 s, warm p95 0.77 ms inside the service and 236 ms from a laptop on another
+  continent, 0.19 GiB of memory. One command rolls the pointer back to the previous prediction
+  set (the service switched in 41 s) and forward again. The pipeline and the service write one
+  structured log line per alert; five alert policies send them to one email address, and four
+  alerts were provoked once each in a separate state. A tag `deploy-*` builds both images and
+  updates the job and the service from digests, without a stored key (2 min 45 s). The
+  milestone used about 0.11 USD. Measurements: `docs/mlops.md` §9.1, §10.1, §11.
+- **M15** (close): not started.
 
 **Three things to know when reading these numbers:**
 
@@ -270,6 +283,44 @@ bash infra/operate.sh download-records                          # manifests and 
 - One execution at a time, no automatic retry, the scheduler job stays paused. `infra/teardown.sh`
   (owner) removes everything except the bucket and the DVC data.
 
+**The recommendation service, rollback and deployment (stage 3, `docs/mlops.md` §9–§11).**
+The service computes nothing: step O5 of a tick writes the serving form of its prediction set
+(`predictions/<anchor>/serving/`), and the service looks a customer up in the set that
+`state/current.json` names.
+
+```bash
+make serving-set ARGS="--anchor 2020-09-23"    # once, for a prediction set published before M14
+make serve                                     # the service on this machine (state: artifacts/pipeline/)
+curl http://127.0.0.1:8080/v1/recommendations/<customer id>
+curl http://127.0.0.1:8080/healthz
+make rollback ARGS="--to previous"             # point `current` at the previous prediction set
+make rollback ARGS="--to next"                 # and forward again
+make service-image-build && make service-image-run   # the same in its own container
+```
+
+In the cloud (as the operator; the service accepts authenticated calls only):
+
+```bash
+bash infra/operate.sh call /v1/recommendations/<customer id>    # an identity token is added
+bash infra/operate.sh call /v1/health                           # /healthz is answered by Cloud Run's front end, not by the service
+bash infra/operate.sh rollback previous                         # one execution of the job; the service follows within a minute
+bash infra/operate.sh rollback next
+git tag deploy-<name> <commit> && git push origin deploy-<name> # build both images, update the job and the service
+bash infra/operate.sh alert-lines                               # the alert lines of jobs and services
+bash infra/operate.sh incidents                                 # the incidents the alert policies opened
+```
+
+- The answer is `{"articles": [12 article ids], "prediction_set": {"anchor", "model_version"},
+  "source": "ranker" | "fallback"}`, with the original ids of the dataset. `fallback`: the
+  customer is not in the set and gets R1's list for the "age missing" bucket of the same week.
+- A rollback target that does not exist, was never published or fails a checksum is refused and
+  the pointer stays. A deployment is rolled back by tagging the earlier commit, or with
+  `infra/operate.sh update-job` / `update-service` and the earlier digest.
+- Alerts are log lines with the field `hmrec_alert` (`step_failed`, `input_check_failed`,
+  `quality_alert`, `prediction_set_load_failed`); `infra/setup.sh` creates the email channel
+  (`ALERT_EMAIL` of `infra/.env`) and the policies. No alert changes a configuration.
+- Measured: `results/m14_serving/` (`scripts/m14_probe_service.py`).
+
 **Versioning and run tracking (stage 3, `docs/mlops.md` §7).** DVC and MLflow are not runtime
 dependencies. They are in dependency groups of their own and in a second environment,
 `.venv-tools`, so that `.venv` stays exactly the set of packages every result was computed with.
@@ -375,5 +426,6 @@ The main entry point of each milestone. See proposal §11 for the milestones and
 | M11 | Data versioning, bootstrap state, run manifests, MLflow view | `make dvc ARGS="..."`, `scripts/m11_mlflow.py` |
 | M12 | The weekly pipeline and its replay | `scripts/weekly.py --anchor DATE --mode eval\|serve`, `scripts/m12_replay_compare.py` |
 | M13 | The pipeline on Cloud Run: image workflow, job, scheduler, calibration of x86-64, replay | `infra/setup.sh`, `infra/operate.sh`, `scripts/m13_volume_check.py`, `scripts/m13_record_execution.py` |
+| M14 | The recommendation service, rollback, alert lines and policies, deployment on a tag | `make serve`, `scripts/m14_serving_set.py`, `scripts/m14_rollback.py`, `scripts/m14_probe_service.py`, `.github/workflows/deploy.yml` |
 
 Copyright (c) 2026 Haokun Liu. All rights reserved.

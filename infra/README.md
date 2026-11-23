@@ -162,11 +162,32 @@ bash infra/operate.sh service-logs hmrec_alert      # the service's alert lines
   target's checksums there): `scripts/m14_rollback.py`. A target that does not exist or
   fails a check is refused and the pointer stays. The service switches at its next look
   at the pointer (every 60 seconds while it has CPU).
+- **Health**: call `/v1/health` through Cloud Run. Google's front end answers `/healthz`
+  on a `run.app` address itself (a 404 page); the service's `/healthz` is reachable only
+  where the server is reached directly.
+- **Measured in M14** (`docs/mlops.md` §9.1): cold start 6.0 and 6.3 s, warm p95 0.77 ms
+  inside the service and 236 ms from a laptop on another continent, 0.19 GiB of the 1 GiB;
+  a pointer move reached the service in 41 s and in under 60 s.
 - **Alerting** (`docs/mlops.md` §10): `setup.sh` creates one email channel
   (`ALERT_EMAIL`) and five policies: four match the alert lines of the pipeline and the
   service (`jsonPayload.hmrec_alert` = `step_failed`, `input_check_failed`,
   `quality_alert`, `prediction_set_load_failed`), one a failed execution of a job. The
   operator creates no channel and no policy.
+
+**Alert drills** (`docs/mlops.md` §10.1). A drill never runs in the replay's state: it
+has a job, a service and a prefix of the bucket of their own (`<job>-drill`,
+`<service>-drill`, `<state prefix>-drill/`), and every alert line of a drill carries a
+note. The commands that prepare a drill state can write only below the drill prefix.
+
+```bash
+bash infra/operate.sh create-drill-job sha256:<digest of the pipeline image>
+bash infra/operate.sh drill-copy weeks/2020-08-19 quality/weeks/2020-08-19      # inside the bucket
+bash infra/operate.sh drill-upload <local file> <key below the drill prefix>
+bash infra/operate.sh execute-drill <case> inputs scripts/weekly.py --anchor 2020-08-19 --mode eval
+bash infra/operate.sh create-drill-service sha256:<digest of the service image> <case>
+bash infra/operate.sh alert-lines && bash infra/operate.sh incidents
+bash infra/operate.sh delete-drill                                              # the drill job and service
+```
 
 ## 7. `teardown.sh` (owner)
 
@@ -199,6 +220,12 @@ free, and a paused job counts as a job).
 **After M13** (`docs/mlops.md` §12): the bucket holds 40.5 GiB (state 27.2, DVC remote 5.6,
 calibration state 5.4, inputs 2.3), about 0.81 USD a month; the two images of 635 MB cost at
 most 0.07 USD a month; the job, the paused scheduler job and the accounts cost nothing.
+
+**After M14** (`docs/mlops.md` §12): the bucket holds 43.8 GiB (state 27.3, DVC remote 5.6,
+calibration state 5.4, drill states 3.2, inputs 2.3), about 0.88 USD a month; five pipeline
+images and two service images cost at most 0.3 USD a month; the job, the service without
+an instance, the paused scheduler job, the channel, the policies and the accounts cost
+nothing. M14 used about 0.11 USD of compute.
 
 ## What M13 found out about this set-up
 
