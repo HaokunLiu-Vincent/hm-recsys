@@ -34,7 +34,14 @@ from ranker_example import (
 from ranker_example import (
     build_workspace as build_ranker_workspace,
 )
-from weekly_example import V1, V2, build_workspace, tick_context, write_processed
+from weekly_example import (
+    V1,
+    V2,
+    build_workspace,
+    tick_context,
+    write_processed,
+    write_r1_candidates,
+)
 
 from hmrec.hpo.v_trial import TrialInputs
 from hmrec.locks import file_sha256, load_ranker_lock
@@ -49,6 +56,7 @@ from hmrec.ranker.platform_entry import (
 )
 from hmrec.ranker.runtime import read_lightgbm_runtime
 from hmrec.ranker.sampling import read_sample_record, record_file
+from hmrec.serving_set import load_serving_set
 from hmrec.weekly import ranker_steps
 from hmrec.weekly.context import TickContext
 from hmrec.weekly.data_steps import run_ingest, run_queries
@@ -79,7 +87,10 @@ def paths(tmp_path: Path) -> ProjectPaths:
     # Customer c bought its query's label article in the V1 week; some history before it.
     lines = [(query - V1_FIRST_QUERY, article, V1_WEEK_DAY) for query, article in LABELS]
     lines += [(customer, customer % 12, 670 + customer % 8) for customer in range(N_QUERIES)]
-    write_processed(workspace, lines, n_customers=N_QUERIES, n_articles=12)
+    # Customer 0 has no age: its R1 list is the fallback list of the serving set (M14).
+    write_processed(
+        workspace, lines, n_customers=N_QUERIES, n_articles=12, customers_without_age=(0,)
+    )
     # ranker_example writes the samples under an artifacts root; the bootstrap state has
     # the layout of artifacts/, so its folder is that root.
     build_ranker_workspace(workspace.bootstrap_dir.parent.parent / "scratch")
@@ -124,6 +135,12 @@ def _publish_v1(paths: ProjectPaths) -> TickContext:
     run_dataset(context, setup)
     run_train(context, setup)
     run_score(context, setup)
+    # O5 reads the fallback list of the serving set from the tick's R1 candidates. The
+    # features of this example are synthetic, so an R1 file is written here: every
+    # query holds the list 11, 10, ..., 0.
+    queries = pl.read_parquet(context.view.queries_file("V1"))
+    r1_lists = {query: list(range(11, -1, -1)) for query in queries["query_id"].to_list()}
+    write_r1_candidates(context.view.candidates_file("V1", "r1_popularity"), r1_lists)
     run_publish(context)
     layout = context.layout
     layout.prediction_staging_dir(V1).rename(layout.prediction_set_dir(V1))
@@ -292,6 +309,33 @@ def test_the_prediction_set_names_the_models_behind_it(paths: ProjectPaths) -> N
     assert models["ranker"]["path"] == "weeks/2020-07-29/ranker_model/model.txt"
     # The first week is predicted by the bootstrap state's chain model.
     assert models["twotower_chain"]["path"].endswith("chain_locked/F4.pt")
+
+
+def test_the_publish_step_writes_the_serving_form_with_the_prediction_set(
+    paths: ProjectPaths,
+) -> None:
+    context = _publish_v1(paths)
+    layout = context.layout
+    serving = load_serving_set(layout.serving_dir(V1))
+    record, description = serving.record, serving.record.description
+    assert (record.n_customers, record.top_k, record.n_articles) == (N_QUERIES, 12, 12)
+    # It belongs to exactly the published prediction file and names its Ranker.
+    manifest = json.loads(layout.prediction_manifest_file(V1).read_text())
+    assert description.prediction_sha256 == manifest["predictions"]["sha256"]
+    ranker = next(model for model in manifest["models"] if model["role"] == "ranker")
+    assert description.ranker_sha256 == ranker["sha256"]
+    assert record.model_version == ranker["sha256"][:12]
+    assert description.built_by == manifest["run_id"]
+    # The fallback list is the R1 list of the customer without an age: articles 11 ... 0.
+    assert description.fallback.article_ids == tuple(f"{a:010d}" for a in range(11, -1, -1))
+    assert description.fallback.age_bucket == "AGE_UNKNOWN"
+    # A customer's answer is its row of the prediction set, in original ids.
+    predictions = pl.read_parquet(layout.prediction_file(V1))
+    for customer in (0, 17, N_QUERIES - 1):
+        rows = predictions.filter(pl.col("customer_idx") == customer).sort("rank")
+        expected = tuple(f"{article:010d}" for article in rows["article_idx"].to_list())
+        assert serving.recommend(f"{customer:064x}") == (expected, "ranker")
+    assert serving.recommend(f"{N_QUERIES:064x}")[1] == "fallback"
 
 
 # ---------------------------------------------------------------- C2, C3

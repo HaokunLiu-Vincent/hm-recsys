@@ -309,7 +309,11 @@ def with_step(steps: FakeSteps, **changes) -> FakeSteps:
 
 
 def write_processed(
-    paths: ProjectPaths, lines: list[tuple[int, int, int]], n_customers: int, n_articles: int
+    paths: ProjectPaths,
+    lines: list[tuple[int, int, int]],
+    n_customers: int,
+    n_articles: int,
+    customers_without_age: tuple[int, ...] = (),
 ) -> None:
     """Write tiny data/processed/ tables (with a matching metadata.json) into a workspace.
 
@@ -318,8 +322,10 @@ def write_processed(
         lines: (customer_idx, article_idx, t_dat_day) purchase lines, any order;
             they are written sorted by (t_dat_day, customer_idx) like the real table.
             Every line has the price 0.5.
-        n_customers: Customers 0 .. n_customers - 1 (all in age bucket AGE_18_24).
+        n_customers: Customers 0 .. n_customers - 1 (in age bucket AGE_18_24).
         n_articles: Articles 0 .. n_articles - 1 of the catalog.
+        customers_without_age: Customers in the "age missing" bucket instead
+            (the fallback list of the service is their R1 list, M14).
     """
     from conftest import make_transactions
     from hmrec.config import load_preprocess_config
@@ -329,8 +335,12 @@ def write_processed(
     paths.processed_dir.mkdir(parents=True, exist_ok=True)
     ordered = sorted(lines, key=lambda line: (line[2], line[0]))
     make_transactions(ordered).write_parquet(paths.transactions_file)
+    buckets = [
+        preprocess.unknown_age_bucket if customer in customers_without_age else "AGE_18_24"
+        for customer in range(n_customers)
+    ]
     pl.DataFrame(
-        {"customer_idx": list(range(n_customers)), "age_bucket": ["AGE_18_24"] * n_customers},
+        {"customer_idx": list(range(n_customers)), "age_bucket": buckets},
         schema={"customer_idx": pl.Int32, "age_bucket": pl.String},
     ).write_parquet(paths.customers_file)
     pl.DataFrame(
@@ -354,6 +364,26 @@ def write_processed(
     ).write_parquet(paths.article_id_map_file)
     metadata = build_processed_metadata(preprocess, {"transactions": len(lines)})
     write_processed_metadata(paths.processed_metadata_file, metadata)
+
+
+def write_r1_candidates(path: Path, lists: dict[int, list[int]]) -> None:
+    """Write an R1 candidates file: every query with its list, rank 1 first.
+
+    Args:
+        path: The candidates file (its folder is created).
+        lists: query_id -> the article_idx of its list, best first.
+    """
+    rows = [
+        (query, rank, article)
+        for query, articles in lists.items()
+        for rank, article in enumerate(articles, start=1)
+    ]
+    path.parent.mkdir(parents=True, exist_ok=True)
+    pl.DataFrame(
+        rows,
+        schema={"query_id": pl.Int32, "rank": pl.Int32, "article_idx": pl.Int32},
+        orient="row",
+    ).write_parquet(path)
 
 
 def tick_context(paths: ProjectPaths, anchor: date, mode: str = EVAL_MODE) -> TickContext:

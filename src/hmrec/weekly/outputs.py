@@ -22,6 +22,10 @@ O5: the prediction set of the week, predictions/{anchor}/:
                       article_id_map.parquet), named in the manifest with sha256.
     manifest.json     week, mode, number of customers, the file's sha256, and the
                       model files behind the predictions with their sha256.
+    serving/          the same predictions in the form the recommendation service
+                      loads: original customer and article ids, and the fallback
+                      list for unknown customers (hmrec.serving_set,
+                      hmrec.weekly.serving_build; M14).
 
 The `current` pointer is switched by the driver after this step's folder is in
 place (hmrec.weekly.driver), and only then.
@@ -42,9 +46,10 @@ from hmrec.data.asof import history_window
 from hmrec.data.metadata import scan_processed_parquet
 from hmrec.locks import file_sha256
 from hmrec.logging_utils import get_logger
-from hmrec.paths import MODEL_DIR
+from hmrec.paths import MODEL_DIR, PREDICTION_FILE, PREDICTION_MANIFEST_FILE, SERVING_DIR
 from hmrec.run_manifest import SERVE_MODE, MetricRecord
 from hmrec.weekly.context import OutputFile, TickContext
+from hmrec.weekly.serving_build import build_serving_set, serving_output_files
 from hmrec.weekly.shard_features import N_CANDIDATES, QUERY_STATS_FILE
 from hmrec.weekly.shards import number_of_shards
 from hmrec.weekly.state import RANKER_ROLE, TWOTOWER_ROLE, ModelPointer
@@ -58,8 +63,6 @@ RANK = "rank"
 SCORE = "score"
 TOP_COLUMNS = [QUERY_ID, RANK, ARTICLE_IDX, SCORE]
 PREDICTION_COLUMNS = [CUSTOMER_IDX, RANK, ARTICLE_IDX]
-PREDICTION_FILE = "top.parquet"
-PREDICTION_MANIFEST_FILE = "manifest.json"
 PREDICTION_SCHEMA_VERSION = 1
 BOOTSTRAP_CHAIN_TABLE = "m6_twotower_chain.csv"
 
@@ -392,8 +395,12 @@ def prediction_table(top: pl.DataFrame, queries: pl.DataFrame) -> pl.DataFrame:
 def run_publish(context: TickContext) -> StepOutcome:
     """O5: write the prediction set of the week (the pointer is switched by the driver).
 
+    The serving form of the set is written with it (hmrec.weekly.serving_build), so
+    that the service can load a set as soon as the pointer names it.
+
     Raises:
-        ValueError: If a model file does not have its recorded sha256.
+        ValueError: If a model file does not have its recorded sha256, or the
+            serving form cannot be built (for example: no fallback list).
     """
     view, week, paths = context.view, context.tick, context.paths
     top = pl.read_parquet(view.top_file(week.name))
@@ -432,11 +439,20 @@ def run_publish(context: TickContext) -> StepOutcome:
     (folder / PREDICTION_MANIFEST_FILE).write_text(
         json.dumps(content, indent=2) + "\n", encoding="utf-8"
     )
+    build_serving_set(
+        context,
+        folder / SERVING_DIR,
+        predictions,
+        content["predictions"]["sha256"],
+        models[0].sha256,
+        context.run_id,
+    )
     detail = f"prediction set of {queries.height} customers x {content['top_k']} articles"
     if context.mode == SERVE_MODE:
         detail += " (every customer of the customer table)"
     files = [
         OutputFile("prediction_set", PREDICTION_FILE),
         OutputFile("prediction_set_manifest", PREDICTION_MANIFEST_FILE),
+        *serving_output_files(),
     ]
     return detail, [MetricRecord("output/customers", week.anchor, float(queries.height))], files

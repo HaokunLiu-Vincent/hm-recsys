@@ -45,6 +45,11 @@ SAMPLE_DIR = "sample"
 TWOTOWER_DIR = "twotower"
 STAGING_DIR = ".staging"
 FAILED_DIR = ".failed"
+# The files of a prediction set (predictions/{anchor}/, written by step O5) and the folder
+# of its serving form inside it (hmrec.serving_set, M14).
+PREDICTION_FILE = "top.parquet"
+PREDICTION_MANIFEST_FILE = "manifest.json"
+SERVING_DIR = "serving"
 R1_CHANNEL_NAME = "r1_popularity"
 R5_CHANNEL_NAME = "r5_wals"
 
@@ -1195,6 +1200,23 @@ class StateLayout:
     def prediction_staging_dir(self, anchor: date) -> Path:
         """predictions/.staging/{anchor}/: the prediction set until it is complete."""
         return self.root / "predictions" / STAGING_DIR / anchor.isoformat()
+
+    def prediction_file(self, anchor: date) -> Path:
+        """predictions/{anchor}/top.parquet: customer_idx, rank, article_idx."""
+        return self.prediction_set_dir(anchor) / PREDICTION_FILE
+
+    def prediction_manifest_file(self, anchor: date) -> Path:
+        """predictions/{anchor}/manifest.json: the record of the prediction set."""
+        return self.prediction_set_dir(anchor) / PREDICTION_MANIFEST_FILE
+
+    def serving_dir(self, anchor: date) -> Path:
+        """predictions/{anchor}/serving/: the form the service loads (hmrec.serving_set)."""
+        return self.prediction_set_dir(anchor) / SERVING_DIR
+
+    @property
+    def predictions_dir(self) -> Path:
+        """predictions/: one folder per prediction set, named by its anchor."""
+        return self.root / "predictions"
 
     @property
     def runs_dir(self) -> Path:

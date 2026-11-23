@@ -7,7 +7,9 @@
                                     NEXT tick: labels exist only after the week).
     state/current.json              the current prediction set, the latest closed
                                     week and the model files with their sha256.
-                                    Replaced ONLY by step O5.
+                                    Replaced by step O5, and by the rollback
+                                    command (hmrec.weekly.rollback), which points it
+                                    at another PUBLISHED prediction set.
 
 A week before the first tick is closed in the bootstrap state (docs/mlops.md
 §6.3): it has no marker.
@@ -129,7 +131,10 @@ def read_current(store: StateStore, layout: StateLayout) -> CurrentPointer | Non
 
 
 def switch_current(store: StateStore, layout: StateLayout, pointer: CurrentPointer) -> None:
-    """Replace state/current.json. Only step O5 calls this (docs/mlops.md §6.4)."""
+    """Replace state/current.json (docs/mlops.md §6.4, §9).
+
+    Two callers: step O5 of a tick, and the rollback command (hmrec.weekly.rollback).
+    """
     text = json.dumps(pointer_to_json(pointer), indent=2) + "\n"
     store.replace_text(layout.current_file, text)
 
@@ -227,6 +232,12 @@ def next_tick_anchor(store: StateStore, layout: StateLayout, first_week: Week) -
     A tick that stopped has not replaced current.json, so the same anchor is
     returned again and the tick is resumed.
 
+    A pointer that was rolled back (hmrec.weekly.rollback, M14) names an OLDER
+    prediction set than the latest published week. The tick that is due still
+    follows the latest PUBLISHED week: the weeks after the pointer's are walked
+    while they have a published marker. Without a rollback no later week is
+    published, and the answer is the one above.
+
     Args:
         store: The state.
         layout: Its layout.
@@ -235,7 +246,11 @@ def next_tick_anchor(store: StateStore, layout: StateLayout, first_week: Week) -
     current = read_current(store, layout)
     if current is None:
         return first_week.anchor
-    return current.anchor + timedelta(days=DAYS_PER_WEEK)
+    one_week = timedelta(days=DAYS_PER_WEEK)
+    latest_published = current.anchor
+    while store.exists(layout.published_file(latest_published + one_week)):
+        latest_published += one_week
+    return latest_published + one_week
 
 
 def next_run_id(store: StateStore, layout: StateLayout, anchor: date, mode: str) -> str:

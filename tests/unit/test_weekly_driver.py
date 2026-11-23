@@ -43,6 +43,7 @@ from hmrec.run_manifest import (
     read_run_manifest,
 )
 from hmrec.run_records import RunStamp
+from hmrec.structured_logs import ALERT_FIELD, ALERT_NOTE_VARIABLE
 from hmrec.weekly.driver import (
     CALIBRATION_METRIC,
     LABEL_ACCESS_COLUMNS,
@@ -337,6 +338,96 @@ def test_low_union_recall_is_flagged_and_becomes_an_alert_after_three_weeks(
     assert [row["flag"] for row in union] == ["True"] * 4
     assert [row["consecutive_weeks"] for row in union] == ["1", "2", "3", "4"]
     assert [row["alert"] for row in union] == ["False", "False", "True", "True"]
+
+
+# ---------------------------------------------------------------- alert lines (M14)
+
+
+def _alert_lines(capsys: pytest.CaptureFixture[str]) -> list[dict]:
+    """The alert lines the driver wrote to its output since the last call."""
+    lines = []
+    for line in capsys.readouterr().out.splitlines():
+        if line.startswith("{") and ALERT_FIELD in json.loads(line):
+            lines.append(json.loads(line))
+    return lines
+
+
+def test_a_tick_that_runs_through_writes_no_alert_line(
+    paths: ProjectPaths, capsys: pytest.CaptureFixture[str]
+) -> None:
+    assert run_tick(paths, V1, EVAL_MODE, FakeSteps(paths), STAMP).succeeded
+    assert _alert_lines(capsys) == []
+
+
+def test_a_failed_step_writes_one_step_failed_alert_line(
+    paths: ProjectPaths, capsys: pytest.CaptureFixture[str], monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.delenv(ALERT_NOTE_VARIABLE, raising=False)
+    run_tick(paths, V1, EVAL_MODE, FakeSteps(paths, fail={"O2_features"}), STAMP)
+    assert _alert_lines(capsys) == [
+        {
+            "severity": "ERROR",
+            "message": "tick 2020-07-29 stopped at step O2_features",
+            ALERT_FIELD: "step_failed",
+            "tick_anchor": "2020-07-29",
+            "mode": "eval",
+            "run_id": "2020-07-29-eval-a1",
+            "step": "O2_features",
+            "reason": "ValueError: a check of the fake step failed",
+        }
+    ]
+
+
+def test_a_failed_input_check_writes_an_input_check_alert_line(
+    paths: ProjectPaths, capsys: pytest.CaptureFixture[str], monkeypatch: pytest.MonkeyPatch
+) -> None:
+    # A drill is labelled through the environment; the label is in the line.
+    monkeypatch.setenv(ALERT_NOTE_VARIABLE, "provoked on purpose")
+    run_tick(paths, V1, EVAL_MODE, FakeSteps(paths), STAMP)
+    capsys.readouterr()
+    steps = FakeSteps(paths, new_week_rows=int(0.4 * WEEK_ROWS))
+    assert not run_tick(paths, V2, EVAL_MODE, steps, STAMP).succeeded
+    lines = _alert_lines(capsys)
+    # ONE line, of the kind of the input check (not also a "step_failed" line).
+    assert [line[ALERT_FIELD] for line in lines] == ["input_check_failed"]
+    assert lines[0]["step"] == "C1_ingest" and lines[0]["tick_anchor"] == "2020-08-05"
+    assert "input data check failed" in lines[0]["reason"]
+    assert "input/transaction_rows" in lines[0]["reason"]
+    assert lines[0]["note"] == "provoked on purpose"
+
+
+def test_a_flag_in_three_consecutive_weeks_writes_a_quality_alert_line(
+    paths: ProjectPaths, capsys: pytest.CaptureFixture[str], monkeypatch: pytest.MonkeyPatch
+) -> None:
+    from datetime import date
+
+    monkeypatch.delenv(ALERT_NOTE_VARIABLE, raising=False)
+    per_tick = []
+    for anchor in [V1, V2, V3, date(2020, 8, 19)]:
+        assert run_tick(
+            paths, anchor, EVAL_MODE, FakeSteps(paths, union_recall=0.20), STAMP
+        ).succeeded
+        per_tick.append(_alert_lines(capsys))
+    # V1 and V2 closed with the flag: no alert yet. The tick that closes V3 (the third
+    # flagged week in a row) writes the line; a flag alone writes nothing.
+    assert per_tick[:3] == [[], [], []]
+    assert per_tick[3] == [
+        {
+            "severity": "ERROR",
+            "message": "quality flag recall/union raised in 3 consecutive weeks (week 2020-08-12)",
+            ALERT_FIELD: "quality_alert",
+            "tick_anchor": "2020-08-19",
+            "mode": "eval",
+            "run_id": "2020-08-19-eval-a1",
+            "week": "2020-08-12",
+            "rule": "recall/union",
+            "subject": "",
+            "value": 0.2,
+            "rule_text": per_tick[3][0]["rule_text"],
+            "consecutive_weeks": 3,
+        }
+    ]
+    assert "24" in per_tick[3][0]["rule_text"]
 
 
 # ---------------------------------------------------------------- serve mode

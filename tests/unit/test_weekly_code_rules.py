@@ -13,8 +13,10 @@ loads neither torch nor LightGBM.
     3. Only two places read the SOURCE transactions (data/processed/): C1 ingest
        and the `eval` query list, both in hmrec.weekly.data_steps. Every other
        module reads the tick's ingested table.
-    4. No other code imports hmrec.weekly, except its two scripts.
+    4. No other code imports hmrec.weekly, except its scripts.
     5. The pipeline writes no stage-1 result table.
+    6. (M14) state/current.json is replaced in two places only: step O5 of the driver
+       and the rollback command.
 """
 
 import ast
@@ -29,6 +31,8 @@ SCRIPTS = (
     REPO / "scripts" / "m12_step.py",
     REPO / "scripts" / "m12_replay_compare.py",
     REPO / "scripts" / "m13_volume_check.py",
+    REPO / "scripts" / "m14_serving_set.py",
+    REPO / "scripts" / "m14_rollback.py",
 )
 
 PLAIN_MODULES = (
@@ -41,7 +45,9 @@ PLAIN_MODULES = (
     "monitoring.py",
     "outputs.py",
     "replay_compare.py",
+    "rollback.py",
     "run_step.py",
+    "serving_build.py",
     "shard_features.py",
     "shards.py",
     "state.py",
@@ -194,3 +200,17 @@ def test_the_pipeline_writes_no_stage_1_result_table() -> None:
         used = set(STAGE1_TABLE.findall(text))
         # m6_config_file is the stop limit of the R6 fine-tune (configs/, read only).
         assert STAGE1_TABLE.search(text.replace("paths.m6_config_file", "")) is None, (path, used)
+
+
+def test_only_the_driver_and_the_rollback_replace_the_current_pointer() -> None:
+    callers = []
+    for path in sorted(WEEKLY.glob("*.py")):
+        text = path.read_text(encoding="utf-8")
+        if path.name != "state.py" and "switch_current(" in text:
+            callers.append(path.name)
+    assert callers == ["driver.py", "rollback.py"]
+    # The store's method behind it is called by switch_current only. (volume_check.py,
+    # the smoke test of M13, tries the method on a marker file in a folder of its own.)
+    for path in sorted(WEEKLY.glob("*.py")):
+        if path.name not in ("state.py", "storage.py", "volume_check.py"):
+            assert "replace_text(" not in path.read_text(encoding="utf-8"), path.name

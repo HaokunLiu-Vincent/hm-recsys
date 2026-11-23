@@ -21,6 +21,12 @@ closes the week before the anchor and opens the week of the anchor. The rules of
     stop        the first failed step or check stops the tick. The reason goes
                 into the run manifest ("failed") and into the monitoring table
                 as an alert. `current` is not touched.
+    alert lines one structured log line (hmrec.structured_logs, M14) for a tick
+                that stopped ("step_failed", or "input_check_failed" when the
+                input-data check of C1 stopped it) and for every labelled flag
+                that was raised in 3 consecutive weeks ("quality_alert"). The
+                alert policies of infra/setup.sh match these lines. A line
+                changes nothing: no configuration, no result.
     publish     state/current.json is replaced only after O5's folder is in
                 place, which needs every earlier step.
 
@@ -79,6 +85,7 @@ from hmrec.run_manifest import (
     write_run_manifest,
 )
 from hmrec.run_records import RunStamp
+from hmrec.structured_logs import INPUT_CHECK_FAILED, QUALITY_ALERT, STEP_FAILED, emit_alert
 from hmrec.weekly.calendar import week_named
 from hmrec.weekly.context import (
     TickContext,
@@ -100,6 +107,7 @@ from hmrec.weekly.history import (
     write_findings,
 )
 from hmrec.weekly.monitoring import (
+    LABELLED,
     Finding,
     feature_findings,
     labelled_findings,
@@ -188,6 +196,15 @@ class StepFailed(RuntimeError):
         super().__init__(f"step {step} stopped the tick: {reason}")
         self.step = step
         self.reason = reason
+
+
+class InputCheckFailed(StepFailed):
+    """The input-data check after C1 stopped the tick (docs/mlops.md §10)."""
+
+
+# An alert line holds at most this many characters of a failure's reason: a traceback
+# can be long, and the whole reason is in the run manifest.
+ALERT_REASON_CHARACTERS = 1000
 
 
 @dataclass(frozen=True)
@@ -412,8 +429,8 @@ def ingest_gate(run: TickRun, step: Step) -> None:
     """The gate after C1: the input-data rules. An alert stops the tick (docs/mlops.md §6.1).
 
     Raises:
-        StepFailed: If the new week's row count is outside its band or its date
-            range is wrong.
+        InputCheckFailed: If the new week's row count is outside its band or its
+            date range is wrong.
     """
     folder = staging_dir(run.context.layout, step)
     record = read_ingest_record(folder / "ingest.json")
@@ -434,7 +451,7 @@ def ingest_gate(run: TickRun, step: Step) -> None:
         reasons = "; ".join(
             f"{finding.rule}: value {finding.value:g}, rule: {finding.limit}" for finding in alerts
         )
-        raise StepFailed(step.name, f"input data check failed: {reasons}")
+        raise InputCheckFailed(step.name, f"input data check failed: {reasons}")
 
 
 def after_commit(run: TickRun, step: Step) -> None:
@@ -639,6 +656,55 @@ def record_findings(run: TickRun) -> None:
     append_findings(context, context.paths.replay_table_file("monitoring"), run.findings)
 
 
+# ---------------------------------------------------------------- alert lines
+
+
+def emit_stop_alert(context: TickContext, error: StepFailed) -> None:
+    """Write the alert line of a tick that stopped (hmrec.structured_logs).
+
+    The kind is "input_check_failed" if the input-data check of C1 stopped the
+    tick, else "step_failed".
+    """
+    kind = INPUT_CHECK_FAILED if isinstance(error, InputCheckFailed) else STEP_FAILED
+    fields = {
+        "tick_anchor": context.tick.anchor.isoformat(),
+        "mode": context.mode,
+        "run_id": context.run_id,
+        "step": error.step,
+        "reason": error.reason[:ALERT_REASON_CHARACTERS],
+    }
+    emit_alert(kind, f"tick {context.tick.anchor} stopped at step {error.step}", fields)
+
+
+def emit_quality_alerts(context: TickContext, findings: Sequence[Finding]) -> None:
+    """Write one alert line for every labelled finding that is an alert.
+
+    A labelled flag becomes an alert when the same flag (rule and subject) was
+    raised in 3 consecutive closed weeks (hmrec.weekly.monitoring). The alerts of
+    the input-data rules stop the tick and get their line from emit_stop_alert.
+    """
+    for finding in findings:
+        if finding.layer != LABELLED or not finding.alert:
+            continue
+        subject = f" {finding.subject}" if finding.subject else ""
+        fields = {
+            "tick_anchor": context.tick.anchor.isoformat(),
+            "mode": context.mode,
+            "run_id": context.run_id,
+            "week": finding.week.isoformat(),
+            "rule": finding.rule,
+            "subject": finding.subject,
+            "value": finding.value,
+            "rule_text": finding.limit,
+            "consecutive_weeks": finding.consecutive_weeks,
+        }
+        message = (
+            f"quality flag {finding.rule}{subject} raised in "
+            f"{finding.consecutive_weeks} consecutive weeks (week {finding.week})"
+        )
+        emit_alert(QUALITY_ALERT, message, fields)
+
+
 # ---------------------------------------------------------------- the manifest
 
 
@@ -824,11 +890,13 @@ def run_tick(
         all_steps(run)
         run.findings += same_week_findings(run) + closed_week_findings(run)
         record_findings(run)
+        emit_quality_alerts(context, run.findings)
     except StepFailed as error:
         status, failure = FAILED, str(error)
         run.findings.append(step_failed_finding(context.tick.anchor, error.step))
         append_findings(context, paths.replay_table_file("monitoring"), run.findings)
         LOGGER.error("tick %s stopped: %s", context.tick.name, failure)
+        emit_stop_alert(context, error)
     manifest = build_manifest(run, status, failure, started_at, started)
     manifest_file = context.layout.run_manifest_file(context.run_id)
     write_run_manifest(manifest_file, manifest)
