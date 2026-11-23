@@ -1204,6 +1204,11 @@ dev = [
     { name = "pytest" },
     { name = "ruff" },
 ]
+serving = [
+    { name = "fastapi" },
+    { name = "numpy" },
+    { name = "uvicorn" },
+]
 tracking = [
     { name = "mlflow" },
 ]
@@ -1231,6 +1236,11 @@ dev = [
     { name = "pyright", specifier = ">=1.1.380" },
     { name = "pytest", specifier = ">=8.0" },
     { name = "ruff", specifier = ">=0.5" },
+]
+serving = [
+    { name = "fastapi", specifier = ">=0.165.0" },
+    { name = "numpy", specifier = ">=2.5.4" },
+    { name = "uvicorn", specifier = ">=0.54.0" },
 ]
 tracking = [{ name = "mlflow", specifier = ">=3.18.0" }]
 versioning = [{ name = "dvc", extras = ["gs"], specifier = ">=3.67.1" }]

@@ -27,6 +27,18 @@ dev = [
     "ruff>=0.5",
     "pyright>=1.1.380",
 ]
+# The recommendation service of M14 (docs/mlops.md §9). Its image installs ONLY this
+# group (Dockerfile.serving: `uv sync --only-group serving`), so numpy is named here
+# too: the service needs nothing else of the project's dependencies.
+# The development environment and the pipeline image install it NEXT TO the dev group,
+# because the tests of the service run there: `make setup` and the Dockerfile call
+# `uv sync --group serving`. It is not a default group on purpose: a plain `uv sync`
+# installs the runtime and dev set only (tests/unit/test_versioning_rules.py).
+serving = [
+    "fastapi>=0.165.0",
+    "numpy>=2.5.4",
+    "uvicorn>=0.54.0",
+]
 tracking = [
     "mlflow>=3.18.0",
 ]

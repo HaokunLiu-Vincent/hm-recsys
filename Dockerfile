@@ -57,8 +57,10 @@ ENV UV_PYTHON_DOWNLOADS=never \
 # Layer 1: the dependencies, exactly as uv.lock pins them (including the dev group: ruff,
 # pyright and pytest run inside the image). Only these two files are copied first, so this
 # layer is rebuilt only when a dependency changes, not on every code change.
+# --group serving: FastAPI and uvicorn. The pipeline does not use them; the tests of the
+# recommendation service (M14) run inside this image, as every test does.
 COPY pyproject.toml uv.lock ./
-RUN uv sync --frozen --no-install-project
+RUN uv sync --frozen --no-install-project --group serving
 
 # pyright is a Node.js program. The Python package brings pyright itself but not Node.js,
 # and downloads it on first use when it finds none. Install Node.js once here instead
@@ -73,7 +75,7 @@ ENV PYRIGHT_PYTHON_IGNORE_WARNINGS=1
 # Layer 2: the code. .dockerignore decides what "." is: only tracked source folders, never
 # data/, artifacts/, .git or .venv.
 COPY . .
-RUN uv sync --frozen
+RUN uv sync --frozen --group serving
 
 # The hash of the code tree that was just copied (hmrec.code_tree: src/, scripts/, tests/,
 # configs/, docs/ and the top-level project files; not results/). It is stored OUTSIDE
