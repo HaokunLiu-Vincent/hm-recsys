@@ -1,0 +1,8 @@
+step,at_utc,what,detail
+before,2026-11-23T02:25:55Z,"current names 2020-09-23/53a9bab5d2e6 (serve, 1371980 customers)",the service serves it; 2000 of 2000 probe answers as expected
+rollback,2026-11-23T02:26:18Z,state/current.json replaced: 2020-09-23 -> 2020-09-16,"execution hm-weekly-4sdmw (27 s): scripts/m14_rollback.py --to previous; target checked (published, sha256 of top.parquet, serving form loads)"
+service switched,2026-11-23T02:26:59Z,"the service loaded 2020-09-16/f75450b5bf75 (eval, 68984 customers)",41 s after the pointer moved; the same instance (no new instance since 02:15:43Z)
+check,2026-11-23T02:34:13Z,400 requests against the set of 2020-09-16,300 of its customers and 100 unknown ids: 0 not as expected
+roll forward,2026-11-23T02:35:17Z,state/current.json replaced: 2020-09-16 -> 2020-09-23,execution hm-weekly-rp8w8 (43 s): scripts/m14_rollback.py --to next
+service switched,2026-11-23T02:36:16Z,first answer from 2020-09-23/53a9bab5d2e6,"at most 59 s after the pointer moved (answers polled every 5 s: 28 from the old set, then the new one); no failed request"
+after,2026-11-23T02:36:30Z,state/current.json is byte-identical to the file step O5 wrote,compared with the copy taken before the drill
