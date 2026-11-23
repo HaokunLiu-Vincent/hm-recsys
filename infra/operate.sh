@@ -38,7 +38,8 @@
 #     bash infra/operate.sh update-service sha256:<digest>     the same service with another image
 #     bash infra/operate.sh service-url                 the URL of the service
 #     bash infra/operate.sh call <path>                 GET a path of the service with an identity
-#                                                       token of the operator, e.g. /healthz
+#                                                       token of the operator, e.g. /v1/health
+#     bash infra/operate.sh identity-token              an identity token of the operator for the service
 #     bash infra/operate.sh service-logs [text]         log lines of the service (optionally with a text)
 #     bash infra/operate.sh pointer                     state/current.json as it is in the bucket
 #     bash infra/operate.sh serving-set <anchor>        build the serving form of a prediction set
@@ -62,6 +63,20 @@
 #     bash infra/operate.sh create-drill-service sha256:<digest> <case>
 #     bash infra/operate.sh call-drill <path>
 #     bash infra/operate.sh delete-drill                the drill job and the drill service
+# The state of a drill is prepared with four commands that can WRITE ONLY below the drill
+# prefix (the replay's state is only read):
+#     bash infra/operate.sh drill-copy <folder of the state prefix> <folder of the drill prefix> [records]
+#                                                       copy a folder inside the bucket (no download);
+#                                                       "records": only its small records (JSON, CSV)
+#     bash infra/operate.sh drill-upload <local file> <key of the drill prefix>
+#     bash infra/operate.sh drill-remove <key of the drill prefix>     one object of a drill state
+#     bash infra/operate.sh drill-list [key of the drill prefix]
+#     bash infra/operate.sh alert-lines [freshness]     the alert lines of jobs and services (default: 1d)
+#     bash infra/operate.sh incidents                   the incidents the alert policies opened
+#     bash infra/operate.sh download-check-files <anchor>      the prediction file and R1's score
+#                                                       table of a tick (tens of MB at most), to
+#                                                       artifacts/m14_cloud/<anchor>/, for checking
+#                                                       the service's answers on the laptop
 #
 # `execute` takes the arguments of the container, a script first, for example
 #     bash infra/operate.sh execute scripts/m13_volume_check.py --megabytes 1024 --hash-inputs
@@ -378,13 +393,18 @@ print(max(values) if values else "no data")'
     service_url
     ;;
   call)
-    path="${1:?give a path of the service, e.g. /healthz}"
+    path="${1:?give a path of the service, e.g. /v1/health}"
     url="$(service_url)"
     # An identity token of the operator for this one service. It is given to curl on its
     # standard input, so it is not in a command line.
     printf 'header = "Authorization: Bearer %s"\n' "$(g auth print-identity-token --audiences "$url" 2>/dev/null)" |
       curl --silent --show-error --config - "${url}${path}"
     echo
+    ;;
+  identity-token)
+    # An identity token of the operator for the service (for a client that sends its own
+    # requests, e.g. scripts/m14_probe_service.py). Printed to the standard output only.
+    g auth print-identity-token --audiences "$(service_url)" 2>/dev/null
     ;;
   service-logs)
     filter="resource.type=\"cloud_run_revision\" AND resource.labels.service_name=\"${SERVICE_NAME}\""
@@ -498,11 +518,73 @@ for series in json.load(sys.stdin).get("timeSeries", []):
       --set-env-vars "HMREC_SERVING_STATE_ROOT=${DRILL_MOUNT}/${case_name},HMREC_SERVING_POLL_SECONDS=${SERVICE_POLL_SECONDS},HMREC_ALERT_NOTE=${DRILL_NOTE}"
     ;;
   call-drill)
-    path="${1:?give a path of the drill service, e.g. /healthz}"
+    path="${1:?give a path of the drill service, e.g. /v1/health}"
     url="$(g run services describe "$DRILL_SERVICE_NAME" --region "$REGION" --format 'value(status.url)')"
     printf 'header = "Authorization: Bearer %s"\n' "$(g auth print-identity-token --audiences "$url" 2>/dev/null)" |
       curl --silent --show-error --config - "${url}${path}"
     echo
+    ;;
+  alert-lines)
+    # Every alert line (hmrec.structured_logs) of the last day, of jobs and services:
+    # time, where it came from, and the line's fields.
+    g logging read 'jsonPayload.hmrec_alert:*' --freshness "${1:-1d}" --order asc --limit 200 \
+      --format json 2>/dev/null | python3 -c 'import json, sys
+for entry in json.load(sys.stdin):
+    labels = entry["resource"]["labels"]
+    where = labels.get("job_name") or labels.get("service_name")
+    print(entry["timestamp"], entry["resource"]["type"], where, json.dumps(entry["jsonPayload"], sort_keys=True))'
+    ;;
+  incidents)
+    # The incidents (alerts) the alert policies opened, newest first: when each opened,
+    # its state and its policy. Read with the operator's token (it may read metrics).
+    printf 'header = "Authorization: Bearer %s"\n' "$(g auth print-access-token 2>/dev/null)" |
+      curl --silent --show-error --get --config - \
+        --data-urlencode "orderBy=open_time desc" --data-urlencode "pageSize=50" \
+        "https://monitoring.googleapis.com/v3/projects/${PROJECT_ID}/alerts" |
+      python3 -c 'import json, sys
+answer = json.load(sys.stdin)
+if "error" in answer:
+    print("the Monitoring API answered:", answer["error"].get("status"), answer["error"].get("message"))
+for alert in answer.get("alerts", []):
+    policy = alert.get("policy", {})
+    print(alert.get("openTime"), alert.get("state"), "|", policy.get("displayName"), "| closed:", alert.get("closeTime", "-"))'
+    ;;
+  drill-copy)
+    source="${1:?give the key of a folder below the state prefix, e.g. weeks/2020-08-19}"
+    target="${2:?give the key of the folder below the drill prefix, e.g. quality/weeks/2020-08-19}"
+    # Inside the bucket: nothing is downloaded, and the source is only read. With
+    # "records" only the small records (JSON, CSV) are copied, and no step record: a
+    # folder then does not look like a finished step.
+    exclude='.*/\.staging/.*|.*/\.failed/.*'
+    if [ "${3:-}" = "records" ]; then
+      exclude='.*\.parquet$|.*\.npy$|.*\.pt$|.*\.bin$|.*\.txt$|.*\.log$|.*/\.staging/.*|.*/\.failed/.*|(^|.*/)step\.json$'
+    elif [ -n "${3:-}" ]; then
+      echo "the third argument, if given, is: records"
+      exit 1
+    fi
+    g storage rsync --recursive --exclude "$exclude" \
+      "gs://${BUCKET}/${STATE_PREFIX}/${source}" "gs://${BUCKET}/${DRILL_PREFIX}/${target}"
+    ;;
+  drill-upload)
+    file="${1:?give the local file}"
+    target="${2:?give the key below the drill prefix}"
+    g storage cp "$file" "gs://${BUCKET}/${DRILL_PREFIX}/${target}"
+    ;;
+  drill-remove)
+    target="${1:?give the key below the drill prefix}"
+    g storage rm "gs://${BUCKET}/${DRILL_PREFIX}/${target}"
+    ;;
+  drill-list)
+    g storage ls --recursive "gs://${BUCKET}/${DRILL_PREFIX}/${1:-}" | sed "s#gs://${BUCKET}/##"
+    ;;
+  download-check-files)
+    anchor="${1:?give the anchor, e.g. 2020-09-23}"
+    target="artifacts/m14_cloud/${anchor}"
+    mkdir -p "$target"
+    g storage cp "gs://${BUCKET}/${STATE_PREFIX}/predictions/${anchor}/top.parquet" "$target/top.parquet"
+    g storage cp "gs://${BUCKET}/${STATE_PREFIX}/weeks/${anchor}/recall_r1_popularity/r1_bucket_scores.parquet" \
+      "$target/r1_bucket_scores.parquet"
+    echo "check files of ${anchor} are in ${target}"
     ;;
   delete-drill)
     g run services delete "$DRILL_SERVICE_NAME" --region "$REGION" --quiet || true
@@ -525,7 +607,7 @@ for series in json.load(sys.stdin).get("timeSeries", []):
     g auth print-access-token
     ;;
   *)
-    sed -n '2,71p' "$0"
+    sed -n '2,86p' "$0"
     exit 1
     ;;
 esac

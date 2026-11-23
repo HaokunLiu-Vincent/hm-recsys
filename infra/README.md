@@ -137,7 +137,7 @@ scheduler starts it with the same arguments every week. One execution at a time;
 bash infra/operate.sh serving-set 2020-09-23        # once per prediction set published before M14
 bash infra/operate.sh create-service                # private, min 0 / max 2 instances, state read-only
 git tag deploy-<name> <commit> && git push origin deploy-<name>   # build both images, deploy job and service
-bash infra/operate.sh call /healthz
+bash infra/operate.sh call /v1/health
 bash infra/operate.sh call /v1/recommendations/<customer id>
 bash infra/operate.sh rollback previous             # point `current` at the previous prediction set
 bash infra/operate.sh rollback next                 # and forward again

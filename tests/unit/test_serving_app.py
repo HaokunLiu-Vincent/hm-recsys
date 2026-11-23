@@ -102,6 +102,8 @@ def test_healthz_says_which_set_is_loaded(state: Path) -> None:
     assert status == 200
     assert body["status"] == "ok" and body["prediction_set"]["anchor"] == NEW
     assert body["n_customers"] == 2 and body["commit"] == "a" * 40
+    # The same answer under /v1/health: Cloud Run's front end keeps /healthz for itself.
+    assert get_now(app, "/v1/health") == (status, body)
     assert get_now(app, "/v1/unknown-route")[0] == 404
 
 
@@ -187,7 +189,7 @@ def test_without_a_loadable_set_at_start_up_the_service_answers_503(
     app = create_app(root, poll_seconds=60.0, commit="a" * 40)
     assert app.state.store.refresh() == FAILED  # there is no pointer at all
     assert get_now(app, ROUTE + ALICE) == (503, {"detail": "no prediction set is loaded"})
-    assert get_now(app, "/healthz")[0] == 503
+    assert get_now(app, "/healthz")[0] == 503 and get_now(app, "/v1/health")[0] == 503
     alerts = [line for line in _log_lines(capsys) if ALERT_FIELD in line]
     assert len(alerts) == 1 and alerts[0]["still_serving"] == ""
     # A set that appears later is loaded by the next poll.

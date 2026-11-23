@@ -5,9 +5,16 @@
               "prediction_set": {"anchor": "2020-09-23", "model_version": "4f76121744a7"},
               "source": "ranker" | "fallback"}
         503  no prediction set is loaded yet
-    GET /healthz
+    GET /healthz   and   GET /v1/health   (the same answer)
         200  a prediction set is loaded (its id, its size, the image's commit)
         503  none is loaded
+
+Why two health routes: on a Cloud Run `run.app` address Google's front end keeps
+some paths that end with "z" for itself and answers `/healthz` with its own 404
+page; the request never reaches the container (found in M14, when the service was
+first called in the cloud). `/healthz` is the route of docs/mlops.md §9 and works
+wherever the server is reached directly (the laptop, a container); `/v1/health`
+is the one to call through Cloud Run.
 
 `customer_id` and the article ids are the ORIGINAL identifiers of the dataset.
 "ranker": the customer is in the prediction set and gets the precomputed Top-12.
@@ -49,6 +56,8 @@ IMAGE_COMMIT_VARIABLE = "HMREC_IMAGE_GIT_COMMIT"
 NOT_AN_IMAGE = "not an image"
 RECOMMENDATIONS_ROUTE = "/v1/recommendations/{customer_id}"
 HEALTH_ROUTE = "/healthz"
+# The same answer under a path Cloud Run's front end does not keep for itself.
+HEALTH_ROUTE_V1 = "/v1/health"
 UNMATCHED_ROUTE = "unmatched"
 LOG_KIND_REQUEST = "request"
 HTTP_OK = 200
@@ -142,6 +151,7 @@ def create_app(state_root: Path, poll_seconds: float, commit: str) -> FastAPI:
         return JSONResponse(content, status_code=HTTP_OK)
 
     @application.get(HEALTH_ROUTE)
+    @application.get(HEALTH_ROUTE_V1)
     async def healthz(request: Request) -> JSONResponse:
         loaded = store.current
         if loaded is None:
