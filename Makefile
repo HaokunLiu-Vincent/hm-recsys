@@ -11,10 +11,13 @@ export OMP_NUM_THREADS := 6
 .PHONY: setup-tools dvc data-manifest data-verify bootstrap-verify
 .PHONY: mlflow-sync mlflow-check mlflow-ui test-tools
 .PHONY: weekly image-weekly replay-compare image-replay-compare
+.PHONY: service-image-build service-image-run serve serving-set rollback
 
-## setup: create / update .venv from uv.lock (includes the dev group)
+## setup: create / update .venv from uv.lock (the dev group and the serving group)
+# --group serving: FastAPI and uvicorn, for the tests of the recommendation service (M14).
+# `uv run` keeps packages that are installed, so the commands below need no flag.
 setup:
-	uv sync
+	uv sync --group serving
 
 ## format: auto-format code with ruff
 format:
@@ -211,6 +214,65 @@ image-replay-compare:
 ## replay-compare: the same comparison on this machine, without a container (needs a clean working tree)
 replay-compare:
 	uv run python scripts/m12_replay_compare.py
+
+# ---------------------------------------------------------------- M14 serving
+# docs/mlops.md §9. The recommendation service looks up the prediction set that
+# state/current.json names; it computes nothing.
+#
+#   make serving-set ARGS="--anchor 2020-09-23"   the serving form of a prediction set that
+#                                                 was published before M14 (once per set)
+#   make serve                                    the service on this machine, without a container
+#   make service-image-build                      build hmrec-serving:dev from the committed tree
+#   make service-image-run                        the service in its container
+#   make rollback ARGS="--to previous"            point `current` at the previous prediction set
+#   make rollback ARGS="--to next"                and forward again
+#
+#   curl http://127.0.0.1:8080/healthz
+#   curl http://127.0.0.1:8080/v1/recommendations/<customer id>
+#
+# The service image is NOT the pipeline image: it holds numpy, FastAPI, uvicorn and five
+# source files (Dockerfile.serving). The state is mounted READ-ONLY; 1 GiB is more than
+# the `serve` prediction set needs (about 160 MB in memory).
+SERVICE_IMAGE_NAME ?= hmrec-serving
+SERVICE_IMAGE ?= $(SERVICE_IMAGE_NAME):$(IMAGE_TAG)
+SERVING_PORT ?= 8080
+# Seconds between two looks at the `current` pointer.
+SERVING_POLL_SECONDS ?= 60
+SERVING_MEMORY ?= 1g
+SERVING_APP = hmrec.serving.app:create_app_from_environment
+
+## service-image-build: build the service image from the committed tree; the commit goes into it
+service-image-build: image-require-clean
+	docker build $(IMAGE_PLATFORM_FLAG) \
+		--file Dockerfile.serving \
+		--build-arg GIT_COMMIT=$(IMAGE_COMMIT) \
+		--tag $(SERVICE_IMAGE) \
+		--tag $(SERVICE_IMAGE_NAME):$(IMAGE_COMMIT) \
+		.
+
+## service-image-run: the service in its container, on 127.0.0.1:8080 (stop with Ctrl-C)
+service-image-run:
+	docker run --rm $(IMAGE_PLATFORM_FLAG) \
+		--memory $(SERVING_MEMORY) \
+		--publish 127.0.0.1:$(SERVING_PORT):8080 \
+		--mount "type=bind,src=$(PIPELINE_STATE),dst=/mnt/state,readonly" \
+		--env HMREC_SERVING_STATE_ROOT=/mnt/state \
+		--env HMREC_SERVING_POLL_SECONDS=$(SERVING_POLL_SECONDS) \
+		$(SERVICE_IMAGE)
+
+## serve: the service on this machine, without a container (stop with Ctrl-C)
+# --no-access-log: uvicorn's access log prints the path, which holds the customer id.
+serve:
+	HMREC_SERVING_STATE_ROOT="$(PIPELINE_STATE)" HMREC_SERVING_POLL_SECONDS=$(SERVING_POLL_SECONDS) \
+		uv run uvicorn $(SERVING_APP) --factory --host 127.0.0.1 --port $(SERVING_PORT) --no-access-log
+
+## serving-set: the serving form of a published prediction set (ARGS="--anchor YYYY-MM-DD")
+serving-set:
+	uv run python scripts/m14_serving_set.py $(ARGS)
+
+## rollback: move the `current` pointer (ARGS="--to previous", "--to next" or "--to YYYY-MM-DD")
+rollback:
+	uv run python scripts/m14_rollback.py $(ARGS)
 
 # ---------------------------------------------------------------- M11 versioning
 # docs/mlops.md §7. DVC and MLflow are in dependency groups of their own ("versioning",

@@ -1,0 +1,21 @@
+# What may enter the build of the service image (Dockerfile.serving; docs/mlops.md §9).
+#
+# An allow-list of its own, much shorter than .dockerignore: the service needs five
+# source files and the two files that pin its dependencies. Everything else is excluded,
+# also the rest of src/hmrec/.
+*
+
+!pyproject.toml
+!uv.lock
+!src/
+src/*
+!src/hmrec/
+src/hmrec/*
+!src/hmrec/__init__.py
+!src/hmrec/serving_set.py
+!src/hmrec/structured_logs.py
+!src/hmrec/serving/
+
+**/__pycache__/
+**/*.py[cod]
+**/.DS_Store
