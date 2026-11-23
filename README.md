@@ -1,7 +1,77 @@
 # hmrec — H&M personalized fashion recommendation
 
-**Full report:** [`docs/final_report.md`](docs/final_report.md). This page is the summary (§1 of
-the report).
+**Full report:** [`docs/final_report.md`](docs/final_report.md). This page is the project at a
+glance, then the summary of the report (§1), then how to install, get the data and run it.
+
+## At a glance
+
+**What it is.** A two-stage recommender for the Kaggle H&M dataset: six recall channels, 71
+features and one LightGBM LambdaMART ranker predict the 12 articles each customer buys next
+week. It was built under a strict offline protocol (16 weekly folds; every selection is locked
+before the next phase; the final test weeks were run once), compared with a DeepFM ranker, and
+then turned into a weekly pipeline that runs in a container and on Google Cloud with a serving
+endpoint, alerts and deployment by tag.
+
+| Stage | What was done | Headline result |
+|---|---|---|
+| **1. The system** (M0–M8) | Six recall channels, 71 features, a LambdaMART ranker; recall and ranker selected on separate weeks and locked; final evaluation on four held-out weeks, run once | Pooled MAP@12 on T1–T4 **0.039194** against 0.021154 for the RRF baseline; all three goals fixed in advance are met. One Kaggle late submission: Private 0.03600, **not an official rank** (see "Summary") |
+| **2. DeepFM** (M9) | A DeepFM ranker on the same candidates, features and training rows | The two rankers cannot be told apart: 0.039341 against 0.039194 on T1–T4, and both 95% intervals of the difference include zero. The system keeps LambdaMART |
+| **3. MLOps on Google Cloud** (M10–M15) | The same system as one weekly command in a pinned container image; DVC and run manifests; a Cloud Run job with a scheduler; a serving endpoint; alert policies; CI, and deployment by tag without a stored key | Eight weeks replayed on two platforms: every weekly recall and MAP@12 is within 1.0% of the stage-1 record (pooled MAP@12 0.035948 in the arm64 container and 0.035893 on Cloud Run against 0.035933). The service: p95 0.77 ms inside the service, cold start 6.0 and 6.3 s; a rollback reached it in 41 s; a deployment by tag took under 3 minutes; about 4.15 USD of compute at list prices |
+
+**The architecture of stage 3** (`docs/final_report.md` §11.2 says what each part is for):
+
+```mermaid
+flowchart LR
+    subgraph Dev["Laptop"]
+        G["git repository"]
+        ML["MLflow UI (local view)"]
+    end
+    subgraph GH["GitHub Actions"]
+        CI["every push: image, lint, tests"]
+        CD["on a tag: build, push, deploy"]
+    end
+    subgraph GCP["Google Cloud, one region"]
+        AR["Artifact Registry<br/>two images"]
+        SCH["Cloud Scheduler<br/>weekly, paused"]
+        JOB["Cloud Run job<br/>the weekly tick"]
+        subgraph GCS["one bucket"]
+            IN["inputs/<br/>data, bootstrap state"]
+            ST["pipeline/<br/>state, models, prediction sets,<br/>run manifests, current pointer"]
+            DVC["dvc/<br/>DVC remote"]
+        end
+        SVC["Cloud Run service<br/>recommendation API"]
+        MON["Cloud Logging and Monitoring<br/>alert policies, email"]
+    end
+    G --> CI
+    G --> CD
+    CD -- "Workload Identity Federation, no key" --> AR
+    CD --> JOB
+    CD --> SVC
+    SCH --> JOB
+    AR --> JOB
+    AR --> SVC
+    IN --> JOB
+    JOB --> ST
+    ST -- "read-only" --> SVC
+    JOB --> MON
+    SVC --> MON
+    ST -- "small records" --> ML
+```
+
+**The limits, in four lines.**
+
+- Everything is offline: there is no live traffic, no online experiment, and no evidence about
+  business impact. The online experiment is a written design, not a result
+  ([`docs/stage3_designs.md`](docs/stage3_designs.md)).
+- The final result is one run with one seed on four weeks that have since been used; the scores
+  carry a seasonal component (T is 19.8% above V).
+- The stage-3 replay verifies that the pipeline reproduces the system; it is not a new
+  evaluation. Alerting was shown by provoked drills, not by months of operation.
+- The Kaggle score comes from a late submission and is not an official rank.
+
+**Where to go from here.** Results and limitations: [`docs/final_report.md`](docs/final_report.md)
+(stage 3 is §11). How to reproduce: "Install", "Data" and "Milestones and scripts" below. How it
+was built: "How this project was built" below. The data are not in this repository ("Data").
 
 ## Summary
 
@@ -66,10 +136,11 @@ on V and LambdaMART cannot be told apart: pooled MAP@12 0.032765 against 0.03270
 Private 0.03588 against 0.03600 (−0.33%, inside the band of 1% fixed before the run; one late
 submission, seed 42). "Cannot be told apart" does not mean that the two are equal.
 
-**Stage 3 (in progress): MLOps on GCP.** The same system as a weekly pipeline that runs without a
-person: in a container, on a schedule, with versioned inputs, recorded runs, a serving endpoint and
-alerts. It changes how the system runs, not what it computes. Design:
-[`docs/mlops.md`](docs/mlops.md).
+**Stage 3 (closed 2026-11-23): MLOps on GCP.** The same system as a weekly pipeline that runs
+without a person: in a container, on a schedule, with versioned inputs, recorded runs, a serving
+endpoint and alerts. It changes how the system runs, not what it computes. Report: §11 of
+[`docs/final_report.md`](docs/final_report.md); design and full record:
+[`docs/mlops.md`](docs/mlops.md). Milestone by milestone:
 
 - **M10, container and CI: done (2026-11-22).** One image builds from the repository alone and
   carries its commit and the hash of its code tree; CI builds the x86-64 image on every push and
@@ -127,7 +198,14 @@ alerts. It changes how the system runs, not what it computes. Design:
   alerts were provoked once each in a separate state. A tag `deploy-*` builds both images and
   updates the job and the service from digests, without a stored key (2 min 45 s). The
   milestone used about 0.11 USD. Measurements: `docs/mlops.md` §9.1, §10.1, §11.
-- **M15** (close): not started.
+- **M15, close: done (2026-11-23).** The report has a section on stage 3 (§11: architecture,
+  results, run times and cost next to the estimates, a runbook, limitations), and the designs
+  that were written and not implemented are in [`docs/stage3_designs.md`](docs/stage3_designs.md)
+  (an online experiment, online metrics, a rule for re-selecting hyperparameters, what a
+  production version would change). The user confirmed that the alert emails of the M14 drills
+  arrived. **The cloud was not torn down**: by the user's decision it is kept as a small live demo
+  (nothing bills by the hour; at most about 1 USD a month at rest) and is torn down later with
+  `infra/teardown.sh` ([`infra/README.md`](infra/README.md), "The demo state").
 
 **Three things to know when reading these numbers:**
 
@@ -154,8 +232,11 @@ code that Claude wrote.
 
 The only design reference is [`docs/proposal.md`](docs/proposal.md). Design changes are logged in
 [`docs/decisions.md`](docs/decisions.md). Results and their limitations are in the final report,
-[`docs/final_report.md`](docs/final_report.md). The design of stage 3 (MLOps on GCP, in progress)
-is [`docs/mlops.md`](docs/mlops.md). Rules for coding agents are in [`AGENTS.md`](AGENTS.md).
+[`docs/final_report.md`](docs/final_report.md). The design and the record of stage 3 (MLOps on
+GCP, closed on 2026-11-23) is [`docs/mlops.md`](docs/mlops.md); the designs of stage 3 that were
+written and not implemented are [`docs/stage3_designs.md`](docs/stage3_designs.md); the cloud
+set-up and the demo state are [`infra/README.md`](infra/README.md). Rules for coding agents are
+in [`AGENTS.md`](AGENTS.md).
 
 The documents are in English only; no translation is maintained (AGENTS.md §11). The proposal, the
 decision log and `AGENTS.md` were written in Chinese up to tag `v0.1` and were then translated.
@@ -427,5 +508,6 @@ The main entry point of each milestone. See proposal §11 for the milestones and
 | M12 | The weekly pipeline and its replay | `scripts/weekly.py --anchor DATE --mode eval\|serve`, `scripts/m12_replay_compare.py` |
 | M13 | The pipeline on Cloud Run: image workflow, job, scheduler, calibration of x86-64, replay | `infra/setup.sh`, `infra/operate.sh`, `scripts/m13_volume_check.py`, `scripts/m13_record_execution.py` |
 | M14 | The recommendation service, rollback, alert lines and policies, deployment on a tag | `make serve`, `scripts/m14_serving_set.py`, `scripts/m14_rollback.py`, `scripts/m14_probe_service.py`, `.github/workflows/deploy.yml` |
+| M15 | Close of stage 3: the report's section on stage 3, the written designs, the cloud left as a demo | `docs/final_report.md` §11, `docs/stage3_designs.md`, `infra/README.md` |
 
 Copyright (c) 2026 Haokun Liu. All rights reserved.
