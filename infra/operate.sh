@@ -368,7 +368,7 @@ print(max(values) if values else "no data")'
     echo "records of ${prefix} are in ${target}"
     ;;
   state-size)
-    for prefix in "$INPUTS_PREFIX" "$STATE_PREFIX" "${STATE_PREFIX}-calibration" dvc; do
+    for prefix in "$INPUTS_PREFIX" "$STATE_PREFIX" "${STATE_PREFIX}-calibration" "$DRILL_PREFIX" dvc; do
       g storage du --summarize "gs://${BUCKET}/${prefix}" || true
     done
     ;;
