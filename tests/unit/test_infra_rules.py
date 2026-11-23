@@ -290,6 +290,9 @@ def test_setup_has_one_alert_policy_for_each_kind_of_alert_line() -> None:
     # One more policy: a failed execution of the job (a metric, not a log line).
     assert 'metric.type = "run.googleapis.com/job/completed_execution_count"' in text
     assert 'metric.labels.result = "failed"' in text
+    # One failed execution opens an incident at once: no waiting time. The API refuses
+    # `evaluationMissingData` on a condition whose duration is zero, so it is not set.
+    assert '"duration": "0s"' in text and "evaluationMissingData" not in text
     # One email channel, from ALERT_EMAIL; no other kind of channel.
     assert text.count('"type": "email"') == 1 and '"$ALERT_EMAIL"' in text
     # teardown removes the policies and the channel again.

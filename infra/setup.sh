@@ -419,7 +419,6 @@ policy = {
                 "thresholdValue": 0,
                 "duration": "0s",
                 "trigger": {"count": 1},
-                "evaluationMissingData": "EVALUATION_MISSING_DATA_INACTIVE",
             },
         }
     ],
