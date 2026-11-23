@@ -17,6 +17,71 @@ file, no commit message, no workflow file and no published log
 (`tests/unit/test_infra_rules.py` checks the tracked files on a machine that has an
 `infra/.env`).
 
+## The demo state (from 2026-11-23)
+
+Stage 3 was closed on 2026-11-23 **without tearing the cloud down** (the user's decision,
+`docs/decisions.md`): what was built is kept as a small live demo and is torn down later with
+`teardown.sh` (section 7). Nothing bills by the hour: no execution runs, the service scales
+to zero, the scheduler job is paused, and the billing budget with its alerts stays.
+
+**What exists** (listed on 2026-11-23, after the calibration state and the drill states were
+deleted):
+
+| Resource | State | Cost per month at rest |
+|---|---|---|
+| Cloud Run job of the weekly pipeline (16 executions) | no execution running | nothing |
+| Cloud Run service of the recommendation API, minimum instances 0 | no instance without a request | nothing |
+| Cloud Scheduler job, weekly | **paused** | nothing |
+| Bucket: `inputs/` 2.27 GiB, `pipeline/` 27.31 GiB, `dvc/` 5.59 GiB (35.17 GiB) | kept | about 0.70 USD (0.020 USD per GiB-month) |
+| Images: five of the pipeline (635 to 640 MB each) and two of the service (70 MB each), 3.33 GB as the sum | kept | at most 0.28 USD (0.10 USD per GB-month above the first 0.5 GB, if no layer were shared) |
+| One email notification channel, five alert policies, the billing budget | enabled | nothing |
+| Five service accounts, one custom role, a workload identity pool and provider | kept | nothing |
+
+**At most about 1 USD a month**, computed from these sizes and the list prices read on
+2026-11-22; the bill was not read. A request to the service starts an instance for some
+minutes (a fraction of a cent); an execution of the job costs about 0.25 USD per `eval`
+tick. Do not start a tick or resume the scheduler job for a demo: the state is the record of
+the replay.
+
+**How to show it** (as the operator; every command only reads, except the call, which starts
+an instance of the service):
+
+```bash
+bash infra/operate.sh call "/v1/recommendations/$(uv run python -c "import polars as pl; print(pl.read_parquet('data/processed/customer_id_map.parquet')['customer_id'][0])")"
+bash infra/operate.sh call /v1/recommendations/nobody     # an unknown customer: "source": "fallback"
+bash infra/operate.sh call /v1/health                     # the served set, its size, the image's commit
+bash infra/operate.sh status                              # the job and its 16 executions, the service, the paused scheduler job, the images
+bash infra/operate.sh pointer                             # state/current.json: the prediction set of 2020-09-23
+bash infra/operate.sh state-size                          # the prefixes of the bucket
+bash infra/operate.sh alert-lines 30d                     # the alert lines of the drills, while Cloud Logging keeps them
+bash infra/operate.sh incidents                           # the incidents the alert policies opened
+make mlflow-ui                                            # the local MLflow view: the runs of both replays, the model registry mirror
+```
+
+The alert policies and the notification channel are under Monitoring → Alerting in the
+console of the project; the workflow runs (CI, image, deploy) are on the repository's
+Actions page. The layout of the bucket is in section 5; what each tick wrote is in
+`docs/mlops.md` §7.2.
+
+**Images that are not deployed.** The job and the service run one image each; the other
+five are kept only as history. `bash infra/operate.sh images-not-deployed` lists them
+(read-only). The owner can delete them with:
+
+```bash
+( . infra/.env; bash infra/operate.sh images-not-deployed | while read -r image; do gcloud artifacts docker images delete "$image" --project "$PROJECT_ID" --delete-tags --quiet; done )
+```
+
+One of the five is the image that ran the replay on Cloud Run (commit `07220a7`): the run
+manifests of the replay name its digest, and after this command that digest can no longer
+be pulled. With only the two deployed images left, the images cost about 0.02 USD a month.
+A new tag `deploy-*` or `v*` builds two new images and makes the two that are deployed now
+"not deployed".
+
+**How to tear it down later**: section 7 (`bash infra/teardown.sh`, and with
+`--delete-objects` also the pipeline's prefixes of the bucket). The bucket itself, the DVC
+data, the operator account and the budget are not removed by any script; delete the bucket
+or the project by hand when nothing of it is needed any more.
+
 ## Before anything: the budget
 
 A billing budget with alerts must exist on the project before the first job runs
@@ -221,7 +286,10 @@ free, and a paused job counts as a job).
 calibration state 5.4, inputs 2.3), about 0.81 USD a month; the two images of 635 MB cost at
 most 0.07 USD a month; the job, the paused scheduler job and the accounts cost nothing.
 
-**After M14** (`docs/mlops.md` §12): the bucket holds 43.8 GiB (state 27.3, DVC remote 5.6,
+**After M15**: see "The demo state" at the top (35.17 GiB, about 0.70 USD a month, after the
+calibration state and the drill states were deleted).
+
+**After M14** (`docs/mlops.md` §12): the bucket held 43.8 GiB (state 27.3, DVC remote 5.6,
 calibration state 5.4, drill states 3.2, inputs 2.3), about 0.88 USD a month; five pipeline
 images and two service images cost at most 0.3 USD a month; the job, the service without
 an instance, the paused scheduler job, the channel, the policies and the accounts cost

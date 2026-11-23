@@ -73,6 +73,12 @@
 #     bash infra/operate.sh drill-list [key of the drill prefix]
 #     bash infra/operate.sh alert-lines [freshness]     the alert lines of jobs and services (default: 1d)
 #     bash infra/operate.sh incidents                   the incidents the alert policies opened
+#     bash infra/operate.sh images-not-deployed         the images neither the job nor the service runs
+#                                                       (read-only; the owner may delete them)
+#     bash infra/operate.sh list-prefix <calibration|drill>     objects and bytes below the calibration
+#                                                       prefix or the drill prefix
+#     bash infra/operate.sh delete-prefix <calibration|drill>   delete the objects below one of these two
+#                                                       prefixes (no other prefix can be named)
 #     bash infra/operate.sh download-check-files <anchor>      the prediction file and R1's score
 #                                                       table of a tick (tens of MB at most), to
 #                                                       artifacts/m14_cloud/<anchor>/, for checking
@@ -586,6 +592,45 @@ for alert in answer.get("alerts", []):
       "$target/r1_bucket_scores.parquet"
     echo "check files of ${anchor} are in ${target}"
     ;;
+  images-not-deployed)
+    # Read-only: every image of the two repositories that neither the job nor the
+    # service runs, one "<image>@<digest>" per line. The owner may delete these
+    # (infra/README.md); this script deletes no image.
+    job_image="$(g run jobs describe "$JOB_NAME" --region "$REGION" \
+      --format 'value(spec.template.spec.template.spec.containers[0].image)' 2>/dev/null)"
+    service_image="$(g run services describe "$SERVICE_NAME" --region "$REGION" \
+      --format 'value(spec.template.spec.containers[0].image)' 2>/dev/null)"
+    for image in "$IMAGE_REPOSITORY" "$SERVICE_IMAGE_REPOSITORY"; do
+      for digest in $(g artifacts docker images list "$image" --format 'value(version)' 2>/dev/null); do
+        if [ "${image}@${digest}" != "$job_image" ] && [ "${image}@${digest}" != "$service_image" ]; then
+          echo "${image}@${digest}"
+        fi
+      done
+    done
+    ;;
+  list-prefix)
+    which="${1:?give calibration or drill}"
+    case "$which" in
+      calibration) prefix="${STATE_PREFIX}-calibration" ;;
+      drill) prefix="$DRILL_PREFIX" ;;
+      *) echo "give calibration or drill"; exit 1 ;;
+    esac
+    # Number of objects and bytes below the prefix ("0 objects" if there is none).
+    g storage ls --recursive --long "gs://${BUCKET}/${prefix}/**" 2>/dev/null |
+      awk '$1 ~ /^[0-9]+$/ {n += 1; bytes += $1} END {printf "%d objects, %d bytes\n", n, bytes}'
+    ;;
+  delete-prefix)
+    # Removes the objects of ONE of two prefixes that hold no record of the replay: the
+    # calibration state of M13 and the drill states of M14. No other prefix can be named:
+    # the state, the inputs and the DVC data are never deleted from here.
+    which="${1:?give calibration or drill}"
+    case "$which" in
+      calibration) prefix="${STATE_PREFIX}-calibration" ;;
+      drill) prefix="$DRILL_PREFIX" ;;
+      *) echo "give calibration or drill"; exit 1 ;;
+    esac
+    g storage rm --recursive "gs://${BUCKET}/${prefix}/"
+    ;;
   delete-drill)
     g run services delete "$DRILL_SERVICE_NAME" --region "$REGION" --quiet || true
     g run jobs delete "$DRILL_JOB_NAME" --region "$REGION" --quiet || true
@@ -607,7 +652,7 @@ for alert in answer.get("alerts", []):
     g auth print-access-token
     ;;
   *)
-    sed -n '2,86p' "$0"
+    sed -n '2,92p' "$0"
     exit 1
     ;;
 esac
